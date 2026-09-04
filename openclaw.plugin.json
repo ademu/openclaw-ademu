@@ -3,7 +3,7 @@
   "name": "Ademú",
   "description": "Ademú channel plugin for OpenClaw — end-to-end encrypted messaging with your agent, from your phone.",
   "activation": {
-    "onStartup": false
+    "onStartup": true
   },
   "channels": [
     "ademu"

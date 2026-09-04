@@ -405,6 +405,18 @@ acceptance and E2E use.
 required `ci-gate`. `beta.yml`'s first run is a `workflow_dispatch` after the merge (the workflow must
 exist on the default branch to be dispatchable).
 
+**E2E finding #1 (owner's Hetzner VPS, Linux, 2026-09-04) — the chat door was unreachable on a fresh
+install.** "I want to talk to you on Ademú" in the TUI made the agent web-search Ademú instead of
+calling `ademu_enroll`: the manifest declared `activation.onStartup: false`, and OpenClaw loads a
+startup-lazy channel plugin only when `channels.<id>` is already configured
+(`gateway-startup-plugin-config.ts` `shouldConsiderForGatewayStartup`/`hasConfiguredStartupChannel`), so
+before the first account exists the gateway never imported the plugin — no tool, no skill. The wizard
+door was unaffected (the setup flow loads the plugin explicitly). Fix: `activation.onStartup: true`,
+pinned by `test/gates/manifest-activation.test.ts`. Cost: none beyond registering the tool and the
+lease service — with zero accounts `server-channels.ts` starts nothing (`listAccountIds` empty → return),
+and `registerFull` opens neither SQLite nor a daemon (entries test). The headless acceptance had not
+caught this because it seeds an account before inspecting (V14/R8).
+
 **Repo gates (T21):** ruleset "main gate" id 22259787 (PR required / 0 reviews, no force-push or
 deletion, required check `ci-gate`, admin bypass); Issues enabled. **Monorepo pointer PR (T22):**
 ademu/AdemuMLS#221.
