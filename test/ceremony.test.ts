@@ -326,6 +326,31 @@ describe("ceremony: EnrollmentLease", () => {
     expect(lease.signal.aborted).toBe(true);
   });
 
+  it("R7#2 concurrent dispose calls JOIN the one cleanup in progress (all await the release)", async () => {
+    const w = leaseWorld();
+    let releaseClose!: () => void;
+    const slow = new Promise<void>((r) => {
+      releaseClose = r;
+    });
+    w.control.close = async () => {
+      w.control.closed++;
+      await slow;
+    };
+    const lease = await createEnrollmentLease({ deps: w.deps, accountId: "iris", identity: {} as never, server: { restBaseUrl: "r", wsUrl: "w" }, beforeEffect: async () => {} });
+    let secondDone = false;
+    const first = lease.dispose("a");
+    const second = lease.dispose("b").then(() => {
+      secondDone = true;
+    });
+    await tick();
+    expect(secondDone).toBe(false); // the second caller waits for the cleanup, it does not return early
+    releaseClose();
+    await Promise.all([first, second]);
+    expect(w.released()).toBe(1);
+    expect(w.control.closed).toBe(1);
+    expect(w.disposed).toEqual(["a"]);
+  });
+
   it("does not cancel pairing once the device is terminal; the TTL timer disposes with reason expired", async () => {
     const w = leaseWorld();
     const lease = await createEnrollmentLease({ deps: w.deps, accountId: "iris", identity: {} as never, server: { restBaseUrl: "r", wsUrl: "w" }, beforeEffect: async () => {}, ttlMs: 5 });

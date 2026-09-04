@@ -332,6 +332,31 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.released()).toBe(1);
   });
 
+  it("R7#2 plugin shutdown waits for a background disposal that is still running", async () => {
+    const w = world();
+    let releaseClose!: () => void;
+    const slow = new Promise<void>((r) => {
+      releaseClose = r;
+    });
+    w.control.close = async () => {
+      w.control.closed++;
+      await slow;
+    };
+    await w.call({ action: "start", agentName: "Iris" });
+    w.control.finish("revoked"); // background terminal → disposal starts (and blocks on close)
+    await tick(5);
+    expect(w.registry.size).toBe(0);
+    let allDone = false;
+    const all = w.registry.disposeAll("plugin-stop").then(() => {
+      allDone = true;
+    });
+    await tick(5);
+    expect(allDone).toBe(false); // still waiting on the background cleanup
+    releaseClose();
+    await all;
+    expect(w.released()).toBe(1);
+  });
+
   it("R2#8 axes compare exactly (absent → present is a mismatch) and only the same creator tuple may supersede", async () => {
     const w = world();
     const start = await w.call({ action: "start", agentName: "Iris" }, NO_AXES);

@@ -108,10 +108,17 @@ export class EnrollmentRegistry {
     for (const e of this.#active.values()) if (e.sessionKey === sessionKey) return e;
     return undefined;
   }
+  readonly #pending = new Set<Promise<void>>();
+  /** Background disposals stay tracked until they settle, so plugin shutdown waits for them too. */
+  track(disposal: Promise<void>): void {
+    const p = disposal.catch(() => {});
+    this.#pending.add(p);
+    void p.finally(() => this.#pending.delete(p));
+  }
   async disposeAll(reason: string): Promise<void> {
     const all = [...this.#active.values()];
     this.#active.clear();
-    await Promise.all(all.map((e) => e.lease.dispose(reason)));
+    await Promise.all([...all.map((e) => e.lease.dispose(reason)), ...this.#pending]);
   }
   get size(): number {
     this.#prune();
@@ -331,7 +338,7 @@ async function startWithLease(p: {
           // revoked / retired in the background: release the resources NOW, not at TTL.
           entry.state = "failed";
           p.registry.forget(entry);
-          void lease.dispose("pairing-ended").catch(() => {});
+          p.registry.track(lease.dispose("pairing-ended"));
         }
         return last;
       },
@@ -340,7 +347,7 @@ async function startWithLease(p: {
         entry.state = "failed";
         if (!lease.disposed) {
           p.registry.forget(entry);
-          void lease.dispose("poll-failed").catch(() => {});
+          p.registry.track(lease.dispose("poll-failed"));
         }
         throw err;
       },

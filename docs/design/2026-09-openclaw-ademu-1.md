@@ -110,8 +110,10 @@ B is valid in both tiers. Two asks: a terminal disposition on `ChannelTurnResult
 **Identity.** A daemon is identified by the canonicalized pair `(dataDir, controlSocket)` (realpath of
 the deepest existing ancestor + verbatim tail, because Ademú joins paths verbatim). Cross-axis
 collisions across accounts (one data dir with two sockets, one socket for two data dirs) are a config
-validation error that blocks `startAccount`. The **session** socket is always what `daemon_info`
-reports, never derived.
+validation error that blocks `startAccount`. The **session** socket is what `daemon_info`
+reports whenever a daemon is reachable — never re-derived then (a squatter on a derived path would
+receive the bearer token); only an *unreachable* foreign acquisition keeps the deterministic configured
+path, and its session connect then fails until the daemon answers.
 
 **Default isolation (approval rider R2).** Default `dataDir` = `<OPENCLAW_STATE_DIR>/ademu/adc`,
 control socket `<dataDir>/adc.sock`, session socket `<dataDir>/adc-session.sock`. Every owned spawn
@@ -335,6 +337,10 @@ the failure-first path as well; a poll aborted by `cancel` reports `cancelled`.
 gateway signal gains none across repeated failing opens); the memoized close and the real supersession
 path have their own tests — the latter exposed that a cancelled enrollment could forget its successor's
 registry entry by device id, now `forget(entry)` removes an entry only while it is still current.
+
+**Round 7 (1 MEDIUM + 2 LOW, all folded):** the daemon probe is abortable at every stage (an account stop
+is never held by an unresponsive control socket); enrollment-lease disposal is memoized so later callers
+join the running cleanup, and background disposals are tracked so plugin shutdown waits for them.
 
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its

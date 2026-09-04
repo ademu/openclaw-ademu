@@ -252,16 +252,32 @@ export class DaemonManager {
 
   // ------------------------------------------------------------------ probing
 
-  async #probe(controlSocket: string, identity: DaemonIdentity): Promise<Probe | undefined> {
+  /**
+   * Probe the control socket. Every stage is raced against the acquisition signal: an abort during
+   * a slow hello / daemon_info throws DaemonAbortedError at once (a late connection is closed), so
+   * an account stop is never held past its budget by an unresponsive daemon.
+   */
+  async #probe(controlSocket: string, identity: DaemonIdentity, signal?: AbortSignal): Promise<Probe | undefined> {
+    if (signal?.aborted) throw new DaemonAbortedError();
     let control: ControlLike | undefined;
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(new DaemonAbortedError());
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    aborted.catch(() => {});
     try {
-      control = await this.#deps.connectControl(controlSocket);
-      const info = await control.daemonInfo();
+      const connecting = this.#deps.connectControl(controlSocket);
+      connecting.then((c) => (control = c)).catch(() => {});
+      control = await Promise.race([connecting, aborted]);
+      const info = await Promise.race([control.daemonInfo(), aborted]);
       return { info, matches: infoMatchesIdentity(info, identity) };
-    } catch {
+    } catch (err) {
+      if (err instanceof DaemonAbortedError) throw err;
       return undefined;
     } finally {
-      await control?.close().catch(() => {});
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+      void control?.close().catch(() => {});
     }
   }
 
@@ -404,7 +420,7 @@ export class DaemonManager {
       const row = store.getOwnership(identity.dataDir);
 
       if (!row) {
-        const probe = await this.#probe(identity.raw.controlSocket, identity);
+        const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
         if (probe) return this.#foreignLease(params, holderId, probe.info);
         if (!this.#deps.isDirAbsentOrEmpty(identity.raw.dataDir)) return this.#foreignLease(params, holderId, undefined);
         // An EXISTING empty dir must be ours and private before we put a daemon's state in it
@@ -431,7 +447,7 @@ export class DaemonManager {
       switch (row.state) {
         case "bound":
         case "pending-publication": {
-          const probe = await this.#probe(identity.raw.controlSocket, identity);
+          const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
           if (probe?.matches && !this.#verifyOwnedInstance(row, probe.info)) {
             // Paths match but the instance facts do not: a replacement daemon on our sockets. Attach
             // only — never stop, never upgrade. The row keeps the last facts we could prove.
@@ -462,7 +478,7 @@ export class DaemonManager {
           // Reclaim an orphaned claim/start by generation CAS.
           const starting = this.#toStarting(identity, [row.state], row.generation);
           if (!starting) continue;
-          const probe = await this.#probe(identity.raw.controlSocket, identity);
+          const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
           if (probe) {
             // A listener answers after an orphaned claim/start. Nothing correlates that listener to
             // the pid the crashed starter recorded (daemon_info carries no pid), so we can never
@@ -485,7 +501,7 @@ export class DaemonManager {
         }
         case "stopped":
         case "stale": {
-          const probe = await this.#probe(identity.raw.controlSocket, identity);
+          const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
           if (probe?.matches && this.#verifyOwnedInstance(row, probe.info)) {
             const bound = store.cas({ dataDir: identity.dataDir, from: [row.state], to: "bound", expectedGeneration: row.generation });
             if (bound) return await this.#ownedLease(params, holderId, bound, probe.info, undefined);
@@ -636,11 +652,11 @@ export class DaemonManager {
     if (!result.spawned) {
       // A listener won the probe-then-spawn race: it is not ours.
       store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
-      const probe = await this.#probe(identity.raw.controlSocket, identity);
+      const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
       return this.#foreignLease(params, holderId, probe?.info);
     }
 
-    const probe = await this.#probe(identity.raw.controlSocket, identity);
+    const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
     if (!probe) {
       throw new DaemonUnreachableError(`the Ademú device host started but its control socket did not answer; see ${result.logPath}`, result.logPath);
     }
@@ -708,7 +724,7 @@ export class DaemonManager {
         if (upgraded.kind === "failed") {
           // We claimed the stop and it did not complete: the row is `stale` and whatever answers on
           // the socket is no longer proven ours — attach foreign, or fail recoverably if nothing answers.
-          const probe = await this.#probe(identity.raw.controlSocket, identity);
+          const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
           if (probe) return this.#foreignLease(params, holderId, probe.info);
           throw new DaemonUnreachableError("the Ademú device host could not be upgraded and no longer answers; check the daemon log", undefined);
         }

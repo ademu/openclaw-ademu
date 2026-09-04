@@ -765,6 +765,28 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(m.activeLeases).toBe(0);
   });
 
+  it("R7#1 an abort during a stalled daemon_info probe rejects at once (DaemonAbortedError), removes the holder, spawns nothing", async () => {
+    const w = new World();
+    w.addDaemon(DIR);
+    const deps = w.deps();
+    let closes = 0;
+    const m = new DaemonManager({
+      ...deps,
+      connectControl: async (socketPath) => {
+        const c = await deps.connectControl(socketPath);
+        return { ...c, daemonInfo: () => new Promise(() => {}), close: async () => void closes++ };
+      },
+    });
+    const ac = new AbortController();
+    const acquiring = m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime", signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    ac.abort();
+    await expect(acquiring).rejects.toBeInstanceOf(DaemonAbortedError);
+    expect(w.store.listHolders(DIR)).toHaveLength(0);
+    expect(w.spawns).toHaveLength(0);
+    expect(closes).toBe(1); // the stalled connection is closed
+  });
+
   it("#9 an orphaned `stopping` row is recovered when the stopper is dead OR its deadline passed; our live instance has its stop RESUMED", async () => {
     // (a) live stopper, expired deadline → recovered, stop resumed (shutdown op sent), then respawn
     const a = new World();

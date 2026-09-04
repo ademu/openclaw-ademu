@@ -318,24 +318,26 @@ export async function createEnrollmentLease(params: {
     expiresAt: deps.now() + ttl,
     terminal: false,
     disposed: false,
-    dispose: async (reason: string) => {
-      if (lease.disposed) return;
-      lease.disposed = true;
-      deps.clearTimer(timer);
-      abort.abort();
-      try {
-        if (lease.deviceId && !lease.terminal) {
-          await control.cancelPairing({ device_id: lease.deviceId }, { timeoutMs: 2000 }).catch(() => {});
-        }
-      } finally {
-        try {
-          await control.close().catch(() => {});
-        } finally {
-          await daemonLease.release().catch(() => {});
-          deps.onDisposed?.(lease, reason);
-        }
+    // Memoized: every caller (first or later) awaits the SAME cleanup; nobody returns early while it runs.
+    dispose: (reason: string) => (disposing ??= runDispose(reason)),
+  };
+  let disposing: Promise<void> | undefined;
+  const runDispose = async (reason: string): Promise<void> => {
+    lease.disposed = true;
+    deps.clearTimer(timer);
+    abort.abort();
+    try {
+      if (lease.deviceId && !lease.terminal) {
+        await control.cancelPairing({ device_id: lease.deviceId }, { timeoutMs: 2000 }).catch(() => {});
       }
-    },
+    } finally {
+      try {
+        await control.close().catch(() => {});
+      } finally {
+        await daemonLease.release().catch(() => {});
+        deps.onDisposed?.(lease, reason);
+      }
+    }
   };
   const timer = deps.setTimer(() => void lease.dispose("expired"), ttl);
   return lease;
