@@ -357,6 +357,33 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.released()).toBe(1);
   });
 
+  it("R8#4 a TTL-expiry disposal is tracked: a status lookup prunes the entry, and plugin stop still waits for the cleanup", async () => {
+    const w = world();
+    let releaseClose!: () => void;
+    const slow = new Promise<void>((r) => {
+      releaseClose = r;
+    });
+    w.control.close = async () => {
+      w.control.closed++;
+      await slow;
+    };
+    const start = await w.call({ action: "start", agentName: "Iris" });
+    const leaseToken = start.details.leaseToken as string;
+    w.timers[0]!.fn(); // TTL fires → disposal starts and blocks on close
+    const status = await w.call({ action: "status", leaseToken }); // prunes the disposed entry
+    expect(status.details.ok).toBe(false);
+    expect(w.registry.size).toBe(0);
+    let allDone = false;
+    const all = w.registry.disposeAll("plugin-stop").then(() => {
+      allDone = true;
+    });
+    await tick(5);
+    expect(allDone).toBe(false);
+    releaseClose();
+    await all;
+    expect(w.released()).toBe(1);
+  });
+
   it("R2#8 axes compare exactly (absent → present is a mismatch) and only the same creator tuple may supersede", async () => {
     const w = world();
     const start = await w.call({ action: "start", agentName: "Iris" }, NO_AXES);

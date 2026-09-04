@@ -266,10 +266,22 @@ export class DaemonManager {
       signal?.addEventListener("abort", onAbort, { once: true });
     });
     aborted.catch(() => {});
+    let abortWon = false;
     try {
       const connecting = this.#deps.connectControl(controlSocket);
-      connecting.then((c) => (control = c)).catch(() => {});
-      control = await Promise.race([connecting, aborted]);
+      // Late-success containment: a connection that resolves after abort won is closed, once.
+      connecting
+        .then((c) => {
+          if (abortWon) void c.close().catch(() => {});
+          else control = c;
+        })
+        .catch(() => {});
+      try {
+        control = await Promise.race([connecting, aborted]);
+      } catch (err) {
+        if (err instanceof DaemonAbortedError) abortWon = true;
+        throw err;
+      }
       const info = await Promise.race([control.daemonInfo(), aborted]);
       return { info, matches: infoMatchesIdentity(info, identity) };
     } catch (err) {
@@ -372,7 +384,7 @@ export class DaemonManager {
       // The daemon is `stopping`: wait for the transition (or recover an orphaned stop).
       const row = this.#deps.store.getOwnership(identity.dataDir);
       if (row?.state === "stopping" && (!this.#ownerAlive(row) || this.#expired(row))) {
-        await this.#recoverOrphanedStopping(row, identity);
+        await this.#recoverOrphanedStopping(row, identity, signal);
         continue;
       }
       if (this.#deps.now() > deadline) throw new DaemonBusyError("the Ademú device host is stopping; try again in a moment");
@@ -385,8 +397,8 @@ export class DaemonManager {
    * instance still answering → RESUME the stop under this generation; anything else answering → the
    * row is `stale` (we no longer own what listens there). Never `bound` on a path match alone.
    */
-  async #recoverOrphanedStopping(row: OwnershipRow, identity: DaemonIdentity): Promise<void> {
-    const probe = await this.#probe(identity.raw.controlSocket, identity);
+  async #recoverOrphanedStopping(row: OwnershipRow, identity: DaemonIdentity, signal?: AbortSignal): Promise<void> {
+    const probe = await this.#probe(identity.raw.controlSocket, identity, signal);
     let to: OwnershipState;
     let reason: string;
     if (!probe) {
@@ -496,7 +508,7 @@ export class DaemonManager {
             await this.#deps.sleep(WAIT_POLL_MS);
             continue;
           }
-          await this.#recoverOrphanedStopping(row, identity);
+          await this.#recoverOrphanedStopping(row, identity, params.signal);
           continue;
         }
         case "stopped":
@@ -639,7 +651,11 @@ export class DaemonManager {
               await this.#stopOwnedDaemon(identity, bound, holderId, "aborted start");
             }
           })
-          .catch(() => {});
+          .catch(() => {
+            // ensureDaemon rejected after our abort (spawnFn threw before any child existed): the
+            // exact `starting` generation must not linger until its deadline.
+            if (!child) store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+          });
         throw err;
       }
       store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });

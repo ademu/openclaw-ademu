@@ -342,6 +342,11 @@ registry entry by device id, now `forget(entry)` removes an entry only while it 
 is never held by an unresponsive control socket); enrollment-lease disposal is memoized so later callers
 join the running cleanup, and background disposals are tracked so plugin shutdown waits for them.
 
+**Round 8 (3 MEDIUM + 2 LOW, all folded):** the orphaned-`stopping` recovery probe honours the abort
+signal; a control connection resolving after an aborted probe is closed once; an abort before
+`ensureDaemon` reached its spawn drops the exact `starting` generation (no 20 s "still starting" after a
+restart); TTL-expiry disposals are tracked so plugin shutdown waits for them.
+
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its
 `package.json` (`ERR_PACKAGE_PATH_NOT_EXPORTED` at register time). Both fixed; the acceptance now

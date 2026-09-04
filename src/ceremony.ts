@@ -277,6 +277,8 @@ export type EnrollmentLeaseDeps = {
   setTimer: (fn: () => void, ms: number) => unknown;
   clearTimer: (handle: unknown) => void;
   onDisposed?: ((lease: EnrollmentLease, reason: string) => void) | undefined;
+  /** Called synchronously when a disposal starts (any path, TTL included) with its promise. */
+  onDisposing?: ((lease: EnrollmentLease, disposal: Promise<void>) => void) | undefined;
 };
 
 export const ENROLLMENT_TTL_MS = 3 * 60_000;
@@ -318,8 +320,16 @@ export async function createEnrollmentLease(params: {
     expiresAt: deps.now() + ttl,
     terminal: false,
     disposed: false,
-    // Memoized: every caller (first or later) awaits the SAME cleanup; nobody returns early while it runs.
-    dispose: (reason: string) => (disposing ??= runDispose(reason)),
+    // Memoized: every caller (first or later) awaits the SAME cleanup; nobody returns early while it
+    // runs. Whoever owns the lease (the tool registry) is told the moment a disposal STARTS — TTL
+    // expiry included — so plugin shutdown can wait for it.
+    dispose: (reason: string) => {
+      if (!disposing) {
+        disposing = runDispose(reason);
+        deps.onDisposing?.(lease, disposing);
+      }
+      return disposing;
+    },
   };
   let disposing: Promise<void> | undefined;
   const runDispose = async (reason: string): Promise<void> => {

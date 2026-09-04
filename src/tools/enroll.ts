@@ -131,6 +131,8 @@ function newLeaseToken(): string {
 }
 
 export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToolDeps, registry: EnrollmentRegistry) {
+  // Every lease disposal — including TTL expiry — is tracked by the registry so plugin shutdown waits for it.
+  deps.lease.onDisposing = (_lease, disposal) => registry.track(disposal);
   if (ctx.senderIsOwner !== true) return null;
   return {
     label: strings.enroll.toolLabel,

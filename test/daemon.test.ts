@@ -74,6 +74,8 @@ class World {
   spawnFailsToListen = false;
   /** When set, ensureDaemon resolves only after this promise (late-success containment tests). */
   ensureGate: Promise<void> | undefined;
+  /** When set, ensureDaemon's pre-spawn probe waits for this promise BEFORE calling spawnFn (abort-before-spawn tests). */
+  preSpawnGate: Promise<void> | undefined;
   platform = "darwin";
   bundledVersion = "0.2.4";
   selfPid = 100;
@@ -149,6 +151,7 @@ class World {
         const socket = deps.env!.ADC_SOCKET_PATH!;
         const base = { socketPath: socket, dataDir: dir, logPath: `${dir}/daemon.log` };
         if (this.daemons.get(socket)?.alive) return { spawned: false, ...base };
+        if (this.preSpawnGate) await this.preSpawnGate;
         const child = deps.spawnFn!(deps.binaryPath ?? "adc", ["daemon", "run"], { detached: true, stdio: ["ignore", 1, 1] });
         if (this.ensureGate) await this.ensureGate;
         return { spawned: true, pid: child.pid ?? undefined, ...base };
@@ -785,6 +788,79 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(w.store.listHolders(DIR)).toHaveLength(0);
     expect(w.spawns).toHaveLength(0);
     expect(closes).toBe(1); // the stalled connection is closed
+  });
+
+  it("R8#1 an abort during the orphaned-`stopping` recovery probe rejects at once", async () => {
+    const w = new World();
+    w.addDaemon(DIR);
+    w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
+    w.store.cas({ dataDir: DIR, from: ["claimed"], to: "stopping", bumpGeneration: true, set: { ownerPid: 999, ownerPidStartedAt: "gone", deadlineMs: w.clock - 1 } });
+    const deps = w.deps();
+    const m = new DaemonManager({
+      ...deps,
+      connectControl: async (socketPath) => {
+        const c = await deps.connectControl(socketPath);
+        return { ...c, daemonInfo: () => new Promise(() => {}) };
+      },
+    });
+    const ac = new AbortController();
+    const acquiring = m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime", signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    ac.abort();
+    await expect(acquiring).rejects.toBeInstanceOf(DaemonAbortedError);
+    expect(w.store.listHolders(DIR)).toHaveLength(0);
+    expect(w.spawns).toHaveLength(0);
+  });
+
+  it("R8#2 a control connection that resolves only AFTER the probe was aborted is closed exactly once", async () => {
+    const w = new World();
+    w.addDaemon(DIR);
+    const deps = w.deps();
+    let releaseConnect!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseConnect = r;
+    });
+    let closes = 0;
+    const m = new DaemonManager({
+      ...deps,
+      connectControl: async (socketPath) => {
+        await gate;
+        const c = await deps.connectControl(socketPath);
+        return { ...c, close: async () => void closes++ };
+      },
+    });
+    const ac = new AbortController();
+    const acquiring = m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime", signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    ac.abort();
+    await expect(acquiring).rejects.toBeInstanceOf(DaemonAbortedError);
+    expect(closes).toBe(0);
+    releaseConnect();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(closes).toBe(1);
+  });
+
+  it("R8#3 abort BEFORE ensureDaemon reached spawnFn drops the exact `starting` row; the next acquire proceeds at once", async () => {
+    const w = new World();
+    let releaseProbe!: () => void;
+    w.preSpawnGate = new Promise<void>((r) => {
+      releaseProbe = r;
+    });
+    const m = new DaemonManager(w.deps());
+    const ac = new AbortController();
+    const acquiring = m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime", signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    ac.abort();
+    await expect(acquiring).rejects.toBeInstanceOf(DaemonAbortedError);
+    releaseProbe(); // ensureDaemon now calls spawnFn, which throws DaemonAbortedError → ensure rejects
+    await new Promise((r) => setTimeout(r, 5));
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)).toBeUndefined(); // no lingering `starting` row
+    w.preSpawnGate = undefined;
+    const t0 = w.clock;
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("owned");
+    expect(w.clock - t0).toBeLessThan(1000); // no "still starting" wait
   });
 
   it("#9 an orphaned `stopping` row is recovered when the stopper is dead OR its deadline passed; our live instance has its stop RESUMED", async () => {
