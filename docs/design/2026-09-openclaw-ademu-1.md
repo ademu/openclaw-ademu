@@ -331,6 +331,11 @@ synchronous busy claim (a duplicate `confirm`/`replace_token` is refused, so a t
 rotated twice with the dead one persisted); the session's memoized close is raced against abort on
 the failure-first path as well; a poll aborted by `cancel` reports `cancelled`.
 
+**Round 6 (3 LOW, all folded):** the failure-first close path removes its abort-race listener (a shared
+gateway signal gains none across repeated failing opens); the memoized close and the real supersession
+path have their own tests — the latter exposed that a cancelled enrollment could forget its successor's
+registry entry by device id, now `forget(entry)` removes an entry only while it is still current.
+
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its
 `package.json` (`ERR_PACKAGE_PATH_NOT_EXPORTED` at register time). Both fixed; the acceptance now

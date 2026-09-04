@@ -476,6 +476,36 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.writes).toHaveLength(0);
   });
 
+  it("R6#3 a same-creator `start` while the host holds the mutation supersedes the old enrollment: its confirm is cancelled, nothing written, the new one is live", async () => {
+    const w = world();
+    let releaseWrite!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseWrite = r;
+    });
+    const origWrite = w.deps.writeConfig;
+    w.deps.writeConfig = async (mutate) => {
+      await gate;
+      await origWrite(mutate);
+    };
+    const start = await w.call({ action: "start", agentName: "Iris" });
+    const leaseToken = start.details.leaseToken as string;
+    w.control.emit({ words: WORDS });
+    await tick();
+    const confirmP = w.call({ action: "confirm", leaseToken });
+    await tick(5);
+    w.control.finish("enrolled");
+    await tick(10); // parked inside writeConfig (committing)
+    const again = await w.call({ action: "start", agentName: "Bob" }); // same creator tuple → supersedes
+    expect(again.details.ok).toBe(true);
+    expect(w.released()).toBe(1); // the old lease was disposed by the supersession
+    releaseWrite();
+    const result = await confirmP;
+    expect(result.details).toMatchObject({ ok: false, state: "cancelled" });
+    expect(w.writes).toHaveLength(0);
+    expect(w.registry.size).toBe(1);
+    expect(w.registry.forSession("agent:main:webchat:owner")?.agentName).toBe("Bob");
+  });
+
   it("R3#3 two simultaneous starts in one conversation admit exactly one; an account created meanwhile is never overwritten", async () => {
     const w = world();
     const [a, b] = await Promise.all([w.call({ action: "start", agentName: "Iris" }), w.call({ action: "start", agentName: "Iris" })]);

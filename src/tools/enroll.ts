@@ -98,6 +98,10 @@ export class EnrollmentRegistry {
   delete(deviceId: string): void {
     this.#active.delete(deviceId);
   }
+  /** Forget `entry` only if it is still the registry's entry for its device (a successor is left alone). */
+  forget(entry: ActiveEnrollment): void {
+    if (this.#active.get(entry.deviceId) === entry) this.#active.delete(entry.deviceId);
+  }
   /** The single enrollment owned by this conversation, if any. */
   forSession(sessionKey: string): ActiveEnrollment | undefined {
     this.#prune();
@@ -326,7 +330,7 @@ async function startWithLease(p: {
         if (last.state !== "enrolled") {
           // revoked / retired in the background: release the resources NOW, not at TTL.
           entry.state = "failed";
-          p.registry.delete(entry.deviceId);
+          p.registry.forget(entry);
           void lease.dispose("pairing-ended").catch(() => {});
         }
         return last;
@@ -335,7 +339,7 @@ async function startWithLease(p: {
         entry.failure = err instanceof Error ? err.name : "poll_failed";
         entry.state = "failed";
         if (!lease.disposed) {
-          p.registry.delete(entry.deviceId);
+          p.registry.forget(entry);
           void lease.dispose("poll-failed").catch(() => {});
         }
         throw err;
@@ -462,7 +466,7 @@ async function confirmEnrollment(p: {
         /* the runtime's next acquire promotes it anyway */
       }
     }
-    p.registry.delete(active.deviceId);
+    p.registry.forget(active);
     await active.lease.dispose("done");
     return text(strings.enroll.toolConfirmed(active.agentName), { ok: true, state: "done", accountId: common.accountId, deviceId: active.deviceId });
   } catch (err) {
@@ -471,18 +475,18 @@ async function confirmEnrollment(p: {
       (!(err instanceof EnrollmentError) && (active.lease.disposed || active.lease.signal.aborted));
     if (cancelled) {
       // It failed because the enrollment was cancelled/superseded underneath us: release, report cancelled.
-      p.registry.delete(active.deviceId);
+      p.registry.forget(active);
       await active.lease.dispose("cancelled");
       return text(strings.enroll.toolCancelled, { ok: false, state: "cancelled" });
     }
     if (err instanceof AccountExistsError) {
-      p.registry.delete(active.deviceId);
+      p.registry.forget(active);
       await active.lease.dispose("account-exists");
       return text(strings.enroll.toolAccountExists(err.accountId, [err.accountId]), { ok: false, state: "account_exists" });
     }
     if (err instanceof EnrollmentError) {
       if (err.reason === "words_mismatch") {
-        p.registry.delete(active.deviceId);
+        p.registry.forget(active);
         await active.lease.dispose("words-mismatch");
         return text(strings.enroll.wordsMismatch, { ok: false, state: "words_mismatch" });
       }
@@ -490,7 +494,7 @@ async function confirmEnrollment(p: {
     }
     // Anything else is terminal for this enrollment: release the daemon/control resources now,
     // not at TTL.
-    p.registry.delete(active.deviceId);
+    p.registry.forget(active);
     await active.lease.dispose("confirm-failed");
     const remedy = remedyFor(err);
     if (remedy) return text(strings.enroll.toolUnavailable(remedy), { ok: false, state: "failed" });

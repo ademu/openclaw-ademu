@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { describe, expect, it } from "vitest";
 import { assertIdentity, openSession } from "../src/monitor/session.js";
 import { IdentityMismatchError, SessionWarmupError } from "../src/status.js";
@@ -137,6 +138,37 @@ describe("openSession", () => {
     const err = await parked;
     expect(err).toBeInstanceOf(SessionWarmupError);
     expect(client.closed).toBe(true);
+  });
+
+  it("R6#1/#2 close is memoized: reconnect warm-up failure + session.close() = ONE client.close(); a shared abort signal gains no listeners", async () => {
+    const client = new FakeAdcClient();
+    client.room(ROOM_GROUP, [member(OWNER), member(AGENT, "agent")]);
+    const { connect } = fakeConnect(client);
+    const ac = new AbortController();
+    const before = (ac.signal as unknown as { [k: string]: unknown }).constructor; // sanity: same signal object reused below
+    const session = await openSession({ token: "t", sessionSocketPath: "/s", account: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER }, deps: { connect, now: () => 0, log }, signal: ac.signal });
+    expect(before).toBeDefined();
+    client.emit("retry", { attempt: 1, delayMs: 1 });
+    client.refreshFails = true;
+    client.emit("reconnected");
+    await new Promise((r) => setTimeout(r, 5));
+    expect(client.closeCalls).toBe(1);
+    await session.close();
+    await session.close();
+    expect(client.closeCalls).toBe(1);
+
+    // failure-first path with a close that resolves: repeated opens on ONE signal leave no listeners behind
+    const shared = new AbortController();
+    for (let i = 0; i < 3; i++) {
+      const c = new FakeAdcClient();
+      c.refreshFails = true;
+      const { connect: connect2 } = fakeConnect(c);
+      await expect(
+        openSession({ token: "t", sessionSocketPath: "/s", account: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER }, deps: { connect: connect2, now: () => 0, log }, signal: shared.signal }),
+      ).rejects.toThrow();
+      expect(c.closeCalls).toBe(1);
+    }
+    expect(getEventListeners(shared.signal, "abort")).toHaveLength(0);
   });
 
   it("R2#6 a failed INITIAL warm-up closes the just-seated client and rejects openSession", async () => {

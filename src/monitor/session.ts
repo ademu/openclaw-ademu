@@ -194,14 +194,21 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
       void closeOnce();
       throw new SessionAbortedError();
     }
-    // Failure first: close, but never past an abort that arrives while the close hangs.
+    // Failure first: close, but never past an abort that arrives while the close hangs. The race
+    // listener is removed afterwards so a shared gateway signal never accumulates listeners.
+    let onRaceAbort: (() => void) | undefined;
     await Promise.race([
       closeOnce(),
       new Promise<void>((resolve) => {
         if (signal?.aborted) resolve();
-        else signal?.addEventListener("abort", () => resolve(), { once: true });
+        else {
+          onRaceAbort = () => resolve();
+          signal?.addEventListener("abort", onRaceAbort, { once: true });
+        }
       }),
-    ]);
+    ]).finally(() => {
+      if (onRaceAbort) signal?.removeEventListener("abort", onRaceAbort);
+    });
     throw err;
   } finally {
     signal?.removeEventListener("abort", onAbortWarmup);
