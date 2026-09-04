@@ -1051,6 +1051,30 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(c.store.getOwnership(DIR)!.state).toBe("stale");
   });
 
+  it("R12#1 abort, then ensureDaemon REJECTS after it had spawned a child → stale with the child's pid facts; no second spawn while it lives", async () => {
+    const w = new World();
+    let releaseEnsure!: () => void;
+    w.ensureGate = new Promise<void>((r) => (releaseEnsure = r));
+    w.ensureRejectsAfterSpawn = true;
+    w.spawnFailsToListen = true;
+    const m = new DaemonManager(w.deps());
+    const ac = new AbortController();
+    const acquiring = m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime", signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    ac.abort();
+    await expect(acquiring).rejects.toBeInstanceOf(DaemonAbortedError);
+    releaseEnsure(); // the ladder gives up → ensureDaemon rejects, child alive
+    await new Promise((r) => setTimeout(r, 10));
+    const row = w.store.getOwnership(DIR)!;
+    expect(row.state).toBe("stale");
+    expect(row.daemonPid).not.toBeNull();
+    expect(row.daemonPidStartedAt).not.toBeNull();
+    w.ensureRejectsAfterSpawn = false;
+    w.spawnFailsToListen = false;
+    await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(w.spawns).toHaveLength(1);
+  });
+
   it("R11#2 a spawned child that never listened stays recorded; while it is alive no second daemon is started; once it exits the respawn proceeds", async () => {
     const w = new World();
     w.ensureRejectsAfterSpawn = true;

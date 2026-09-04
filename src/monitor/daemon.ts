@@ -746,9 +746,10 @@ export class DaemonManager {
             }
           })
           .catch(() => {
-            // ensureDaemon rejected after our abort (spawnFn threw before any child existed): the
-            // exact `starting` generation must not linger until its deadline.
-            if (!child) abandon("stopped", "aborted before spawn");
+            // ensureDaemon rejected after our abort — either spawnFn threw before any child existed
+            // (→ the origin rule) or its hello ladder gave up on a child that DID spawn (→ `stale`
+            // with the child's pid facts, chosen by abandon() itself). Never leave `starting` behind.
+            abandon("stopped", "ensureDaemon rejected after an aborted start");
           });
         throw err;
       }

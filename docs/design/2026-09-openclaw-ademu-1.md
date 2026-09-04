@@ -368,6 +368,10 @@ start a second daemon beside a recorded child that is still alive (it is retried
 exits); the synchronous generation guard at the spawn instant and the bounded shutdown close have
 their own tests.
 
+**Round 12 (1 HIGH, folded):** a late `ensureDaemon` rejection after an aborted start now always
+abandons the `starting` generation (as `stale` with the child's pid facts when a child had spawned), so
+a daemon that started but never answered is never forgotten and never gets a sibling.
+
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its
 `package.json` (`ERR_PACKAGE_PATH_NOT_EXPORTED` at register time). Both fixed; the acceptance now
