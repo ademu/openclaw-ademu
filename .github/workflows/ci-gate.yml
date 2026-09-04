@@ -1,0 +1,66 @@
+# ci-gate — the ONE required status check for merging to main (the "main gate" ruleset).
+#
+# Why this exists: CI lanes may be path-filtered, so on a PR that doesn't touch a lane's paths that
+# lane's workflow NEVER RUNS and its check never reports — a directly-required lane check would sit
+# "expected/pending" forever on such a PR. This gate runs on EVERY pull request (no path filter),
+# discovers the sibling workflow runs for the same head SHA, waits for them, and passes when each is
+# success or skipped — an ABSENT lane counts as skipped, by design. New PR-triggered lanes are gated
+# automatically: discovery is "all pull_request runs on this SHA except me", never a hardcoded list.
+#
+# `needs:`-across-workflows does not exist in Actions, hence the API poll. Re-run note: if you re-run
+# a failed lane, re-run ci-gate too — it re-evaluates the LATEST run of each lane at that moment.
+name: ci-gate
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+
+concurrency:
+  group: ci-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci-gate:
+    name: ci-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: wait for every sibling lane on this SHA (absent = path-skipped = pass)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          # Settle window: sibling workflows are queued from the same webhook event; give slow run
+          # creation a grace period so "no lanes found" genuinely means "no lane matched this PR".
+          echo "settling 45s for sibling runs on ${HEAD_SHA} ..."
+          sleep 45
+
+          list_runs() {
+            gh api "repos/${REPO}/actions/runs?event=pull_request&head_sha=${HEAD_SHA}&per_page=100" \
+              --jq '[.workflow_runs[] | select(.name != "ci-gate")
+                     | {name, status, conclusion}]'
+          }
+
+          while :; do
+            runs="$(list_runs)"
+            total=$(echo "$runs" | jq 'length')
+            pending=$(echo "$runs" | jq '[.[] | select(.status != "completed")] | length')
+            echo "lanes on this SHA: ${total}, still running: ${pending}"
+            echo "$runs" | jq -r '.[] | "  \(.name): \(.status) \(.conclusion // "-")"'
+            [ "$pending" -eq 0 ] && break
+            sleep 15
+          done
+
+          bad=$(echo "$runs" | jq -r '[.[] | select(.conclusion != "success"
+                  and .conclusion != "skipped" and .conclusion != "neutral")]
+                  | .[] | "\(.name): \(.conclusion)"')
+          if [ -n "$bad" ]; then
+            echo "ci-gate FAIL — lanes not green:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "ci-gate PASS — ${total} lane(s), all success/skipped"
