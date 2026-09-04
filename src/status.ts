@@ -8,6 +8,7 @@ import {
   InvalidTokenError,
   LineTooLongError,
   ProtocolViolationError,
+  SessionRejectedError,
 } from "@ademu/adc-client";
 import { PlatformPackageMissingError, UnsupportedPlatformError } from "@ademu/adc-bin";
 import { channelBlockedPatch, channelReadyPatch } from "openclaw/plugin-sdk/gateway-runtime";
@@ -18,6 +19,13 @@ export class IdentityMismatchError extends Error {
   constructor() {
     super("account identity mismatch");
     this.name = "IdentityMismatchError";
+  }
+}
+/** A reconnect warm-up (conversations/members) failed: transient — the account restarts. */
+export class SessionWarmupError extends Error {
+  constructor() {
+    super("session warm-up failed after reconnect");
+    this.name = "SessionWarmupError";
   }
 }
 /** A frame the daemon should never send (e.g. a non-integer `seq`): terminal, user must restart. */
@@ -59,6 +67,9 @@ export function classifyError(err: unknown): Classified {
     return { kind: "blocked", lastError: strings.status.protocolViolation };
   }
   if (err instanceof IdentityMismatchError) return { kind: "blocked", lastError: strings.status.identityMismatch };
+  // Every session rejection is terminal by the client's contract — future codes arrive as the base class.
+  if (err instanceof SessionRejectedError) return { kind: "blocked", lastError: strings.status.sessionRejected };
+  if (err instanceof SessionWarmupError) return { kind: "recovering", lastError: strings.status.warmupFailed };
   if (err instanceof UnsupportedPlatformError) return { kind: "blocked", lastError: strings.status.unsupportedPlatform(err.platform) };
   if (err instanceof DaemonUnsupportedError) return { kind: "blocked", lastError: err.message };
   if (err instanceof PlatformPackageMissingError) return { kind: "blocked", lastError: strings.status.daemonUnreachable(undefined) };

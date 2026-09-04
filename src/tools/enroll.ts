@@ -120,11 +120,13 @@ export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToo
       const active = deviceId ? registry.get(deviceId) : undefined;
       if (!active) return text(strings.enroll.toolNoActive, { ok: false });
       const leaseToken = readStringParam(args, "leaseToken");
+      // Every bound axis compares EXACTLY, `undefined` included: a lease created without a sender or
+      // agent axis is not reachable from a call that has one, and vice versa.
       const axisMismatch =
         active.sessionKey !== sessionKey ||
         leaseToken !== active.leaseToken ||
-        (active.requesterSenderId !== undefined && active.requesterSenderId !== ctx.requesterSenderId) ||
-        (active.agentId !== undefined && active.agentId !== ctx.agentId);
+        active.requesterSenderId !== ctx.requesterSenderId ||
+        active.agentId !== ctx.agentId;
       if (axisMismatch) {
         return text(strings.enroll.toolLeaseMismatch, { ok: false });
       }
@@ -173,9 +175,13 @@ async function startEnrollment(p: {
   if (accountExists(cfg, accountId)) {
     return text(strings.enroll.toolAccountExists(accountId, listAdemuAccountIds(cfg)), { ok: false, accountId });
   }
-  // One enrollment per conversation at a time.
+  // One enrollment per conversation at a time. Only the SAME creator tuple (session, sender, agent)
+  // may supersede it; anyone else sharing the session key is refused instead of disposing it.
   const previous = p.registry.forSession(p.sessionKey);
   if (previous) {
+    if (previous.requesterSenderId !== p.ctx.requesterSenderId || previous.agentId !== p.ctx.agentId) {
+      return text(strings.enroll.toolLeaseMismatch, { ok: false, state: "busy" });
+    }
     p.registry.delete(previous.deviceId);
     await previous.lease.dispose("superseded");
   }
@@ -251,12 +257,21 @@ async function startWithLease(p: {
       (last) => {
         entry.terminalState = last.state;
         lease.terminal = true;
-        if (last.state !== "enrolled") entry.state = "failed";
+        if (last.state !== "enrolled") {
+          // revoked / retired in the background: release the resources NOW, not at TTL.
+          entry.state = "failed";
+          p.registry.delete(entry.deviceId);
+          void lease.dispose("pairing-ended").catch(() => {});
+        }
         return last;
       },
       (err: unknown) => {
         entry.failure = err instanceof Error ? err.name : "poll_failed";
         entry.state = "failed";
+        if (!lease.disposed) {
+          p.registry.delete(entry.deviceId);
+          void lease.dispose("poll-failed").catch(() => {});
+        }
         throw err;
       },
     );

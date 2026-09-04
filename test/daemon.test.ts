@@ -525,6 +525,11 @@ describe("pending-publication sweep", () => {
   });
 });
 
+function withoutSessionSocket(info: DaemonInfoResult): DaemonInfoResult {
+  const { session_socket_path: _omitted, ...rest } = info;
+  return rest;
+}
+
 describe("Codex branch-review folds (daemon)", () => {
   function bindLive(w: World, d: FakeDaemon, over: Partial<{ daemonStartedAtMs: number | null; daemonPidStartedAt: string | null }> = {}) {
     w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
@@ -597,6 +602,83 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(impostor.alive).toBe(true);
     expect(w.store.getOwnership(DIR)!.state).toBe("stale");
     expect(w.logs.some((l) => l.event === "daemon_shutdown_withheld")).toBe(true);
+  });
+
+  it("R2#1 a reachable daemon that reports no session socket is refused (never a derived path) — owned spawn and foreign attach", async () => {
+    const owned = new World();
+    const m = new DaemonManager(owned.deps());
+    // the spawned daemon comes up without a session socket path
+    const origAdd = owned.addDaemon.bind(owned);
+    owned.addDaemon = (dir, opts = {}) => {
+      const d = origAdd(dir, opts);
+      d.info = withoutSessionSocket(d.info);
+      return d;
+    };
+    await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnsupportedError);
+
+    const foreign = new World();
+    const d = foreign.addDaemon(DIR);
+    d.info = withoutSessionSocket(d.info);
+    const m2 = new DaemonManager(foreign.deps());
+    await expect(m2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnsupportedError);
+
+    // unreachable foreign (no daemon answers, dir non-empty): the configured path stays (connect fails later)
+    const dark = new World();
+    dark.dirs.set(DIR, "nonempty");
+    const m3 = new DaemonManager(dark.deps());
+    const lease = await m3.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("foreign");
+    expect(lease.info.sessionSocketPath).toBe(`${DIR}/adc-session.sock`);
+  });
+
+  it("R2#2 a listener answering after an orphaned `starting` row is FOREIGN (never bound to the recorded pid), so it is never stopped", async () => {
+    const w = new World();
+    // crashed starter recorded child pid facts; a (possibly different) daemon now listens
+    const listener = w.addDaemon(DIR);
+    w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 999, ownerPidStartedAt: "gone" });
+    w.store.cas({ dataDir: DIR, from: ["claimed"], to: "starting", bumpGeneration: true, set: { ownerPid: 999, ownerPidStartedAt: "gone", deadlineMs: w.clock - 1, daemonPid: listener.pid, daemonPidStartedAt: `start-${listener.pid}` } });
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("foreign");
+    expect(w.store.getOwnership(DIR)).toBeUndefined();
+    await lease.release();
+    expect(w.shutdownRequests).toHaveLength(0);
+    expect(w.kills).toHaveLength(0);
+    expect(listener.alive).toBe(true);
+  });
+
+  it("R2#3 a pid reused after the daemon exited during the shutdown wait is never signalled", async () => {
+    const w = new World();
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    const d = w.daemons.get(`${DIR}/adc.sock`)!;
+    d.honoursShutdown = false;
+    d.honoursSigterm = false;
+    // The daemon ignores shutdown; meanwhile the pid is reused by an unrelated process.
+    const proc = w.processes.get(d.pid)!;
+    const deps = w.deps();
+    const m2 = new DaemonManager({
+      ...deps,
+      kill: (pid, signal) => w.kills.push({ pid, signal }),
+      connectControl: async (socketPath) => {
+        const c = await deps.connectControl(socketPath);
+        return {
+          ...c,
+          request: async <R>(op: string, params?: object, options?: { timeoutMs?: number }) => {
+            const r = await c.request<R>(op, params, options);
+            // right after the shutdown op is accepted, the pid is reused
+            proc.startedAt = "reused-much-later";
+            proc.command = "python3 unrelated.py";
+            return r;
+          },
+        };
+      },
+    });
+    const lease2 = await m2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    await lease.release(); // deferred: another holder
+    await lease2.release();
+    expect(w.kills).toEqual([]);
+    expect(["stale", "stopped"]).toContain(w.store.getOwnership(DIR)!.state);
   });
 
   it("#9 an orphaned `stopping` row is recovered when the stopper is dead OR its deadline passed; our live instance has its stop RESUMED", async () => {

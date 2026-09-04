@@ -199,7 +199,6 @@ async function runWithLease(
       onSecurityNotice: (groupId) => {
         // Fixed copy only — never a field of the frame.
         setStatus({ lastError: strings.status.securityNotice });
-        log("security_notice", { room: groupId !== undefined });
         if (groupId) void sendAdemuText({ client: session!.client, groupId, text: strings.room.securityNotice }).catch(() => {});
       },
     });

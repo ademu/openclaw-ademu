@@ -350,13 +350,16 @@ export function startIngress(params: IngressParams): IngressHandle {
         await session.barrier();
         if (stopped) break;
         if (!ev.known) {
-          log("event_unknown", { event: String(ev.event), seq: ev.seq });
           if (String(ev.event) === "security_notice") {
-            // Forward-compatible: fixed status copy + a fixed room note; never any field of the frame.
+            // Forward-compatible: fixed status copy + a fixed room note. The ONLY logged fact is
+            // whether a room id was present — no field of the frame, not even its seq.
             const raw = (ev as { raw?: { group_id?: unknown } }).raw;
             const groupId = typeof raw?.group_id === "string" && looksLikeId(raw.group_id) ? normalizeId(raw.group_id) : undefined;
+            log("security_notice", { room: groupId !== undefined });
             params.onSecurityNotice?.(groupId);
+            continue;
           }
+          log("event_unknown", { event: String(ev.event), seq: ev.seq });
           continue;
         }
         switch (ev.event) {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assertIdentity, openSession } from "../src/monitor/session.js";
-import { IdentityMismatchError } from "../src/status.js";
+import { IdentityMismatchError, SessionWarmupError } from "../src/status.js";
 import { AGENT, DEVICE, FakeAdcClient, fakeConnect, GUEST, member, OWNER, ROOM_DM, ROOM_GROUP } from "./fakes/adc.js";
 
 const log = () => {};
@@ -111,14 +111,41 @@ describe("openSession", () => {
     });
     client.emit("retry", { attempt: 1, delayMs: 1 });
     let released = false;
-    void session.barrier().then(() => {
-      released = true;
-    });
+    void session
+      .barrier()
+      .then(() => {
+        released = true;
+      })
+      .catch(() => {});
     client.refreshFails = true;
     client.emit("reconnected");
     await new Promise((r) => setTimeout(r, 5));
     expect(released).toBe(false);
     expect(reconnected).toBe(0);
+    expect(client.closed).toBe(true);
+  });
+
+  it("R2#4 a failed warm-up REJECTS the barrier (a parked loop body wakes and halts) — never a silent deadlock", async () => {
+    const client = new FakeAdcClient();
+    client.room(ROOM_GROUP, [member(OWNER), member(AGENT, "agent")]);
+    const { connect } = fakeConnect(client);
+    const session = await openSession({ token: "t", sessionSocketPath: "/s", account: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER }, deps: { connect, now: () => 0, log } });
+    client.emit("retry", { attempt: 1, delayMs: 1 });
+    const parked = session.barrier().catch((e: unknown) => e);
+    client.refreshFails = true;
+    client.emit("reconnected");
+    const err = await parked;
+    expect(err).toBeInstanceOf(SessionWarmupError);
+    expect(client.closed).toBe(true);
+  });
+
+  it("R2#6 a failed INITIAL warm-up closes the just-seated client and rejects openSession", async () => {
+    const client = new FakeAdcClient();
+    client.refreshFails = true;
+    const { connect } = fakeConnect(client);
+    await expect(
+      openSession({ token: "t", sessionSocketPath: "/s", account: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER }, deps: { connect, now: () => 0, log } }),
+    ).rejects.toThrow(/list_conversations failed/);
     expect(client.closed).toBe(true);
   });
 

@@ -297,8 +297,17 @@ Current version: **0.1.0** (unreleased).
 - **The manifest channel schema is generated** from the zod source (`scripts/sync-manifest-schema.mjs`)
   and deep-equal-gated; the pack golden compares the complete tarball manifest; the compat-floor gate
   checks every SDK import has a row; the privacy scanner recognizes the host's chained child-logger sink.
-- **`security_notice`** (a future live event) sets fixed status copy and posts a fixed room note; no
-  field of the frame is logged.
+- **`security_notice`** (a future live event) sets fixed status copy and posts a fixed room note; the
+  only logged fact is whether a room id was present — no field of the frame, not even its seq.
+
+**Round 2 (10 findings, all folded)** tightened the same seams: a *reachable* daemon that reports no
+session socket is refused rather than re-derived (the protocol's own rule — a squatter on a derived path
+would receive the bearer token); a listener answering after an orphaned claim/start is always foreign
+(nothing correlates it to the pid the crashed starter recorded); the pid is re-verified immediately before
+each signal; a failed reconnect warm-up *rejects* the barrier (a parked loop body wakes and halts) instead
+of leaving the account deadlocked; every `SessionRejectedError` — including future codes — is `blocked`;
+the initial warm-up is inside the close-on-failure scope; the tool disposes its lease at once when the
+pairing ends revoked/retired in the background and compares every creator axis exactly.
 
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its

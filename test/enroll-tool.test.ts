@@ -251,6 +251,8 @@ describe("ademu_enroll: registration", () => {
   });
 });
 
+const NO_AXES = { requesterSenderId: undefined, agentId: undefined } as unknown as Partial<OpenClawPluginToolContext>;
+
 describe("ademu_enroll: Codex branch-review folds", () => {
   it("#12 the agentId axis is enforced: same session, sender and token from another agent is refused", async () => {
     const w = world();
@@ -310,6 +312,43 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(r.details).toMatchObject({ ok: false, state: "unavailable" });
     expect(r.content[0]!.text).toContain("/var/log/adc.log");
     expect(w.registry.size).toBe(0);
+  });
+
+  it("R2#7 a background revoked/retired pairing disposes the lease at once (not at TTL)", async () => {
+    for (const state of ["revoked", "retired"]) {
+      const w = world();
+      await w.call({ action: "start", agentName: "Iris" });
+      w.control.finish(state);
+      await tick(5);
+      expect(w.registry.size).toBe(0);
+      expect(w.released()).toBe(1);
+      expect(w.control.closed).toBe(1);
+    }
+    const w = world();
+    await w.call({ action: "start", agentName: "Iris" });
+    w.control.failPoll(new Error("poll transport died"));
+    await tick(5);
+    expect(w.registry.size).toBe(0);
+    expect(w.released()).toBe(1);
+  });
+
+  it("R2#8 axes compare exactly (absent → present is a mismatch) and only the same creator tuple may supersede", async () => {
+    const w = world();
+    const start = await w.call({ action: "start", agentName: "Iris" }, NO_AXES);
+    const leaseToken = start.details.leaseToken as string;
+    const withSender = await w.call({ action: "status", leaseToken }); // default ctx has a sender + agent
+    expect(withSender.details.ok).toBe(false);
+    const bare = await w.call({ action: "status", leaseToken }, NO_AXES);
+    expect(bare.details.ok).toBe(true);
+    // another agent on the same session key cannot supersede (dispose) it
+    const other = await w.call({ action: "start", agentName: "Bob" });
+    expect(other.details).toMatchObject({ ok: false, state: "busy" });
+    expect(w.registry.size).toBe(1);
+    expect(w.released()).toBe(0);
+    // the same creator may
+    const again = await w.call({ action: "start", agentName: "Bob" }, NO_AXES);
+    expect(again.details.ok).toBe(true);
+    expect(w.released()).toBe(1);
   });
 
   it("#10 after the config write the setup-spawned daemon is promoted (pending-publication → bound)", async () => {

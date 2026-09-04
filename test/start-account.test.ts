@@ -1,6 +1,6 @@
 // startAccount lifecycle (plan T10): lease → session → ingress → ready; outcomes; cleanup ordering
 // under the deadline; blocked vs restart contract with the gateway supervisor.
-import { InvalidTokenError } from "@ademu/adc-client";
+import { InvalidTokenError, SessionRejectedError } from "@ademu/adc-client";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ResolvedAdemuAccount } from "../src/config.js";
@@ -295,16 +295,44 @@ describe("startAccount: Codex branch-review folds", () => {
     expect(w.dm.calls).toHaveLength(2);
   });
 
-  it("#21 a security_notice sets the fixed status copy and posts the fixed room note; the frame never reaches a log", async () => {
+  it("#21 a security_notice sets the fixed status copy and posts the fixed room note; the only logged fact is `room`", async () => {
     const w = world();
     const run = startAccount(w.ctx, w.deps);
     await settle();
-    w.client.unknownEvent("security_notice", { group_id: ROOM_DM, detail: "SECRET-DETAIL" });
+    w.client.unknownEvent("security_notice", { group_id: ROOM_DM, detail: "SECRET-DETAIL", seq: 77 });
     await settle();
     expect(w.statuses.at(-1)).toMatchObject({ lastError: expect.stringContaining("security notice") });
     expect(w.client.sent).toEqual([{ group_id: ROOM_DM, body: expect.stringContaining("security notice") }]);
-    expect(JSON.stringify(w.logs)).not.toContain("SECRET-DETAIL");
+    const notice = w.logs.filter((l) => l.event === "security_notice");
+    expect(notice).toHaveLength(1);
+    expect(Object.keys(notice[0]!.fields ?? {}).sort()).toEqual(["accountId", "room"]);
+    expect(w.logs.some((l) => l.event === "event_unknown")).toBe(false);
     w.ac.abort();
     await run;
+  });
+
+  it("R2#4 a failed reconnect warm-up with a replayed frame parked on the barrier → the account restarts, nothing acked, lease released", async () => {
+    const w = world();
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    w.client.emit("retry", { attempt: 1, delayMs: 1 } as never);
+    w.client.message({ body: "replayed" }); // the loop body parks on the barrier
+    await settle();
+    w.client.refreshFails = true;
+    w.client.emit("reconnected");
+    await expect(run).rejects.toBeInstanceOf(Error);
+    expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "recovering" });
+    expect(w.client.acks).toEqual([]);
+    expect(w.dm.lease()!.released).toBe(1);
+  });
+
+  it("R2#5 an unknown future session rejection (base class) → blocked, not a restart loop", async () => {
+    const w = world();
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    w.client.failStream(new SessionRejectedError("future_code"));
+    await run;
+    expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "blocked" });
+    expect(String(w.statuses.at(-1)!.lastError)).toContain("rejected this session");
   });
 });

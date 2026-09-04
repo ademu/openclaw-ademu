@@ -18,6 +18,11 @@ export const strings = {
     displaced:
       "Another process attached to this Ademú device and took the session. Stop it, then restart this channel.",
     protocolViolation: "The Ademú device host answered with a malformed frame; restart the channel.",
+    sessionRejected:
+      "The Ademú device host rejected this session. Check the device in the Ademú app, then reconnect: openclaw channels add --channel ademu → Connect an already-enrolled agent.",
+    warmupFailed: "reconnected, but the conversation list could not be refreshed; restarting",
+    noSessionSocket:
+      "The Ademú device host did not report its session socket (too old, or not an adc daemon). Upgrade adc, or point channels.ademu at a current daemon.",
     identityMismatch:
       "The configured Ademú account does not match the device its token belongs to (deviceId/agentUserId/ownerUserId). Fix channels.ademu.accounts or reconnect the agent.",
     unsupportedPlatform: (platform: string) => `Ademú is not available on ${platform} yet.`,

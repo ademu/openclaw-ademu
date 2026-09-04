@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import { PlatformPackageMissingError, resolveAdcBinaryPath, UnsupportedPlatformError } from "@ademu/adc-bin";
 import { connect as connectControlReal, ensureDaemon as ensureDaemonReal, type ChildLike, type DaemonInfoResult } from "@ademu/adc-control";
 import { canonicalizePath, type DaemonIdentity } from "../config.js";
+import { strings } from "../i18n/strings.js";
 import type { AdemuStore, OwnershipRow, OwnershipState } from "../store.js";
 
 export const STARTING_DEADLINE_MS = 20_000;
@@ -201,6 +202,12 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
       },
     );
   });
+}
+
+/** The reachable daemon's own session socket path, or a blocked error — never a derived path. */
+function requireSessionSocket(info: DaemonInfoResult): string {
+  if (!info.session_socket_path) throw new DaemonUnsupportedError(strings.status.noSessionSocket);
+  return info.session_socket_path;
 }
 
 /** An existing, empty daemon dir must be a real directory we own; it is then made private (0700). */
@@ -456,14 +463,13 @@ export class DaemonManager {
           const starting = this.#toStarting(identity, [row.state], row.generation);
           if (!starting) continue;
           const probe = await this.#probe(identity.raw.controlSocket, identity);
-          if (probe?.matches && row.daemonPid != null && this.#daemonProcessVerified(row)) {
-            const bound = this.#bind(params.role, starting, probe.info, row.daemonPid, row.daemonPidStartedAt);
-            if (bound) return await this.#ownedLease(params, holderId, bound, probe.info, undefined);
-            continue;
-          }
           if (probe) {
-            // A live listener we cannot prove is ours: give the row up, attach as foreign.
+            // A listener answers after an orphaned claim/start. Nothing correlates that listener to
+            // the pid the crashed starter recorded (daemon_info carries no pid), so we can never
+            // PROVE it is the child we spawned: give the row up and attach as FOREIGN. (Narrows the
+            // plan's "probe-and-bind a surviving detached daemon" — Codex branch round 2 #2.)
             store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+            this.#deps.log("daemon_orphan_listener_foreign", { dataDir: identity.dataDir });
             return this.#foreignLease(params, holderId, probe.info);
           }
           return await this.#spawnAndBind(params, holderId, starting);
@@ -668,7 +674,11 @@ export class DaemonManager {
       holderId,
       info: {
         controlSocketPath: identity.raw.controlSocket,
-        sessionSocketPath: info?.session_socket_path || identity.raw.sessionSocket,
+        // A REACHABLE daemon's reported session socket is authoritative and must never be
+        // re-derived (PROTOCOL.md: a squatter on a derived path would receive the bearer token).
+        // Only an UNREACHABLE foreign daemon keeps the configured path (the session connect then
+        // fails and the account stays `recovering`).
+        sessionSocketPath: info ? requireSessionSocket(info) : identity.raw.sessionSocket,
         daemonVersion: parseAdcVersion(info?.version),
       },
       lost: hb.lost,
@@ -711,7 +721,7 @@ export class DaemonManager {
       holderId,
       info: {
         controlSocketPath: identity.raw.controlSocket,
-        sessionSocketPath: info.session_socket_path || identity.raw.sessionSocket,
+        sessionSocketPath: requireSessionSocket(info),
         daemonVersion: parseAdcVersion(info.version),
         generation: row.generation,
         logPath: child?.logPath,
@@ -840,6 +850,14 @@ export class DaemonManager {
     while (!gone() && this.#deps.now() - start < SHUTDOWN_OP_MS && remaining() > 0) await this.#deps.sleep(100);
     if (gone()) return true;
     if (!verified) return false; // never signal a pid we cannot prove is ours
+    // Immediately before EACH signal: the row must still be our `stopping` generation and the pid
+    // must still carry the recorded start time + command (a reused pid after the daemon's own exit
+    // is "gone", never a target — Codex branch round 2 #3).
+    const stillOurs = () => {
+      const current = this.#deps.store.getOwnership(identity.dataDir);
+      return current?.state === "stopping" && current.generation === row.generation && this.#daemonProcessVerified(row);
+    };
+    if (!stillOurs()) return gone();
     try {
       this.#deps.kill(pid!, "SIGTERM");
     } catch {
@@ -848,6 +866,7 @@ export class DaemonManager {
     const termUntil = this.#deps.now() + SIGTERM_GRACE_MS;
     while (!gone() && this.#deps.now() < termUntil && remaining() > 0) await this.#deps.sleep(100);
     if (gone()) return true;
+    if (!stillOurs()) return gone();
     try {
       this.#deps.kill(pid!, "SIGKILL");
     } catch {

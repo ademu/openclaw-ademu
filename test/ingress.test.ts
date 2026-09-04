@@ -428,7 +428,11 @@ describe("Codex branch-review folds", () => {
     w.client.unknownEvent("security_notice", { nothing: true });
     await w.settle();
     expect(notices).toEqual([ROOM_GROUP, undefined]);
-    expect(JSON.stringify(w.logs)).not.toContain("SECRET-DETAIL");
+    const logged = w.logs.filter((l) => l.event === "security_notice" || l.event === "event_unknown");
+    expect(logged.map((l) => [l.event, Object.keys(l.fields ?? {}).sort()])).toEqual([
+      ["security_notice", ["room"]],
+      ["security_notice", ["room"]],
+    ]);
     expect(w.client.acks).toEqual([]);
   });
 });

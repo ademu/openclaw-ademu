@@ -122,7 +122,7 @@ come back.
 - `openclaw channels status` — account state. `blocked` means something you must fix (token
   revoked → reconnect; device not enrolled → finish on the phone; another process attached to the
   device → stop it). `recovering` means the plugin is retrying by itself.
-- The device host log: `<dataDir>/adc.log`; `adc doctor` and `adc status` (with `ADC_DATA_DIR` set
+- The device host log: `<dataDir>/daemon.log`; `adc doctor` and `adc status` (with `ADC_DATA_DIR` set
   to the plugin's data dir) speak for the daemon.
 - The plugin never logs tokens, QR payloads, safety words, or message bodies.
 

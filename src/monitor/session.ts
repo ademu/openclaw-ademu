@@ -13,7 +13,7 @@ import {
   type SelfInfo,
 } from "@ademu/adc-client";
 import { normalizeId } from "../grammar.js";
-import { IdentityMismatchError } from "../status.js";
+import { IdentityMismatchError, SessionWarmupError } from "../status.js";
 
 export type SessionDeps = {
   connect: (opts: AdcClientOptions) => Promise<AdcClient>;
@@ -139,15 +139,17 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
     reconnect: "auto",
   });
   let self: SelfInfo;
+  const members = new MembersCache(client);
   try {
     self = await client.getSelf();
     assertIdentity(client.hello, self, params.account);
+    // The initial warm-up is inside the close-on-failure scope too: a seated, auto-reconnecting
+    // client must never be leaked holding the device seat when openSession rejects.
+    await members.refresh();
   } catch (err) {
     await client.close().catch(() => {});
     throw err;
   }
-  const members = new MembersCache(client);
-  await members.refresh();
 
   // Reconnect barrier: `retry` marks live state stale; `reconnected` refreshes it before the loop
   // may continue. Retry counting feeds the owned-daemon loss rule (5 consecutive retries).
@@ -158,13 +160,16 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
   let generation = 0;
   let stale: Promise<void> | undefined;
   let release: (() => void) | undefined;
+  let fail: ((err: Error) => void) | undefined;
   client.on("retry", (info) => {
     retries = info.attempt;
     generation++;
     if (!stale) {
-      stale = new Promise<void>((r) => {
+      stale = new Promise<void>((r, rej) => {
         release = r;
+        fail = rej;
       });
+      stale.catch(() => {});
     }
     params.onRetry?.(info);
   });
@@ -177,12 +182,20 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
         const r = release;
         stale = undefined;
         release = undefined;
+        fail = undefined;
         r?.();
         params.onReconnected?.();
       },
       (err: unknown) => {
         if (mine !== generation) return;
         params.deps.log("session_refresh_failed", { errorClass: err instanceof Error ? err.name : typeof err });
+        // REJECT the barrier (a loop body already parked on it must wake and halt — closing the
+        // iterator alone cannot unblock it), then close the client so the account restarts.
+        const f = fail;
+        stale = undefined;
+        release = undefined;
+        fail = undefined;
+        f?.(new SessionWarmupError());
         void client.close().catch(() => {});
       },
     );
