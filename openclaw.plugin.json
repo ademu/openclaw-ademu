@@ -1,0 +1,116 @@
+{
+  "id": "ademu",
+  "name": "Ademú",
+  "description": "Ademú channel plugin for OpenClaw — end-to-end encrypted messaging with your agent, from your phone.",
+  "activation": {
+    "onStartup": false
+  },
+  "channels": ["ademu"],
+  "skills": ["./skills"],
+  "contracts": {
+    "tools": ["ademu_enroll"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "typingKeepaliveMs": {
+        "type": "integer",
+        "minimum": 500,
+        "maximum": 10000,
+        "default": 2000,
+        "description": "How often the typing indicator is refreshed while the agent composes (Ademú expires it after ~3 s)."
+      },
+      "mentionAliases": {
+        "type": "array",
+        "items": { "type": "string", "minLength": 1 },
+        "default": [],
+        "description": "Extra names that count as addressing the agent in a room."
+      }
+    }
+  },
+  "uiHints": {
+    "typingKeepaliveMs": { "label": "Typing keepalive (ms)", "advanced": true },
+    "mentionAliases": { "label": "Mention aliases" }
+  },
+  "channelConfigs": {
+    "ademu": {
+      "label": "Ademú",
+      "description": "Ademú accounts (one per enrolled agent device), the Ademú device host location, and room policies.",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "defaultAccount": { "type": "string" },
+          "dataDir": { "type": "string", "description": "Data directory of the Ademú device host (adc daemon). Default: <OpenClaw state dir>/ademu/adc." },
+          "socketPath": { "type": "string", "description": "Control socket of the Ademú device host. Default: <dataDir>/adc.sock." },
+          "server": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "restBaseUrl": { "type": "string", "format": "uri" },
+              "wsUrl": { "type": "string", "format": "uri" }
+            }
+          },
+          "groups": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "requireMention": { "type": "boolean" },
+                "toolsBySender": { "type": "object", "additionalProperties": true }
+              }
+            }
+          },
+          "accounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "name": { "type": "string" },
+                "agentName": { "type": "string" },
+                "deviceId": { "type": "string" },
+                "agentUserId": { "type": "string" },
+                "ownerUserId": { "type": "string" },
+                "token": {
+                  "anyOf": [
+                    { "type": "string" },
+                    {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "required": ["source", "provider", "id"],
+                      "properties": {
+                        "source": { "type": "string", "enum": ["env", "file", "exec", "store"] },
+                        "provider": { "type": "string" },
+                        "id": { "type": "string" }
+                      }
+                    }
+                  ]
+                },
+                "dataDir": { "type": "string" },
+                "socketPath": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "uiHints": {
+        "accounts.*.token": { "label": "Device token", "sensitive": true, "help": "Minted by the enrollment wizard or the ademu_enroll tool; rotate with adc token rotate." },
+        "accounts.*.agentName": { "label": "Agent name on Ademú" },
+        "accounts.*.deviceId": { "label": "Device id", "advanced": true },
+        "accounts.*.agentUserId": { "label": "Agent user id", "advanced": true },
+        "accounts.*.ownerUserId": { "label": "Owner user id", "advanced": true },
+        "accounts.*.dataDir": { "label": "Device host data dir (override)", "advanced": true },
+        "accounts.*.socketPath": { "label": "Device host control socket (override)", "advanced": true },
+        "dataDir": { "label": "Device host data dir", "advanced": true },
+        "socketPath": { "label": "Device host control socket", "advanced": true },
+        "server.restBaseUrl": { "label": "Ademú REST base URL", "advanced": true },
+        "server.wsUrl": { "label": "Ademú WebSocket URL", "advanced": true }
+      }
+    }
+  }
+}
