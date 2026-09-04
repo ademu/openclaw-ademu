@@ -21,26 +21,6 @@ trap cleanup EXIT
 echo "== host: $($OPENCLAW_BIN --version 2>/dev/null || echo unknown)"
 echo "== state: $OPENCLAW_STATE_DIR"
 
-# Seed a config with one dummy Ademú account so the plugin is activated (skills need activation).
-cat > "$OPENCLAW_STATE_DIR/openclaw.json" <<'JSON'
-{
-  "channels": {
-    "ademu": {
-      "enabled": true,
-      "accounts": {
-        "ci": {
-          "enabled": true,
-          "agentName": "CI Agent",
-          "deviceId": "00000000-0000-4000-8000-000000000001",
-          "agentUserId": "00000000-0000-4000-8000-000000000002",
-          "ownerUserId": "00000000-0000-4000-8000-000000000003",
-          "token": "adc1_ci_dummy_token_not_real"
-        }
-      }
-    }
-  }
-}
-JSON
 
 echo "== pack"
 archive="$(npm pack --silent --ignore-scripts)"
@@ -49,9 +29,23 @@ echo "archive: $archive"
 echo "== install (npm-pack, forced, capabilities accepted)"
 "$OPENCLAW_BIN" plugins install "npm-pack:./$archive" --force --accept-capabilities
 
+# Seed one dummy Ademú account AFTER the install (before it, "channels.ademu" is an unknown channel id
+# and the CLI refuses the invalid config); activation is what exposes the skills.
+cfg="$OPENCLAW_STATE_DIR/openclaw.json"
+[ -f "$cfg" ] || echo '{}' > "$cfg"
+jq '.channels.ademu = {
+      enabled: true,
+      accounts: { ci: {
+        enabled: true, agentName: "CI Agent",
+        deviceId: "00000000-0000-4000-8000-000000000001",
+        agentUserId: "00000000-0000-4000-8000-000000000002",
+        ownerUserId: "00000000-0000-4000-8000-000000000003",
+        token: "adc1_ci_dummy_token_not_real" } } }' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+
 echo "== inspect --runtime --json"
 inspect_json="$("$OPENCLAW_BIN" plugins inspect ademu --runtime --json)"
-echo "$inspect_json" | head -c 4000; echo
+echo "$inspect_json" > "${INSPECT_OUT:-/dev/null}"
+echo "$inspect_json" | head -c 1500; echo
 status="$(echo "$inspect_json" | jq -r '.plugin.status // .status // empty')"
 [ "$status" = "loaded" ] || { echo "FAIL: plugin status is '$status', expected loaded"; exit 1; }
 echo "$inspect_json" | jq -e '[.. | objects | select(.kind? == "channel") | .ids[]?] | index("ademu") != null' >/dev/null \

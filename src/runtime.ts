@@ -1,6 +1,9 @@
 // Process-wide runtime slots (plan T10/T14): the host-injected PluginRuntime, the plugin's own
 // manifest config values, and the lazily opened SQLite store + DaemonManager shared by every account.
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
 import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
@@ -41,11 +44,44 @@ export function getPluginSettings(): AdemuPluginSettings {
   return settings;
 }
 
-/** The exact daemon version this plugin bundles (package pin; the versioning gate asserts it is exact). */
+function nearestPackageJson(startDir: string, accept: (pkg: Record<string, unknown>) => string | undefined): string | undefined {
+  let dir = startDir;
+  for (let i = 0; i < 8; i++) {
+    const candidate = join(dir, "package.json");
+    if (existsSync(candidate)) {
+      const found = accept(JSON.parse(readFileSync(candidate, "utf8")) as Record<string, unknown>);
+      if (found) return found;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return undefined;
+}
+
+/**
+ * The exact daemon version this plugin bundles. `@ademu/adc-bin` does not export its package.json
+ * (ERR_PACKAGE_PATH_NOT_EXPORTED at register time — caught by the headless acceptance), so walk up
+ * from the resolved entry file to the package's own package.json; fall back to this plugin's exact
+ * dependency pin (the versioning gate asserts it is exact).
+ */
 export function bundledAdcVersion(): string {
   const require = createRequire(import.meta.url);
-  const pkg = require("@ademu/adc-bin/package.json") as { version: string };
-  return pkg.version;
+  let fromInstalled: string | undefined;
+  try {
+    fromInstalled = nearestPackageJson(dirname(require.resolve("@ademu/adc-bin")), (pkg) =>
+      pkg.name === "@ademu/adc-bin" && typeof pkg.version === "string" ? pkg.version : undefined,
+    );
+  } catch {
+    fromInstalled = undefined;
+  }
+  if (fromInstalled) return fromInstalled;
+  const fromPin = nearestPackageJson(dirname(fileURLToPath(import.meta.url)), (pkg) => {
+    const deps = pkg.dependencies as Record<string, string> | undefined;
+    return pkg.name === "@ademu/openclaw-ademu" ? deps?.["@ademu/adc-bin"] : undefined;
+  });
+  if (fromPin) return fromPin;
+  throw new Error("cannot determine the bundled @ademu/adc-bin version");
 }
 
 let sharedStore: AdemuStore | undefined;
