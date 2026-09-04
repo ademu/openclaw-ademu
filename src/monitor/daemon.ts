@@ -546,6 +546,15 @@ export class DaemonManager {
             continue;
           }
           if (probe) return this.#foreignLease(params, holderId, probe.info);
+          if (this.#daemonProcessVerified(row)) {
+            // Our recorded child is ALIVE but not listening (a spawn that never came up): never
+            // start a second daemon beside it — retry once it has exited (Codex branch round 11 #2).
+            this.#deps.log("daemon_child_alive_not_listening", { dataDir: identity.dataDir });
+            throw new DaemonUnreachableError(
+              `a previous Ademú device host process is still running but not answering; it will be retried once it exits (daemon log: ${identity.raw.dataDir}/daemon.log)`,
+              `${identity.raw.dataDir}/daemon.log`,
+            );
+          }
           const starting = this.#toStarting(identity, [row.state], row.generation);
           if (!starting) continue;
           return await this.#spawnAndBind(params, holderId, starting, "existing");
@@ -622,7 +631,12 @@ export class DaemonManager {
   async #spawnAndBind(params: AcquireParams, holderId: string, starting: OwnershipRow, origin: SpawnOrigin): Promise<Lease> {
     const { identity, server, role } = params;
     const store = this.#deps.store;
-    const abandon = (to: "stopped" | "stale", reason: string) => this.#abandonStarting(identity, starting, origin, to, reason);
+    let child: (ChildLike & { pid?: number | undefined }) | undefined;
+    // Once a child EXISTS every abandonment is `stale` with the child's pid facts kept — for a fresh
+    // claim too — so a live-but-unverified process is never forgotten (it authorizes the later fenced
+    // stop and forbids a second spawn beside it). Without a child the origin rule applies.
+    const abandon = (to: "stopped" | "stale", reason: string) =>
+      child ? this.#abandonStarting(identity, starting, "existing", "stale", reason) : this.#abandonStarting(identity, starting, origin, to, reason);
     let binaryPath: string;
     try {
       binaryPath = this.#deps.resolveBinaryPath();
@@ -635,10 +649,11 @@ export class DaemonManager {
       throw err;
     }
 
-    // The ASYNC authority re-check runs immediately before the spawn; only the sync abort check can
-    // live inside spawnFn. ensureDaemon's own probe-then-spawn window is its bare probe, which WE
-    // bound to PROBE_CONNECT_MS through the `connectFn` seam (the package's bare probe has no
-    // timeout of its own). A rejected re-check must not leave our `starting` generation behind.
+    // The ASYNC authority re-check runs immediately before the spawn; inside spawnFn only SYNCHRONOUS
+    // checks can live: the abort flag and the exact-generation ownership re-read. ensureDaemon's own
+    // probe-then-spawn window is its bare probe, which WE bound to PROBE_CONNECT_MS through the
+    // `connectFn` seam (the package's bare probe has no timeout of its own). A rejected re-check must
+    // not leave our `starting` generation behind.
     try {
       await params.beforeEffect?.();
     } catch (err) {
@@ -666,7 +681,6 @@ export class DaemonManager {
     };
 
     const env = daemonEnv(identity, server);
-    let child: (ChildLike & { pid?: number | undefined }) | undefined;
     let exited: { code: unknown; signal: unknown } | undefined;
     const exitWaiters = new Set<() => void>();
 
@@ -714,8 +728,16 @@ export class DaemonManager {
               abandon("stale", "listener answered during an aborted start");
               return;
             }
-            const probe = await this.#probe(identity.raw.controlSocket, identity);
-            if (!probe?.matches) return;
+            let probe: Probe | undefined;
+            try {
+              probe = await this.#probe(identity.raw.controlSocket, identity);
+            } catch {
+              probe = undefined;
+            }
+            if (!probe?.matches) {
+              abandon("stale", probe ? "the listener after an aborted start is not the identity we started" : "spawned child did not answer after an aborted start");
+              return;
+            }
             const latePid = child?.pid ?? null;
             const lateStartedAt = latePid != null ? (this.#deps.processFacts(latePid).startedAt ?? null) : null;
             const bound = this.#bind(role, starting, probe.info, latePid, lateStartedAt);
@@ -744,8 +766,15 @@ export class DaemonManager {
       return this.#foreignLease(params, holderId, probe?.info);
     }
 
-    const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
+    let probe: Probe | undefined;
+    try {
+      probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
+    } catch (err) {
+      abandon("stale", "aborted while verifying the spawned child");
+      throw err;
+    }
     if (!probe) {
+      abandon("stale", "spawned child did not answer");
       throw new DaemonUnreachableError(`the Ademú device host started but its control socket did not answer; see ${result.logPath}`, result.logPath);
     }
     if (!probe.matches) {

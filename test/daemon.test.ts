@@ -75,6 +75,8 @@ class World {
   logs: Array<{ event: string; fields?: Record<string, unknown> | undefined }> = [];
   /** When set, the next spawned daemon does not come up (control never answers). */
   spawnFailsToListen = false;
+  /** When set, ensureDaemon REJECTS after spawnFn (its wait ladder gave up) while the child stays alive. */
+  ensureRejectsAfterSpawn = false;
   /** When set, ensureDaemon resolves only after this promise (late-success containment tests). */
   ensureGate: Promise<void> | undefined;
   /** When set, ensureDaemon's pre-spawn probe waits for this promise BEFORE calling spawnFn (abort-before-spawn tests). */
@@ -163,6 +165,7 @@ class World {
         if (this.preSpawnGate) await this.preSpawnGate;
         const child = deps.spawnFn!(deps.binaryPath ?? "adc", ["daemon", "run"], { detached: true, stdio: ["ignore", 1, 1] });
         if (this.ensureGate) await this.ensureGate;
+        if (this.ensureRejectsAfterSpawn) throw new Error("hello never arrived");
         return { spawned: true, pid: child.pid ?? undefined, ...base };
       },
       connectControl: async (socketPath): Promise<ControlLike> => {
@@ -1013,6 +1016,105 @@ describe("Codex branch-review folds (daemon)", () => {
     await new Promise((r) => setTimeout(r, 5));
     expect(closes).toBe(1);
   }, 10_000);
+
+  it("R11#1 post-spawn probe failures abandon the generation (stale, pid facts kept) on fresh AND existing origins", async () => {
+    // (a) fresh: the spawned child never answers → stale with the child's pid, not deleted
+    const a = new World();
+    a.spawnFailsToListen = true;
+    const ma = new DaemonManager(a.deps());
+    await expect(ma.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    const rowA = a.store.getOwnership(DIR)!;
+    expect(rowA.state).toBe("stale");
+    expect(rowA.daemonPid).not.toBeNull();
+    // (b) existing: a respawn whose probe is aborted → stale, ownership preserved
+    const b = new World();
+    const d = b.addDaemon(DIR);
+    bindLive(b, d);
+    b.killDaemon(d);
+    b.spawnFailsToListen = true;
+    const mb = new DaemonManager(b.deps());
+    await expect(mb.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(b.store.getOwnership(DIR)!.state).toBe("stale");
+    // (c) late abort: the spawned child never answers after an aborted start → stale, not lingering `starting`
+    const c = new World();
+    let releaseEnsure!: () => void;
+    c.ensureGate = new Promise<void>((r) => (releaseEnsure = r));
+    c.spawnFailsToListen = true;
+    const mc = new DaemonManager(c.deps());
+    const ac = new AbortController();
+    const acquiring = mc.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime", signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    ac.abort();
+    await expect(acquiring).rejects.toBeInstanceOf(DaemonAbortedError);
+    releaseEnsure();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(c.store.getOwnership(DIR)!.state).toBe("stale");
+  });
+
+  it("R11#2 a spawned child that never listened stays recorded; while it is alive no second daemon is started; once it exits the respawn proceeds", async () => {
+    const w = new World();
+    w.ensureRejectsAfterSpawn = true;
+    w.spawnFailsToListen = true;
+    const m = new DaemonManager(w.deps());
+    await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    const row = w.store.getOwnership(DIR)!;
+    expect(row.state).toBe("stale");
+    expect(row.daemonPid).not.toBeNull();
+    expect(w.spawns).toHaveLength(1);
+    // the child is alive (never listened): a retry must NOT spawn beside it
+    w.ensureRejectsAfterSpawn = false;
+    w.spawnFailsToListen = false;
+    await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(w.spawns).toHaveLength(1);
+    expect(w.logs.some((l) => l.event === "daemon_child_alive_not_listening")).toBe(true);
+    // the child exits → the next acquire respawns
+    w.processes.get(row.daemonPid!)!.alive = false;
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("owned");
+    expect(w.spawns).toHaveLength(2);
+  });
+
+  it("R11#3 the SYNCHRONOUS generation guard inside spawnFn: a starter whose generation was reclaimed while ensureDaemon was probing never spawns", async () => {
+    const w = new World();
+    let releaseProbe!: () => void;
+    w.preSpawnGate = new Promise<void>((r) => (releaseProbe = r));
+    const first = new DaemonManager(w.deps());
+    const p1 = first.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    p1.catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    expect(w.store.getOwnership(DIR)!.state).toBe("starting");
+    // the refreshed deadline passes while ensureDaemon is inside its pre-spawn probe; another process reclaims
+    w.clock += STARTING_DEADLINE_MS + 1;
+    w.preSpawnGate = undefined;
+    const second = new DaemonManager({ ...w.deps(), selfPid: 200, selfPidStartedAt: "other-start", processFacts: (pid) => (pid === 100 ? { alive: false } : w.deps().processFacts(pid)) });
+    const lease2 = await second.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease2.mode).toBe("owned");
+    expect(w.spawns).toHaveLength(1);
+    releaseProbe(); // the stale starter reaches spawnFn now → exact-generation guard throws
+    await expect(p1).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(w.spawns).toHaveLength(1);
+    expect(w.store.getOwnership(DIR)!.state).toBe("bound"); // the winner's row is untouched
+  });
+
+  it("R10#6 (bounded close) a shutdown connection whose close() never resolves cannot hold the release past the cap", async () => {
+    const w = new World();
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    const deps = w.deps();
+    const m2 = new DaemonManager({
+      ...deps,
+      connectControl: async (socketPath) => {
+        const c = await deps.connectControl(socketPath);
+        return { ...c, close: () => new Promise<void>(() => {}) };
+      },
+    });
+    const lease2 = await m2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    await lease.release();
+    const t0 = Date.now();
+    await lease2.release();
+    expect(Date.now() - t0).toBeLessThan(RELEASE_CAP_MS + 1500);
+    expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
+  }, 15_000);
 
   it("#9 an orphaned `stopping` row is recovered when the stopper is dead OR its deadline passed; our live instance has its stop RESUMED", async () => {
     // (a) live stopper, expired deadline → recovered, stop resumed (shutdown op sent), then respawn

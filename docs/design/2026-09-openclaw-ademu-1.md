@@ -361,6 +361,13 @@ synchronously, so only the current winner ever calls `ensureDaemon`; the members
 refresh atomically and only for the current reconnect generation, and a failed warm-up leaves the
 barrier rejected; the shutdown path contains a late control connection and bounds its close.
 
+**Round 11 (1 HIGH + 2 MEDIUM + 2 LOW, all folded):** every exit of the spawn path abandons its
+`starting` generation, and once a child process exists the abandonment is always `stale` with the
+child's pid facts kept — a live-but-unverified daemon is never forgotten; a later acquisition refuses to
+start a second daemon beside a recorded child that is still alive (it is retried once that process
+exits); the synchronous generation guard at the spawn instant and the bounded shutdown close have
+their own tests.
+
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its
 `package.json` (`ERR_PACKAGE_PATH_NOT_EXPORTED` at register time). Both fixed; the acceptance now
