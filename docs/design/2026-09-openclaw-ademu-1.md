@@ -265,8 +265,62 @@ replacement is newer, bump the `openclaw` devDependency pin, release a patch.
 
 Current version: **0.1.0** (unreleased).
 
-## 12. Close-out
+## 12. Execution record
+
+**Codex adversarial branch review (round 1, 2026-09-04): REVISE, 21 findings, all folded** (the plan's
+§11 has the one-line disposition per finding). The ones that changed the design's letter:
+
+- **Owned-instance verification is fail-closed.** Reattaching to a bound daemon requires all three
+  canonical paths (session socket present), the daemon's `started_at_ms`, and a live pid whose start
+  time and `adc daemon run` command match the row; any missing or differing fact → *foreign*
+  (attach-only). The same verification runs again immediately before the daemon-global `shutdown` op,
+  after re-reading the `stopping` generation; a mismatch withholds the op and marks the row `stale`.
+- **Orphaned `stopping` rows** recover when the stopper is dead **or** its deadline passed: no listener
+  → `stopped`; our verified instance → the stop is *resumed*; an unverified listener → `stale`.
+- **An existing empty data dir** is checked (real directory, owned by us) and made 0700 before the
+  claim; unsafe → `blocked` with a remedy, no spawn.
+- **Terminal client errors** surfacing from the event iterator (revoked token, displaced, protocol
+  violation, an invalid `seq`) end the account as `blocked`; only adoption/ack-integrity failures are
+  the restart-and-replay halt. **Owned daemons** reject the lifetime on the 5th consecutive reconnect
+  attempt (`DaemonLostError` → restart → respawn); foreign daemons retry unbounded.
+- **The reconnect barrier** is generation-fenced and opens only after a *successful* warm-up of the
+  latest reconnect; a failed warm-up closes the client (restart) instead of reporting ready on a
+  partial cache. **Deferred turns** stay under the shutdown guillotine until their own terminal state.
+- **Cleanup is bounded end to end**: session close and daemon release are raced against the remaining
+  budget, control round trips have a real-clock bound; a hung step is logged and abandoned.
+- **The tool door**: `replace_token` is accepted only from the `minting_blocked` state that a
+  `label_exists` answer created (the second consent cannot be skipped); the `agentId` axis is enforced
+  alongside session, sender and lease token; every terminal path disposes the lease at once; known
+  acquisition failures return fixed remedy text; the config write is followed by
+  `pending-publication → bound` promotion of the setup-spawned daemon; the runtime sweeps
+  never-published setup daemons once per process at its first account start.
+- **The manifest channel schema is generated** from the zod source (`scripts/sync-manifest-schema.mjs`)
+  and deep-equal-gated; the pack golden compares the complete tarball manifest; the compat-floor gate
+  checks every SDK import has a row; the privacy scanner recognizes the host's chained child-logger sink.
+- **`security_notice`** (a future live event) sets fixed status copy and posts a fixed room note; no
+  field of the frame is logged.
+
+**Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
+tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its
+`package.json` (`ERR_PACKAGE_PATH_NOT_EXPORTED` at register time). Both fixed; the acceptance now
+proves loaded + channel + `ademu_enroll` + service + both skills against `openclaw@2026.9.1`.
+
+**Recorded during execution:** `api.runtime.media` carries no QR renderers in 2026.9.1 (V2: the
+`media-runtime` exception is the live path); `ChannelMessagingAdapter` is exported only from the `core`
+subpath (type import); OpenClaw's logout hook has no config-write channel, so Rider B's logout uses
+`mutateConfigFile`; the `--link` dev loop (T20) was not exercised — the npm-pack path is the one the
+acceptance and E2E use.
+
+**ClawHub dry-run (V13/T19):** `clawhub package publish . --dry-run --json --family code-plugin` works
+**unauthenticated** (CLI 0.23.3): 48 files / 62 661 bytes, source
+`github:ademu/openclaw-ademu@feat/openclaw-ademu-1`. Publishing stays a launch-calendar item.
+
+**Repo gates (T21):** ruleset "main gate" id 22259787 (PR required / 0 reviews, no force-push or
+deletion, required check `ci-gate`, admin bypass); Issues enabled. **Monorepo pointer PR (T22):**
+ademu/AdemuMLS#221.
+
+## 13. Close-out
 
 Filled at E2E: one outcome line per V/R/rider, the eight E2E legs (isolated daemon legs 1–7; leg 8 =
 read-only attach to the production daemon in foreign mode, recording the takeover displacement of the
-device's current mind), the ClawHub dry-run result, the first `beta.yml` run, the ruleset id.
+device's current mind), the first `beta.yml` run.

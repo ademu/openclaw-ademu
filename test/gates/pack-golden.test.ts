@@ -2,8 +2,18 @@
 // manifest, the icon, skills, licenses, README, CHANGELOG — and what never ships: sources, tests,
 // docs, scripts, CI. Run `npm run build` first (CI does).
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
+
+function walk(dir: string): string[] {
+  const out: string[] = [];
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) out.push(...walk(full));
+    else if (full.endsWith(".ts")) out.push(full);
+  }
+  return out;
+}
 import { describe, expect, it } from "vitest";
 
 const ROOT = new URL("../..", import.meta.url).pathname;
@@ -39,15 +49,20 @@ describe("npm pack golden", () => {
       (p) => FORBIDDEN_PREFIXES.some((pre) => p.startsWith(pre)) || (/\.ts$/.test(p) && !/\.d\.ts$/.test(p)),
     );
     expect(forbidden, "files that must not ship").toEqual([]);
-    // Skills ship as directories with SKILL.md (T15 adds them); every one on disk must be in the tarball.
+    // The COMPLETE expected manifest: the fixed files, every skill on disk, and exactly the compiled
+    // output of the TypeScript sources (one .js + .js.map per source file). Anything else — or
+    // anything missing — fails: the tarball is the install contract, not a subset check.
+    const expected = new Set<string>(REQUIRED);
     const skillsDir = join(ROOT, "skills");
-    if (existsSync(skillsDir)) {
-      for (const name of readdirSync(skillsDir)) {
-        const skill = join("skills", name, "SKILL.md");
-        if (existsSync(join(ROOT, skill))) {
-          expect(files.has(skill), `skill missing from tarball: ${skill}`).toBe(true);
-        }
-      }
+    for (const name of readdirSync(skillsDir)) {
+      const skill = join("skills", name, "SKILL.md");
+      if (existsSync(join(ROOT, skill))) expected.add(skill);
     }
+    for (const rel of ["index.ts", "setup-entry.ts", ...walk(join(ROOT, "src")).map((f) => relative(ROOT, f))]) {
+      const base = rel.replace(/\.ts$/, "");
+      expected.add(`dist/${base}.js`);
+      expected.add(`dist/${base}.js.map`);
+    }
+    expect([...files].sort()).toEqual([...expected].sort());
   });
 });

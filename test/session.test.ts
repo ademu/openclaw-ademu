@@ -96,4 +96,70 @@ describe("openSession", () => {
     expect(session.retries()).toBe(0);
     expect((await session.members.get(ROOM_GROUP)).some((m) => m.user_id === GUEST)).toBe(true);
   });
+
+  it("#5 a failed warm-up keeps the barrier CLOSED and closes the client (restart), never ready on a partial cache", async () => {
+    const client = new FakeAdcClient();
+    client.room(ROOM_GROUP, [member(OWNER), member(AGENT, "agent")]);
+    const { connect } = fakeConnect(client);
+    let reconnected = 0;
+    const session = await openSession({
+      token: "t",
+      sessionSocketPath: "/s",
+      account: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER },
+      deps: { connect, now: () => 0, log },
+      onReconnected: () => reconnected++,
+    });
+    client.emit("retry", { attempt: 1, delayMs: 1 });
+    let released = false;
+    void session.barrier().then(() => {
+      released = true;
+    });
+    client.refreshFails = true;
+    client.emit("reconnected");
+    await new Promise((r) => setTimeout(r, 5));
+    expect(released).toBe(false);
+    expect(reconnected).toBe(0);
+    expect(client.closed).toBe(true);
+  });
+
+  it("#5 a superseded warm-up (newer outage) cannot open the barrier; the latest one does", async () => {
+    const client = new FakeAdcClient();
+    client.room(ROOM_GROUP, [member(OWNER), member(AGENT, "agent")]);
+    const { connect } = fakeConnect(client);
+    let reconnected = 0;
+    const session = await openSession({
+      token: "t",
+      sessionSocketPath: "/s",
+      account: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER },
+      deps: { connect, now: () => 0, log },
+      onReconnected: () => reconnected++,
+    });
+    // Slow the first warm-up: listConversations blocks until we let it go.
+    let releaseSlow!: () => void;
+    const slow = new Promise<void>((r) => {
+      releaseSlow = r;
+    });
+    const original = client.listConversations.bind(client);
+    let calls = 0;
+    client.listConversations = async () => {
+      calls++;
+      if (calls === 1) await slow;
+      return original();
+    };
+    client.emit("retry", { attempt: 1, delayMs: 1 });
+    client.emit("reconnected"); // generation 1 warm-up starts (slow)
+    client.emit("retry", { attempt: 1, delayMs: 1 }); // newer outage → generation 2
+    let released = false;
+    void session.barrier().then(() => {
+      released = true;
+    });
+    releaseSlow(); // the stale warm-up finishes — must NOT open the barrier
+    await new Promise((r) => setTimeout(r, 5));
+    expect(released).toBe(false);
+    expect(reconnected).toBe(0);
+    client.emit("reconnected"); // generation 2 warm-up
+    await new Promise((r) => setTimeout(r, 5));
+    expect(released).toBe(true);
+    expect(reconnected).toBe(1);
+  });
 });

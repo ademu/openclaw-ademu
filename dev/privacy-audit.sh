@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."
 FAILED=0
 
 TS_PATTERN='password|passphrase|refresh_token|bearer|plaintext|ciphertext|dsn|access_token|api_secret|adc1_|qr_payload|qrpayload|qrdataurl|agent_name|agentname|\.detail([^a-z0-9_]|$)|\.raw([^a-z0-9_]|$)|(^|[^a-z0-9_])token[[:space:]]*[,})+:=]|[.{$]token([^a-z0-9_]|$)|(^|[^a-z0-9_])words[[:space:]]*[,})+:=]|[.{$]words([^a-z0-9_]|$)'
-TS_LOG_SCOPE='console\.(log|info|warn|error|debug)\(|process\.std(out|err)\.write\(|(^|[^a-zA-Z_.])(log|fail)\(|(^|[^a-zA-Z_])(log|logger|runtime)[?]?\.(info|warn|error|debug|log)\('
+TS_LOG_SCOPE='console\.(log|info|warn|error|debug)\(|process\.std(out|err)\.write\(|(^|[^a-zA-Z_.])(log|fail)\(|(^|[^a-zA-Z_])(log|logger|runtime)[?]?\.(info|warn|error|debug|log)\(|getChildLogger\([^)]*\)\.(info|warn|error|debug)\(|hostLog\('
 export TS_PATTERN TS_LOG_SCOPE
 
 # Roots: files or directories (unquoted on purpose — several roots). The self-test overrides the

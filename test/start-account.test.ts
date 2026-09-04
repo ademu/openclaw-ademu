@@ -33,10 +33,15 @@ function account(over: Partial<ResolvedAdemuAccount> = {}): ResolvedAdemuAccount
 
 type FakeLease = Lease & { released: number; lose: (err: unknown) => void };
 
-function fakeDaemons(opts: { acquire?: () => Promise<void> } = {}) {
+function fakeDaemons(opts: { acquire?: () => Promise<void>; mode?: "owned" | "foreign"; releaseHangs?: boolean } = {}) {
   const calls: unknown[] = [];
+  const sweeps: unknown[] = [];
   let lease: FakeLease | undefined;
   const daemons = {
+    sweepPendingPublications: async (isReferenced: unknown) => {
+      sweeps.push(isReferenced);
+      return [];
+    },
     acquire: async (params: unknown) => {
       calls.push(params);
       await opts.acquire?.();
@@ -45,7 +50,7 @@ function fakeDaemons(opts: { acquire?: () => Promise<void> } = {}) {
         lose = reject;
       });
       lease = {
-        mode: "owned",
+        mode: opts.mode ?? "owned",
         role: "runtime",
         identity: (params as { identity: unknown }).identity as never,
         holderId: "h1",
@@ -55,12 +60,13 @@ function fakeDaemons(opts: { acquire?: () => Promise<void> } = {}) {
         lose,
         release: async () => {
           lease!.released++;
+          if (opts.releaseHangs) await new Promise(() => {});
         },
       };
       return lease;
     },
   } as unknown as DaemonManager;
-  return { daemons, calls, lease: () => lease };
+  return { daemons, calls, sweeps, lease: () => lease };
 }
 
 function runtimeSurface(): RuntimeChannelSurface {
@@ -74,7 +80,7 @@ function runtimeSurface(): RuntimeChannelSurface {
   };
 }
 
-function world(opts: { platform?: string; connectError?: unknown; acquireError?: unknown } = {}) {
+function world(opts: { platform?: string; connectError?: unknown; acquireError?: unknown; mode?: "owned" | "foreign"; releaseHangs?: boolean } = {}) {
   const client = new FakeAdcClient();
   client.room(ROOM_DM, [member(OWNER, "human", "Marios"), member(AGENT, "agent", "Iris")]);
   const { connect } = fakeConnect(client);
@@ -85,6 +91,8 @@ function world(opts: { platform?: string; connectError?: unknown; acquireError?:
     acquire: async () => {
       if (opts.acquireError) throw opts.acquireError;
     },
+    ...(opts.mode ? { mode: opts.mode } : {}),
+    ...(opts.releaseHangs ? { releaseHangs: true } : {}),
   });
   let now = 0;
   const deps: StartAccountDeps = {
@@ -158,16 +166,57 @@ describe("startAccount: restart outcomes (throw)", () => {
     expect(w.client.closed).toBe(true);
   });
 
-  it("an ingress halt (terminal iterator error) → recovering with ingressUnavailable + rejects", async () => {
+  it("an ingress halt (dispatch rejects before adoption) → recovering + ingressUnavailable + rejects", async () => {
+    const w = world();
+    w.deps.runtime.inbound.dispatch = () => Promise.reject(new Error("core refused"));
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    w.client.room(ROOM_DM, [member(OWNER, "human", "Marios"), member(AGENT, "agent", "Iris")]);
+    w.client.message({ body: "hello" });
+    const err = await run.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).name).toBe("IngressHaltedError");
+    const last = w.statuses.at(-1)!;
+    expect(last).toMatchObject({ lifecycle: "recovering", ingressUnavailable: true });
+    expect(w.client.acks).toEqual([]); // nothing acked: the daemon replays after the restart
+    expect(w.dm.lease()!.released).toBe(1);
+  });
+
+  it("a protocol violation from the daemon (invalid seq) → blocked, resolves (no restart loop)", async () => {
     const w = world();
     const run = startAccount(w.ctx, w.deps);
     await settle();
-    w.client.live({ event: "message_received", seq: -1 }); // invalid seq → protocol violation → halt path
-    const err = await run.catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(Error);
-    const last = w.statuses.at(-1)!;
-    expect(last.lifecycle === "recovering" || last.lastError !== undefined).toBe(true);
+    w.client.live({ event: "message_received", seq: -1 });
+    await run;
+    expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "blocked" });
     expect(w.dm.lease()!.released).toBe(1);
+  });
+
+  it("a terminal client error surfacing from the event iterator (token revoked mid-run) → blocked, resolves", async () => {
+    const w = world();
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    w.client.failStream(new InvalidTokenError());
+    await run;
+    expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "blocked" });
+    expect(String(w.statuses.at(-1)!.lastError)).toMatch(/token/i);
+  });
+
+  it("owned daemon: the 5th consecutive retry → DaemonLostError (restart); foreign: never", async () => {
+    const owned = world();
+    const run = startAccount(owned.ctx, owned.deps);
+    await settle();
+    for (let i = 1; i <= 5; i++) owned.client.emit("retry", { attempt: i, delayMs: 10 } as never);
+    await expect(run).rejects.toBeInstanceOf(DaemonLostError);
+
+    const foreign = world({ mode: "foreign" });
+    const run2 = startAccount(foreign.ctx, foreign.deps);
+    await settle();
+    for (let i = 1; i <= 8; i++) foreign.client.emit("retry", { attempt: i, delayMs: 10 } as never);
+    await settle();
+    expect(foreign.statuses.at(-1)).toMatchObject({ lifecycle: "recovering" });
+    foreign.ac.abort();
+    await run2; // still running until abort; never rejected
   });
 
   it("daemon unreachable at acquire → recovering + rejects", async () => {
@@ -214,5 +263,48 @@ describe("startAccount: blocked outcomes (return, no restart)", () => {
       expect(w.dm.calls).toHaveLength(0);
       expect(w.statuses.at(-1)!.running === false || w.statuses.at(-1)!.lifecycle === "blocked").toBe(true);
     }
+  });
+});
+
+describe("startAccount: Codex branch-review folds", () => {
+  it("#8 a hung daemon release is abandoned at the deadline (logged), the account still returns", async () => {
+    const w = world({ releaseHangs: true });
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    w.ac.abort();
+    await run;
+    expect(w.dm.lease()!.released).toBe(1);
+    expect(w.logs.some((l) => l.event === "cleanup_step_timed_out" && l.fields?.step === "daemon_release")).toBe(true);
+  });
+
+  it("#10 the pending-publication sweep runs once per daemon manager, before the first acquire", async () => {
+    const w = world();
+    const run1 = startAccount(w.ctx, w.deps);
+    await settle();
+    w.ac.abort();
+    await run1;
+    expect(w.dm.sweeps).toHaveLength(1);
+    // A second account start on the SAME manager (fresh client/session): no second sweep.
+    const w2 = world();
+    w2.deps.daemons = w.deps.daemons;
+    const run2 = startAccount(w2.ctx, w2.deps);
+    await settle();
+    w2.ac.abort();
+    await run2;
+    expect(w.dm.sweeps).toHaveLength(1);
+    expect(w.dm.calls).toHaveLength(2);
+  });
+
+  it("#21 a security_notice sets the fixed status copy and posts the fixed room note; the frame never reaches a log", async () => {
+    const w = world();
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    w.client.unknownEvent("security_notice", { group_id: ROOM_DM, detail: "SECRET-DETAIL" });
+    await settle();
+    expect(w.statuses.at(-1)).toMatchObject({ lastError: expect.stringContaining("security notice") });
+    expect(w.client.sent).toEqual([{ group_id: ROOM_DM, body: expect.stringContaining("security notice") }]);
+    expect(JSON.stringify(w.logs)).not.toContain("SECRET-DETAIL");
+    w.ac.abort();
+    await run;
   });
 });

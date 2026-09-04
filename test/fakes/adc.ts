@@ -30,14 +30,26 @@ class Queue<T> {
     if (w) w({ value: item, done: false });
     else this.#items.push(item);
   }
+  #error: unknown;
+  #rejecters: Array<(e: unknown) => void> = [];
   finish() {
     this.#done = true;
     for (const w of this.#waiters.splice(0)) w({ value: undefined as never, done: true });
   }
+  /** The iterator throws `err` (a terminal client error surfacing after a reconnect). */
+  fail(err: unknown) {
+    this.#error = err;
+    for (const r of this.#rejecters.splice(0)) r(err);
+    this.#waiters.splice(0);
+  }
   next(): Promise<IteratorResult<T>> {
     if (this.#items.length) return Promise.resolve({ value: this.#items.shift()!, done: false });
+    if (this.#error !== undefined) return Promise.reject(this.#error);
     if (this.#done) return Promise.resolve({ value: undefined as never, done: true });
-    return new Promise((r) => this.#waiters.push(r));
+    return new Promise((r, rej) => {
+      this.#waiters.push(r);
+      this.#rejecters.push(rej);
+    });
   }
 }
 
@@ -98,9 +110,22 @@ export class FakeAdcClient {
     this.#queue.push({ known: false, type: "event", seq: this.#seq++, event: "future_thing", raw: { secret: "x" } } as unknown as DeviceEvent);
   }
 
+  /** An unknown (future) event with a given name and raw wire object. */
+  unknownEvent(event: string, raw: Record<string, unknown>) {
+    this.#queue.push({ known: false, type: "event", seq: this.#seq++, event, raw } as unknown as DeviceEvent);
+  }
+
   endStream() {
     this.#queue.finish();
   }
+
+  /** The event iterator rejects with a terminal client error (what the real client does after a failed reconnect). */
+  failStream(err: unknown) {
+    this.#queue.fail(err);
+  }
+
+  /** Whether `refresh()` calls fail (reconnect warm-up failure). */
+  refreshFails = false;
 
   events(): AsyncIterableIterator<DeviceEvent> {
     const q = this.#queue;
@@ -149,6 +174,7 @@ export class FakeAdcClient {
     return { status: "sent" };
   }
   async listConversations() {
+    if (this.refreshFails) throw new Error("list_conversations failed");
     return { conversations: this.conversations };
   }
   async getMembers(params: { group_id: string }) {

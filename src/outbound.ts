@@ -129,7 +129,8 @@ export async function sendAdemuText(params: {
 /** Resolves an outbound `to` into a conversation id (UUID) or throws a clear error. */
 export function resolveConversationTarget(to: string): string {
   const id = normalizeTarget(to);
-  if (!id) throw new Error(`Ademú targets are conversation ids (UUID), optionally prefixed "ademu:"; got "${to.trim()}".`);
+  // Never reflect the raw target into the error (host code may log channel errors): shape only.
+  if (!id) throw new Error(`Ademú targets are conversation ids (UUID), optionally prefixed "ademu:"; got a ${to.trim().length}-character value that is not one.`);
   return id;
 }
 

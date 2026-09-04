@@ -20,6 +20,13 @@ export class IdentityMismatchError extends Error {
     this.name = "IdentityMismatchError";
   }
 }
+/** A frame the daemon should never send (e.g. a non-integer `seq`): terminal, user must restart. */
+export class IngressProtocolError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IngressProtocolError";
+  }
+}
 export class IngressHaltedError extends Error {
   constructor(readonly cause: unknown) {
     super("ingress halted before adoption");
@@ -48,7 +55,7 @@ export function classifyError(err: unknown): Classified {
   if (err instanceof InvalidTokenError) return { kind: "blocked", lastError: strings.status.tokenRevoked };
   if (err instanceof DeviceNotReadyError) return { kind: "blocked", lastError: strings.status.notEnrolled };
   if (err instanceof AlreadyAttachedError) return { kind: "blocked", lastError: strings.status.displaced };
-  if (err instanceof ProtocolViolationError || err instanceof LineTooLongError) {
+  if (err instanceof ProtocolViolationError || err instanceof LineTooLongError || err instanceof IngressProtocolError) {
     return { kind: "blocked", lastError: strings.status.protocolViolation };
   }
   if (err instanceof IdentityMismatchError) return { kind: "blocked", lastError: strings.status.identityMismatch };

@@ -1,7 +1,17 @@
 // The compat floor is DERIVED from actual imports (docs/design/compat-floor.md), never inherited by
 // convention. This gate pins package.json to the table's maximum first-release.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+
+function walk(dir: string): string[] {
+  const out: string[] = [];
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) out.push(...walk(full));
+    else if (full.endsWith(".ts")) out.push(full);
+  }
+  return out;
+}
 import { describe, expect, it } from "vitest";
 
 const ROOT = new URL("../..", import.meta.url).pathname;
@@ -36,6 +46,25 @@ describe("compat floor derived from imports", () => {
   it("package.json floors equal the derived floor", () => {
     expect(pkg.openclaw.compat.pluginApi).toBe(`>=${floor}`);
     expect(pkg.openclaw.install.minHostVersion).toBe(`>=${floor}`);
+  });
+
+  it("every openclaw/plugin-sdk import in the source tree has a row in the table (no silent floor drift)", () => {
+    const files = [join(ROOT, "index.ts"), join(ROOT, "setup-entry.ts"), ...walk(join(ROOT, "src"))];
+    const importRe = /import\s+(type\s+)?\{([^}]*)\}\s+from\s+"openclaw\/plugin-sdk\/([a-z0-9-]+)"/g;
+    const missing: string[] = [];
+    for (const file of files) {
+      const src = readFileSync(file, "utf8");
+      for (const m of src.matchAll(importRe)) {
+        const subpath = m[3]!;
+        if (!table.includes(`| \`${subpath}\` |`) && !table.includes(`| \`${subpath}\` (`)) missing.push(`${subpath} (file)`);
+        for (const raw of m[2]!.split(",")) {
+          const name = raw.replace(/\btype\s+/, "").split(" as ")[0]!.trim();
+          if (!name) continue;
+          if (!table.includes(`\`${subpath}\` → \`${name}\``)) missing.push(`${subpath} → ${name}`);
+        }
+      }
+    }
+    expect(missing, "imports without a compat-floor row (re-derive docs/design/compat-floor.md)").toEqual([]);
   });
 
   it("floors never use || ranges (rejected by the host)", () => {

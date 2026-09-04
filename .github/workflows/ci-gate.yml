@@ -39,10 +39,13 @@ jobs:
           echo "settling 45s for sibling runs on ${HEAD_SHA} ..."
           sleep 45
 
+          # One entry per WORKFLOW: the newest run (highest run_number) wins, so a re-run that
+          # went green supersedes an earlier failed attempt on the same SHA.
           list_runs() {
             gh api "repos/${REPO}/actions/runs?event=pull_request&head_sha=${HEAD_SHA}&per_page=100" \
-              --jq '[.workflow_runs[] | select(.name != "ci-gate")
-                     | {name, status, conclusion}]'
+              --jq '[.workflow_runs[] | select(.name != "ci-gate")]
+                     | group_by(.workflow_id) | map(max_by(.run_number))
+                     | map({name, status, conclusion})'
           }
 
           while :; do

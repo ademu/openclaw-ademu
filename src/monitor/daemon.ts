@@ -17,7 +17,7 @@
 // Every timing constant is a named export; every process/fs/net effect goes through `DaemonDeps`
 // so the state machine is testable with fakes.
 import { spawn as realSpawn, execFileSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, readdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { PlatformPackageMissingError, resolveAdcBinaryPath, UnsupportedPlatformError } from "@ademu/adc-bin";
 import { connect as connectControlReal, ensureDaemon as ensureDaemonReal, type ChildLike, type DaemonInfoResult } from "@ademu/adc-control";
@@ -61,6 +61,8 @@ export type DaemonDeps = {
   resolveBinaryPath: () => string;
   kill: (pid: number, signal: NodeJS.Signals) => void;
   isDirAbsentOrEmpty: (dir: string) => boolean;
+  /** For an EXISTING empty dir: verify it is a real directory we own and make it 0700. */
+  secureEmptyDir: (dir: string) => "absent" | "ok" | "unsafe";
   bundledVersion: string;
   platform: string;
   /** Closed-allowlist structured log: never a path with secrets, never `.detail`. */
@@ -174,6 +176,7 @@ export function realDaemonDeps(params: { store: AdemuStore; bundledVersion: stri
     resolveBinaryPath: resolveAdcBinaryPath,
     kill: (pid, signal) => process.kill(pid, signal),
     isDirAbsentOrEmpty: (dir) => !existsSync(dir) || readdirSync(dir).length === 0,
+    secureEmptyDir: realSecureEmptyDir,
     bundledVersion: params.bundledVersion,
     platform: process.platform,
     log: params.log ?? (() => {}),
@@ -181,6 +184,42 @@ export function realDaemonDeps(params: { store: AdemuStore; bundledVersion: stri
 }
 
 type Probe = { info: DaemonInfoResult; matches: boolean };
+
+/** Real-clock bound for a control-plane round trip (the fake clock in tests never reaches it). */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("control round trip timed out")), Math.max(1, ms));
+    t.unref?.();
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
+/** An existing, empty daemon dir must be a real directory we own; it is then made private (0700). */
+export function realSecureEmptyDir(dir: string): "absent" | "ok" | "unsafe" {
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(dir);
+  } catch {
+    return "absent";
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) return "unsafe";
+  if (typeof process.getuid === "function" && st.uid !== process.getuid()) return "unsafe";
+  try {
+    chmodSync(dir, 0o700);
+  } catch {
+    return "unsafe";
+  }
+  return "ok";
+}
 
 /** True when the daemon at the other end is exactly the identity we own (all three paths). */
 export function infoMatchesIdentity(info: DaemonInfoResult, identity: DaemonIdentity): boolean {
@@ -235,14 +274,40 @@ export class DaemonManager {
     return facts.alive && (!pidStartedAt || !facts.startedAt || facts.startedAt === pidStartedAt);
   };
 
-  /** Bound daemon facts still describe a live `adc daemon run` process (defeats pid reuse). */
+  /**
+   * Bound daemon facts still describe a live `adc daemon run` process (defeats pid reuse). FAIL
+   * CLOSED: a missing pid, start time, or command is "not proven", never "assumed ours".
+   */
   #daemonProcessVerified(row: OwnershipRow): boolean {
-    if (row.daemonPid == null) return false;
+    if (row.daemonPid == null || !row.daemonPidStartedAt) return false;
     const facts = this.#deps.processFacts(row.daemonPid);
-    if (!facts.alive) return false;
-    if (row.daemonPidStartedAt && facts.startedAt && facts.startedAt !== row.daemonPidStartedAt) return false;
-    if (facts.command && !/adc(\s|$).*daemon\s+run/.test(facts.command) && !/\badc\b.*\bdaemon\b/.test(facts.command)) return false;
-    return true;
+    if (!facts.alive || !facts.startedAt || !facts.command) return false;
+    if (facts.startedAt !== row.daemonPidStartedAt) return false;
+    return /\badc\b.*\bdaemon\b\s+\brun\b/.test(facts.command);
+  }
+
+  /**
+   * Fail-closed proof that the daemon answering on our sockets is the exact instance we bound: all
+   * three canonical paths (session socket REQUIRED), the daemon's own start time, and a live pid
+   * whose start time and command match the row. Anything missing or different → foreign, never
+   * stopped or upgraded (Codex branch review #6).
+   */
+  #verifyOwnedInstance(row: OwnershipRow, info: DaemonInfoResult): boolean {
+    if (!info.session_socket_path || !info.data_dir || !info.socket_path) return false;
+    if (canonicalizePath(info.data_dir) !== row.dataDir) return false;
+    if (canonicalizePath(info.socket_path) !== row.controlSocket) return false;
+    if (canonicalizePath(info.session_socket_path) !== row.sessionSocket) return false;
+    if (row.daemonStartedAtMs == null || info.started_at_ms !== row.daemonStartedAtMs) return false;
+    return this.#daemonProcessVerified(row);
+  }
+
+  /** Tool-door accelerator: the enrollment's config is committed → publish the setup-spawned daemon. */
+  promotePendingPublication(dataDir: string): boolean {
+    const row = this.#deps.store.getOwnership(dataDir);
+    if (!row || row.state !== "pending-publication") return false;
+    const ok = this.#deps.store.cas({ dataDir, from: ["pending-publication"], to: "bound", expectedGeneration: row.generation });
+    if (ok) this.#deps.log("daemon_promoted", { dataDir });
+    return Boolean(ok);
   }
 
   // ------------------------------------------------------------------ acquire
@@ -283,7 +348,7 @@ export class DaemonManager {
       if (ok) return;
       // The daemon is `stopping`: wait for the transition (or recover an orphaned stop).
       const row = this.#deps.store.getOwnership(identity.dataDir);
-      if (row?.state === "stopping" && !this.#ownerAlive(row) && this.#expired(row)) {
+      if (row?.state === "stopping" && (!this.#ownerAlive(row) || this.#expired(row))) {
         await this.#recoverOrphanedStopping(row, identity);
         continue;
       }
@@ -292,10 +357,33 @@ export class DaemonManager {
     }
   }
 
+  /**
+   * An orphaned `stopping` row (stopper dead OR deadline passed): no listener → `stopped`; our exact
+   * instance still answering → RESUME the stop under this generation; anything else answering → the
+   * row is `stale` (we no longer own what listens there). Never `bound` on a path match alone.
+   */
   async #recoverOrphanedStopping(row: OwnershipRow, identity: DaemonIdentity): Promise<void> {
     const probe = await this.#probe(identity.raw.controlSocket, identity);
-    const to: OwnershipState = probe?.matches ? "bound" : "stopped";
-    this.#deps.store.cas({ dataDir: identity.dataDir, from: ["stopping"], to, expectedGeneration: row.generation, set: { reason: "orphaned stop recovered" } });
+    let to: OwnershipState;
+    let reason: string;
+    if (!probe) {
+      to = "stopped";
+      reason = "orphaned stop: no listener";
+    } else if (this.#verifyOwnedInstance(row, probe.info)) {
+      const clean = await this.#terminate(identity, row);
+      to = clean ? "stopped" : "stale";
+      reason = clean ? "orphaned stop resumed" : "orphaned stop resumed: did not exit within the budget";
+    } else {
+      to = "stale";
+      reason = "orphaned stop: an unverified listener answers on our socket";
+    }
+    this.#deps.store.cas({
+      dataDir: identity.dataDir,
+      from: ["stopping"],
+      to,
+      expectedGeneration: row.generation,
+      set: { ownerPid: null, ownerPidStartedAt: null, deadlineMs: null, reason },
+    });
     this.#deps.log("daemon_stopping_recovered", { dataDir: identity.dataDir, to });
   }
 
@@ -312,6 +400,13 @@ export class DaemonManager {
         const probe = await this.#probe(identity.raw.controlSocket, identity);
         if (probe) return this.#foreignLease(params, holderId, probe.info);
         if (!this.#deps.isDirAbsentOrEmpty(identity.raw.dataDir)) return this.#foreignLease(params, holderId, undefined);
+        // An EXISTING empty dir must be ours and private before we put a daemon's state in it
+        // (ensureDaemon only applies 0700 to a dir it creates): symlink / other owner → refuse.
+        if (this.#deps.secureEmptyDir(identity.raw.dataDir) === "unsafe") {
+          throw new DaemonUnsupportedError(
+            `the Ademú device host data dir ${identity.raw.dataDir} is a symlink or not owned by this user; fix its ownership and permissions (0700) or choose another channels.ademu.dataDir`,
+          );
+        }
         // Fresh: claim BEFORE spawn.
         const claimed = store.claim({
           dataDir: identity.dataDir,
@@ -330,6 +425,12 @@ export class DaemonManager {
         case "bound":
         case "pending-publication": {
           const probe = await this.#probe(identity.raw.controlSocket, identity);
+          if (probe?.matches && !this.#verifyOwnedInstance(row, probe.info)) {
+            // Paths match but the instance facts do not: a replacement daemon on our sockets. Attach
+            // only — never stop, never upgrade. The row keeps the last facts we could prove.
+            this.#deps.log("daemon_unverified_foreign", { dataDir: identity.dataDir, state: row.state });
+            return this.#foreignLease(params, holderId, probe.info);
+          }
           if (probe?.matches) {
             let current = row;
             if (row.state === "pending-publication" && params.role === "runtime") {
@@ -379,7 +480,7 @@ export class DaemonManager {
         case "stopped":
         case "stale": {
           const probe = await this.#probe(identity.raw.controlSocket, identity);
-          if (probe?.matches && row.daemonPid != null && this.#daemonProcessVerified(row)) {
+          if (probe?.matches && this.#verifyOwnedInstance(row, probe.info)) {
             const bound = store.cas({ dataDir: identity.dataDir, from: [row.state], to: "bound", expectedGeneration: row.generation });
             if (bound) return await this.#ownedLease(params, holderId, bound, probe.info, undefined);
             continue;
@@ -509,7 +610,9 @@ export class DaemonManager {
             }
             const probe = await this.#probe(identity.raw.controlSocket, identity);
             if (!probe?.matches) return;
-            const bound = this.#bind(role, starting, probe.info, child?.pid ?? null, null);
+            const latePid = child?.pid ?? null;
+            const lateStartedAt = latePid != null ? (this.#deps.processFacts(latePid).startedAt ?? null) : null;
+            const bound = this.#bind(role, starting, probe.info, latePid, lateStartedAt);
             if (bound && role === "runtime") {
               await this.#stopOwnedDaemon(identity, bound, holderId, "aborted start");
             }
@@ -718,10 +821,19 @@ export class DaemonManager {
 
     let control: ControlLike | undefined;
     try {
-      control = await this.#deps.connectControl(identity.raw.controlSocket);
+      control = await withTimeout(this.#deps.connectControl(identity.raw.controlSocket), Math.min(SHUTDOWN_OP_MS, remaining()));
+      // Last look immediately BEFORE the daemon-global shutdown op: the row must still be OUR
+      // `stopping` generation and the listener must still be the bound instance (a replacement
+      // that slipped onto the socket between the fence and this connect is never shut down).
+      const info = await withTimeout(control.daemonInfo(), Math.min(SHUTDOWN_OP_MS, remaining()));
+      const current = this.#deps.store.getOwnership(identity.dataDir);
+      if (!current || current.state !== "stopping" || current.generation !== row.generation || !this.#verifyOwnedInstance(row, info)) {
+        this.#deps.log("daemon_shutdown_withheld", { dataDir: identity.dataDir });
+        return false;
+      }
       await control.request("shutdown", {}, { timeoutMs: Math.min(SHUTDOWN_OP_MS, remaining()) });
     } catch {
-      /* fall through to signals */
+      /* unreachable or slow: fall through to the (verified-pid-only) signals */
     } finally {
       await control?.close().catch(() => {});
     }

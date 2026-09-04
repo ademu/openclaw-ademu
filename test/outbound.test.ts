@@ -124,7 +124,9 @@ describe("outbound: message adapter", () => {
 
   it("rejects a target that is not a conversation id", async () => {
     registerLiveAccount("main", { client: new FakeAdcClient() });
-    await expect(ademuMessageAdapter.send.text!({ cfg, to: "alice", text: "hi", accountId: "main" })).rejects.toThrow(/conversation ids/);
+    const err = (await ademuMessageAdapter.send.text!({ cfg, to: "alice-secret-value", text: "hi", accountId: "main" }).catch((e: unknown) => e)) as Error;
+    expect(err.message).toMatch(/conversation ids/);
+    expect(err.message).not.toContain("alice-secret-value"); // never reflect caller data into (loggable) errors
   });
 
   it("proves the declared durable-final text capability", async () => {

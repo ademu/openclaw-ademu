@@ -65,6 +65,8 @@ class World {
   shutdownRequests: string[] = [];
   kills: Array<{ pid: number; signal: string }> = [];
   dirs = new Map<string, "absent" | "empty" | "nonempty">();
+  secured: string[] = [];
+  unsafeDirs = new Set<string>();
   store = AdemuStore.open({ path: ":memory:", now: () => this.clock });
   logs: Array<{ event: string; fields?: Record<string, unknown> | undefined }> = [];
   /** When set, the next spawned daemon does not come up (control never answers). */
@@ -174,6 +176,11 @@ class World {
         if (signal === "SIGKILL" || (signal === "SIGTERM" && d.honoursSigterm)) this.killDaemon(d);
       },
       isDirAbsentOrEmpty: (dir) => (this.dirs.get(dir) ?? "absent") !== "nonempty",
+      secureEmptyDir: (dir) => {
+        this.secured.push(dir);
+        if (this.unsafeDirs.has(dir)) return "unsafe";
+        return (this.dirs.get(dir) ?? "absent") === "absent" ? "absent" : "ok";
+      },
       bundledVersion: this.bundledVersion,
       platform: this.platform,
       log: (event, fields) => {
@@ -455,7 +462,7 @@ describe("stop escalation and upgrade", () => {
     const old = w.addDaemon(DIR, { version: "0.2.4" });
     w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
     w.store.cas({ dataDir: DIR, from: ["claimed"], to: "starting", bumpGeneration: true });
-    w.store.cas({ dataDir: DIR, from: ["starting"], to: "bound", expectedGeneration: 1, set: { daemonPid: old.pid, daemonPidStartedAt: `start-${old.pid}`, adcVersion: "0.2.4" } });
+    w.store.cas({ dataDir: DIR, from: ["starting"], to: "bound", expectedGeneration: 1, set: { daemonPid: old.pid, daemonPidStartedAt: `start-${old.pid}`, daemonStartedAtMs: old.info.started_at_ms, adcVersion: "0.2.4" } });
     const m = new DaemonManager(w.deps());
     const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
     expect(lease.mode).toBe("owned");
@@ -471,7 +478,7 @@ describe("stop escalation and upgrade", () => {
     const old = w.addDaemon(DIR, { version: "0.2.4" });
     w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
     w.store.cas({ dataDir: DIR, from: ["claimed"], to: "starting", bumpGeneration: true });
-    w.store.cas({ dataDir: DIR, from: ["starting"], to: "bound", expectedGeneration: 1, set: { daemonPid: old.pid, daemonPidStartedAt: `start-${old.pid}` } });
+    w.store.cas({ dataDir: DIR, from: ["starting"], to: "bound", expectedGeneration: 1, set: { daemonPid: old.pid, daemonPidStartedAt: `start-${old.pid}`, daemonStartedAtMs: old.info.started_at_ms } });
     w.processes.set(777, { alive: true, startedAt: "cli", command: "node openclaw" });
     w.store.addHolder({ holderId: "setup:777:y", dataDir: DIR, role: "setup", pid: 777, pidStartedAt: "cli", heartbeatMs: w.clock });
     const m = new DaemonManager(w.deps());
@@ -503,5 +510,127 @@ describe("pending-publication sweep", () => {
     expect(swept).toEqual([DIR]);
     expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
     expect(w.store.getOwnership(other)!.state).toBe("pending-publication");
+  });
+
+  it("promotePendingPublication publishes a pending row (tool door) and is a no-op otherwise", async () => {
+    const w = new World();
+    const m = new DaemonManager(w.deps());
+    const setup = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "setup" });
+    await setup.release();
+    expect(w.store.getOwnership(DIR)!.state).toBe("pending-publication");
+    expect(m.promotePendingPublication(DIR)).toBe(true);
+    expect(w.store.getOwnership(DIR)!.state).toBe("bound");
+    expect(m.promotePendingPublication(DIR)).toBe(false);
+    expect(m.promotePendingPublication("/nowhere")).toBe(false);
+  });
+});
+
+describe("Codex branch-review folds (daemon)", () => {
+  function bindLive(w: World, d: FakeDaemon, over: Partial<{ daemonStartedAtMs: number | null; daemonPidStartedAt: string | null }> = {}) {
+    w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
+    w.store.cas({ dataDir: DIR, from: ["claimed"], to: "starting", bumpGeneration: true });
+    w.store.cas({
+      dataDir: DIR,
+      from: ["starting"],
+      to: "bound",
+      expectedGeneration: 1,
+      set: {
+        daemonPid: d.pid,
+        daemonPidStartedAt: "daemonPidStartedAt" in over ? over.daemonPidStartedAt! : `start-${d.pid}`,
+        daemonStartedAtMs: "daemonStartedAtMs" in over ? over.daemonStartedAtMs! : d.info.started_at_ms,
+      },
+    });
+  }
+
+  it("#11 an existing empty dir is secured before the claim; an unsafe one (symlink / other owner) blocks, no spawn", async () => {
+    const ok = new World();
+    ok.dirs.set(DIR, "empty");
+    const m = new DaemonManager(ok.deps());
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("owned");
+    expect(ok.secured).toEqual([DIR]);
+
+    const bad = new World();
+    bad.dirs.set(DIR, "empty");
+    bad.unsafeDirs.add(DIR);
+    const m2 = new DaemonManager(bad.deps());
+    await expect(m2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnsupportedError);
+    expect(bad.spawns).toHaveLength(0);
+    expect(bad.store.getOwnership(DIR)).toBeUndefined();
+  });
+
+  it("#6 a bound row whose instance facts do not match the live daemon (different start time) reattaches as FOREIGN and is never stopped", async () => {
+    const w = new World();
+    const d = w.addDaemon(DIR);
+    bindLive(w, d, { daemonStartedAtMs: d.info.started_at_ms - 1 });
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("foreign");
+    expect(w.logs.some((l) => l.event === "daemon_unverified_foreign")).toBe(true);
+    await lease.release();
+    expect(w.shutdownRequests).toHaveLength(0);
+    expect(w.kills).toHaveLength(0);
+    expect(d.alive).toBe(true);
+  });
+
+  it("#6 missing pid facts fail closed: a bound row without a pid start time is foreign", async () => {
+    const w = new World();
+    const d = w.addDaemon(DIR);
+    bindLive(w, d, { daemonPidStartedAt: null });
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("foreign");
+  });
+
+  it("#7 a listener replaced between the fence and the shutdown connect is NOT shut down; the row goes stale", async () => {
+    const w = new World();
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    const ours = w.daemons.get(`${DIR}/adc.sock`)!;
+    // Someone else's daemon takes over our socket path (different start time / pid).
+    w.clock += 10;
+    const impostor = w.addDaemon(DIR);
+    expect(impostor.pid).not.toBe(ours.pid);
+    await lease.release();
+    expect(w.shutdownRequests).toHaveLength(0);
+    expect(w.kills).toHaveLength(0);
+    expect(impostor.alive).toBe(true);
+    expect(w.store.getOwnership(DIR)!.state).toBe("stale");
+    expect(w.logs.some((l) => l.event === "daemon_shutdown_withheld")).toBe(true);
+  });
+
+  it("#9 an orphaned `stopping` row is recovered when the stopper is dead OR its deadline passed; our live instance has its stop RESUMED", async () => {
+    // (a) live stopper, expired deadline → recovered, stop resumed (shutdown op sent), then respawn
+    const a = new World();
+    const da = a.addDaemon(DIR);
+    bindLive(a, da);
+    a.store.cas({ dataDir: DIR, from: ["bound"], to: "stopping", expectedGeneration: 1, bumpGeneration: true, set: { ownerPid: a.selfPid, ownerPidStartedAt: "self-start", deadlineMs: a.clock - 1 } });
+    const ma = new DaemonManager(a.deps());
+    const la = await ma.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(a.shutdownRequests).toHaveLength(1);
+    expect(la.mode).toBe("owned");
+    expect(a.spawns).toHaveLength(1);
+    expect(a.logs.find((l) => l.event === "daemon_stopping_recovered")?.fields).toMatchObject({ to: "stopped" });
+
+    // (b) dead stopper, fresh deadline → recovered as well
+    const b = new World();
+    b.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
+    b.store.cas({ dataDir: DIR, from: ["claimed"], to: "stopping", bumpGeneration: true, set: { ownerPid: 999, ownerPidStartedAt: "gone", deadlineMs: b.clock + 60_000 } });
+    b.dirs.set(DIR, "nonempty");
+    const mb = new DaemonManager(b.deps());
+    const lb = await mb.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lb.mode).toBe("owned");
+    expect(b.logs.some((l) => l.event === "daemon_stopping_recovered")).toBe(true);
+
+    // (c) an unverified listener on our socket → the row is stale and we attach foreign
+    const c = new World();
+    const dc = c.addDaemon(DIR);
+    bindLive(c, dc, { daemonStartedAtMs: dc.info.started_at_ms - 1 });
+    c.store.cas({ dataDir: DIR, from: ["bound"], to: "stopping", expectedGeneration: 1, bumpGeneration: true, set: { ownerPid: 999, ownerPidStartedAt: "gone", deadlineMs: c.clock - 1 } });
+    const mc = new DaemonManager(c.deps());
+    const lc = await mc.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lc.mode).toBe("foreign");
+    expect(c.shutdownRequests).toHaveLength(0);
+    expect(c.logs.find((l) => l.event === "daemon_stopping_recovered")?.fields).toMatchObject({ to: "stale" });
   });
 });

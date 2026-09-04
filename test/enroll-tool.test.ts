@@ -2,30 +2,36 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { afterEach, describe, expect, it } from "vitest";
 import type { EnrollmentLeaseDeps } from "../src/ceremony.js";
-import type { DaemonManager, Lease } from "../src/monitor/daemon.js";
+import { DaemonUnreachableError, type DaemonManager, type Lease } from "../src/monitor/daemon.js";
 import { createEnrollTool, EnrollmentRegistry, registerEnrollTool, TOOL_NAME, type EnrollToolDeps } from "../src/tools/enroll.js";
 import { FakeAdcClient, OWNER } from "./fakes/adc.js";
 import { FakeControl, NEW_AGENT, NEW_DEVICE, QR, WORDS } from "./fakes/control.js";
 
 const tick = (ms = 3) => new Promise((r) => setTimeout(r, ms));
 
-function world(cfg: OpenClawConfig = {} as OpenClawConfig) {
+function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?: unknown) {
   const control = new FakeControl();
   let released = 0;
   const daemonLease: Lease = {
     mode: "owned",
     role: "setup",
-    identity: {} as never,
+    identity: { dataDir: "/d" } as never,
     holderId: "h",
     info: { controlSocketPath: "/d/adc.sock", sessionSocketPath: "/d/adc-session.sock" },
     lost: new Promise<never>(() => {}),
     release: async () => void released++,
   };
   const acquires: unknown[] = [];
+  const promotions: string[] = [];
   const daemons = {
     acquire: async (p: unknown) => {
       acquires.push(p);
+      if (acquireError) throw acquireError;
       return daemonLease;
+    },
+    promotePendingPublication: (dataDir: string) => {
+      promotions.push(dataDir);
+      return true;
     },
   } as unknown as DaemonManager;
   const timers: Array<{ fn: () => void; ms: number }> = [];
@@ -64,7 +70,7 @@ function world(cfg: OpenClawConfig = {} as OpenClawConfig) {
   const signal = new AbortController().signal;
   const call = async (args: Record<string, unknown>, over: Partial<OpenClawPluginToolContext> = {}, sig: AbortSignal | undefined = signal) =>
     tool(over).execute("call-1", args, sig);
-  return { control, deps, registry, tool, call, writes, acquires, released: () => released, timers, current: () => current };
+  return { control, deps, registry, tool, call, writes, acquires, promotions, released: () => released, timers, current: () => current };
 }
 
 afterEach(() => {});
@@ -242,5 +248,80 @@ describe("ademu_enroll: registration", () => {
     await services[0]!.stop!({});
     expect(registry.size).toBe(0);
     expect(w.released()).toBe(1);
+  });
+});
+
+describe("ademu_enroll: Codex branch-review folds", () => {
+  it("#12 the agentId axis is enforced: same session, sender and token from another agent is refused", async () => {
+    const w = world();
+    const start = await w.call({ action: "start", agentName: "Iris" });
+    const leaseToken = start.details.leaseToken as string;
+    const other = await w.call({ action: "status", leaseToken }, { agentId: "other-agent" });
+    expect(other.details.ok).toBe(false);
+    const same = await w.call({ action: "status", leaseToken });
+    expect(same.details.ok).toBe(true);
+  });
+
+  it("#13 replace_token before a label_exists answer is refused and mints nothing", async () => {
+    const w = world();
+    const start = await w.call({ action: "start", agentName: "Iris" });
+    const leaseToken = start.details.leaseToken as string;
+    const r = await w.call({ action: "replace_token", leaseToken });
+    expect(r.details.ok).toBe(false);
+    expect(w.control.calls.some((c) => c.op === "token_mint")).toBe(false);
+    expect(w.writes).toHaveLength(0);
+  });
+
+  it("#14 a failure after the lease exists (QR render) disposes the lease exactly once and leaves no registry entry", async () => {
+    const w = world();
+    w.deps.qr = {
+      terminal: async () => "",
+      pngDataUrl: async () => {
+        throw new Error("qr renderer unavailable");
+      },
+    };
+    await expect(w.call({ action: "start", agentName: "Iris" })).rejects.toThrow(/qr renderer/);
+    expect(w.registry.size).toBe(0);
+    expect(w.released()).toBe(1);
+    expect(w.control.closed).toBe(1);
+    expect(w.control.calls.some((c) => c.op === "cancel_pairing")).toBe(true);
+  });
+
+  it("#14 a non-retryable failure during confirm (mint error) disposes the lease; a retryable one (device attached) keeps it", async () => {
+    const w = world();
+    w.control.tokenMintImpl = async () => {
+      throw new Error("mint exploded");
+    };
+    const start = await w.call({ action: "start" });
+    const leaseToken = start.details.leaseToken as string;
+    w.control.emit({ words: WORDS });
+    await tick();
+    const confirmP = w.call({ action: "confirm", leaseToken });
+    await tick(5);
+    w.control.finish("enrolled");
+    await expect(confirmP).rejects.toThrow(/mint exploded/);
+    expect(w.registry.size).toBe(0);
+    expect(w.released()).toBe(1);
+  });
+
+  it("#15 a known acquisition failure returns fixed remedy text (ok:false), never throws, never installs", async () => {
+    const w = world({} as OpenClawConfig, new DaemonUnreachableError("no daemon", "/var/log/adc.log"));
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(r.details).toMatchObject({ ok: false, state: "unavailable" });
+    expect(r.content[0]!.text).toContain("/var/log/adc.log");
+    expect(w.registry.size).toBe(0);
+  });
+
+  it("#10 after the config write the setup-spawned daemon is promoted (pending-publication → bound)", async () => {
+    const w = world();
+    const start = await w.call({ action: "start", agentName: "Iris" });
+    const leaseToken = start.details.leaseToken as string;
+    w.control.emit({ words: WORDS });
+    await tick();
+    const confirmP = w.call({ action: "confirm", leaseToken });
+    await tick(5);
+    w.control.finish("enrolled");
+    await confirmP;
+    expect(w.promotions).toEqual(["/d"]);
   });
 });

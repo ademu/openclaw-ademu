@@ -16,7 +16,7 @@ import { ademuMessageAdapter, ademuMessaging, getLiveAccount, resolveConversatio
 import { createQr } from "./qr.js";
 import { getAdemuRuntime, getAdemuStore, getDaemonManager, getPluginSettings, tryGetAdemuRuntime } from "./runtime.js";
 import { ademuSetupBase } from "./setup-plugin.js";
-import { createAdemuSetupWizard, type WizardDeps } from "./setup-wizard.js";
+import type { WizardDeps } from "./setup-wizard.js";
 
 /** Structured, closed-allowlist log line through the host logger (never secrets, never `.detail`). */
 export function hostLog(event: string, fields?: Record<string, string | number | boolean>): void {
@@ -42,7 +42,10 @@ export function realStartAccountDeps(): StartAccountDeps {
 
 export function realEnrollmentLeaseDeps(): EnrollmentLeaseDeps {
   return {
-    daemons: getDaemonManager(hostLog),
+    // Lazy: tool discovery / inspect must not open the store or build the manager (Codex #18).
+    get daemons() {
+      return getDaemonManager(hostLog);
+    },
     connectControl: async (socketPath) => (await connectControlReal({ socketPath })) as unknown as ControlLike,
     now: () => Date.now(),
     setTimer: (fn, ms) => setTimeout(fn, ms),
@@ -58,24 +61,9 @@ export function realWizardDeps(): WizardDeps {
   };
 }
 
-/** The wizard is built lazily so importing this module never touches the daemon or the runtime. */
-function lazyWizard(): ReturnType<typeof createAdemuSetupWizard> {
-  let built: ReturnType<typeof createAdemuSetupWizard> | undefined;
-  const get = () => (built ??= createAdemuSetupWizard(realWizardDeps()));
-  return {
-    channel: CHANNEL_ID,
-    get status() {
-      return get().status;
-    },
-    credentials: [],
-    finalize: (params) => get().finalize!(params),
-  };
-}
-
 export const ademuPlugin: ChannelPlugin<ResolvedAdemuAccount> = createChatChannelPlugin<ResolvedAdemuAccount>({
   base: {
     ...ademuSetupBase,
-    setupWizard: lazyWizard(),
     gateway: {
       startAccount: async (ctx) => {
         await startAccount(ctx, realStartAccountDeps());

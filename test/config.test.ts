@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { afterAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 import {
   accountIdForAgentName,
   addOwnerAllowFrom,
+  AdemuChannelSchema,
   ademuConfigAdapter,
   ademuConfigSchema,
   canonicalizePath,
@@ -190,27 +192,37 @@ describe("owner authority entry (R3) and account deletion (Rider B)", () => {
 
 describe("manifest schema parity with the code schema", () => {
   const manifest = JSON.parse(readFileSync(join(ROOT, "openclaw.plugin.json"), "utf8")) as {
-    channelConfigs: { ademu: { schema: { properties: Record<string, unknown> & { accounts: { additionalProperties: { properties: Record<string, unknown> } } } } } };
-  };
-  const generated = ademuConfigSchema.schema as {
-    properties: Record<string, unknown> & { accounts?: { additionalProperties?: { properties?: Record<string, unknown> } } };
+    channelConfigs: { ademu: { schema: Record<string, unknown>; uiHints: Record<string, { sensitive?: boolean }> } };
   };
 
-  it("root properties agree", () => {
-    expect(Object.keys(manifest.channelConfigs.ademu.schema.properties).sort()).toEqual(Object.keys(generated.properties).sort());
+  it("the manifest channel schema IS the zod schema (regenerate with scripts/sync-manifest-schema.mjs)", () => {
+    const derived = z.toJSONSchema(AdemuChannelSchema, { unrepresentable: "any", io: "input" }) as Record<string, unknown>;
+    delete derived.$schema;
+    expect(manifest.channelConfigs.ademu.schema).toEqual(derived);
   });
 
-  it("account properties agree", () => {
-    const m = Object.keys(manifest.channelConfigs.ademu.schema.properties.accounts.additionalProperties.properties).sort();
-    const g = Object.keys(generated.properties.accounts?.additionalProperties?.properties ?? {}).sort();
-    expect(m).toEqual(g);
+  it("the derived schema is strict everywhere it matters (groups, accounts, token SecretRef variants)", () => {
+    const schema = manifest.channelConfigs.ademu.schema as {
+      additionalProperties: boolean;
+      properties: {
+        groups: { additionalProperties: { additionalProperties: boolean; properties: Record<string, unknown> } };
+        accounts: { additionalProperties: { additionalProperties: boolean; properties: { token: { anyOf: Array<{ type?: string; oneOf?: Array<{ required: string[]; additionalProperties: boolean }> }> } } } };
+      };
+    };
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.properties.groups.additionalProperties.additionalProperties).toBe(false);
+    expect(Object.keys(schema.properties.groups.additionalProperties.properties)).toContain("requireMention");
+    expect(schema.properties.accounts.additionalProperties.additionalProperties).toBe(false);
+    const token = schema.properties.accounts.additionalProperties.properties.token;
+    expect(token.anyOf[0]).toEqual({ type: "string" });
+    for (const variant of token.anyOf[1]!.oneOf!) {
+      expect(variant.required).toEqual(["source", "provider", "id"]);
+      expect(variant.additionalProperties).toBe(false);
+    }
   });
 
   it("the token field is marked sensitive in both", () => {
     expect(ademuConfigSchema.uiHints?.["accounts.*.token"]?.sensitive).toBe(true);
-    const raw = JSON.parse(readFileSync(join(ROOT, "openclaw.plugin.json"), "utf8")) as {
-      channelConfigs: { ademu: { uiHints: Record<string, { sensitive?: boolean }> } };
-    };
-    expect(raw.channelConfigs.ademu.uiHints["accounts.*.token"]?.sensitive).toBe(true);
+    expect(manifest.channelConfigs.ademu.uiHints["accounts.*.token"]?.sensitive).toBe(true);
   });
 });

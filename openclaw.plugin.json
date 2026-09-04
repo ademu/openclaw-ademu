@@ -5,10 +5,16 @@
   "activation": {
     "onStartup": false
   },
-  "channels": ["ademu"],
-  "skills": ["./skills"],
+  "channels": [
+    "ademu"
+  ],
+  "skills": [
+    "./skills"
+  ],
   "contracts": {
-    "tools": ["ademu_enroll"]
+    "tools": [
+      "ademu_enroll"
+    ]
   },
   "configSchema": {
     "type": "object",
@@ -23,15 +29,23 @@
       },
       "mentionAliases": {
         "type": "array",
-        "items": { "type": "string", "minLength": 1 },
+        "items": {
+          "type": "string",
+          "minLength": 1
+        },
         "default": [],
         "description": "Extra names that count as addressing the agent in a room."
       }
     }
   },
   "uiHints": {
-    "typingKeepaliveMs": { "label": "Typing keepalive (ms)", "advanced": true },
-    "mentionAliases": { "label": "Mention aliases" }
+    "typingKeepaliveMs": {
+      "label": "Typing keepalive (ms)",
+      "advanced": true
+    },
+    "mentionAliases": {
+      "label": "Mention aliases"
+    }
   },
   "channelConfigs": {
     "ademu": {
@@ -39,77 +53,312 @@
       "description": "Ademú accounts (one per enrolled agent device), the Ademú device host location, and room policies.",
       "schema": {
         "type": "object",
-        "additionalProperties": false,
         "properties": {
-          "enabled": { "type": "boolean" },
-          "defaultAccount": { "type": "string" },
-          "dataDir": { "type": "string", "description": "Data directory of the Ademú device host (adc daemon). Default: <OpenClaw state dir>/ademu/adc." },
-          "socketPath": { "type": "string", "description": "Control socket of the Ademú device host. Default: <dataDir>/adc.sock." },
+          "enabled": {
+            "type": "boolean"
+          },
+          "dataDir": {
+            "type": "string"
+          },
+          "socketPath": {
+            "type": "string"
+          },
           "server": {
             "type": "object",
-            "additionalProperties": false,
             "properties": {
-              "restBaseUrl": { "type": "string", "format": "uri" },
-              "wsUrl": { "type": "string", "format": "uri" }
-            }
+              "restBaseUrl": {
+                "type": "string",
+                "format": "uri"
+              },
+              "wsUrl": {
+                "type": "string",
+                "format": "uri"
+              }
+            },
+            "additionalProperties": false
           },
           "groups": {
             "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
             "additionalProperties": {
               "type": "object",
-              "additionalProperties": true,
               "properties": {
-                "requireMention": { "type": "boolean" },
-                "toolsBySender": { "type": "object", "additionalProperties": true }
-              }
+                "requireMention": {
+                  "type": "boolean"
+                },
+                "tools": {
+                  "type": "object",
+                  "properties": {
+                    "allow": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "alsoAllow": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "deny": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "toolsBySender": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                      "allow": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "alsoAllow": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "deny": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "skills": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "allowFrom": {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
+                  }
+                },
+                "systemPrompt": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
             }
           },
           "accounts": {
             "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
             "additionalProperties": {
               "type": "object",
-              "additionalProperties": false,
               "properties": {
-                "enabled": { "type": "boolean" },
-                "name": { "type": "string" },
-                "agentName": { "type": "string" },
-                "deviceId": { "type": "string" },
-                "agentUserId": { "type": "string" },
-                "ownerUserId": { "type": "string" },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "agentName": {
+                  "type": "string"
+                },
+                "deviceId": {
+                  "type": "string"
+                },
+                "agentUserId": {
+                  "type": "string"
+                },
+                "ownerUserId": {
+                  "type": "string"
+                },
                 "token": {
                   "anyOf": [
-                    { "type": "string" },
                     {
-                      "type": "object",
-                      "additionalProperties": true,
-                      "required": ["source", "provider", "id"],
-                      "properties": {
-                        "source": { "type": "string", "enum": ["env", "file", "exec", "store"] },
-                        "provider": { "type": "string" },
-                        "id": { "type": "string" }
-                      }
+                      "type": "string"
+                    },
+                    {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "source": {
+                              "type": "string",
+                              "const": "env"
+                            },
+                            "provider": {
+                              "type": "string",
+                              "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                            },
+                            "id": {
+                              "type": "string",
+                              "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                            }
+                          },
+                          "required": [
+                            "source",
+                            "provider",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "source": {
+                              "type": "string",
+                              "const": "store"
+                            },
+                            "provider": {
+                              "type": "string",
+                              "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                            },
+                            "id": {
+                              "type": "string",
+                              "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                            }
+                          },
+                          "required": [
+                            "source",
+                            "provider",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "source": {
+                              "type": "string",
+                              "const": "file"
+                            },
+                            "provider": {
+                              "type": "string",
+                              "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                            },
+                            "id": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "source",
+                            "provider",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "source": {
+                              "type": "string",
+                              "const": "exec"
+                            },
+                            "provider": {
+                              "type": "string",
+                              "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                            },
+                            "id": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "source",
+                            "provider",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
                     }
                   ]
                 },
-                "dataDir": { "type": "string" },
-                "socketPath": { "type": "string" }
-              }
+                "dataDir": {
+                  "type": "string"
+                },
+                "socketPath": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
             }
+          },
+          "defaultAccount": {
+            "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "uiHints": {
-        "accounts.*.token": { "label": "Device token", "sensitive": true, "help": "Minted by the enrollment wizard or the ademu_enroll tool; rotate with adc token rotate." },
-        "accounts.*.agentName": { "label": "Agent name on Ademú" },
-        "accounts.*.deviceId": { "label": "Device id", "advanced": true },
-        "accounts.*.agentUserId": { "label": "Agent user id", "advanced": true },
-        "accounts.*.ownerUserId": { "label": "Owner user id", "advanced": true },
-        "accounts.*.dataDir": { "label": "Device host data dir (override)", "advanced": true },
-        "accounts.*.socketPath": { "label": "Device host control socket (override)", "advanced": true },
-        "dataDir": { "label": "Device host data dir", "advanced": true },
-        "socketPath": { "label": "Device host control socket", "advanced": true },
-        "server.restBaseUrl": { "label": "Ademú REST base URL", "advanced": true },
-        "server.wsUrl": { "label": "Ademú WebSocket URL", "advanced": true }
+        "accounts.*.token": {
+          "label": "Device token",
+          "sensitive": true,
+          "help": "Minted by the enrollment wizard or the ademu_enroll tool; rotate with adc token rotate."
+        },
+        "accounts.*.agentName": {
+          "label": "Agent name on Ademú"
+        },
+        "accounts.*.deviceId": {
+          "label": "Device id",
+          "advanced": true
+        },
+        "accounts.*.agentUserId": {
+          "label": "Agent user id",
+          "advanced": true
+        },
+        "accounts.*.ownerUserId": {
+          "label": "Owner user id",
+          "advanced": true
+        },
+        "accounts.*.dataDir": {
+          "label": "Device host data dir (override)",
+          "advanced": true
+        },
+        "accounts.*.socketPath": {
+          "label": "Device host control socket (override)",
+          "advanced": true
+        },
+        "dataDir": {
+          "label": "Device host data dir",
+          "advanced": true
+        },
+        "socketPath": {
+          "label": "Device host control socket",
+          "advanced": true
+        },
+        "server.restBaseUrl": {
+          "label": "Ademú REST base URL",
+          "advanced": true
+        },
+        "server.wsUrl": {
+          "label": "Ademú WebSocket URL",
+          "advanced": true
+        }
       }
     }
   }

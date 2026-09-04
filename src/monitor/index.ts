@@ -7,20 +7,49 @@
 // ingress halted, transient failures). Foreign daemons never reject on daemon loss (the client's own
 // reconnect loop probes; status stays `recovering`).
 import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
-import { CHANNEL_ID, type ResolvedAdemuAccount } from "../config.js";
+import { CHANNEL_ID, inspectAdemuAccount, listAdemuAccountIds, type ResolvedAdemuAccount } from "../config.js";
 import { classifyConversation, type ConversationKind } from "../grammar.js";
 import { strings } from "../i18n/strings.js";
 import { registerLiveAccount, sendAdemuText, unregisterLiveAccount, type LiveAccount } from "../outbound.js";
 import { createAdemuIngressResolver } from "../security.js";
 import { blockedPatch, classifyError, patchFor, readyPatch, recoveringPatch, type StatusPatch } from "../status.js";
 import type { AdemuStore } from "../store.js";
-import { DaemonAbortedError, type DaemonManager, type Lease } from "./daemon.js";
+import { DaemonAbortedError, DaemonLostError, type DaemonManager, type Lease } from "./daemon.js";
 import { startIngress, type IngressHandle, type RuntimeChannelSurface } from "./ingress.js";
 import { openSession, type Session, type SessionDeps } from "./session.js";
 
 export const STOP_DEADLINE_MS = 4500;
 export const RELEASE_TAIL_MS = 2500;
 export const DRAIN_CAP_MS = 2000;
+/** Owned daemon: the 5th consecutive reconnect attempt means our daemon is wedged → restart it. */
+export const OWNED_RETRY_LIMIT = 5;
+
+const sweptManagers = new WeakSet<DaemonManager>();
+
+/** Once per process (per manager): stop never-published setup daemons older than an hour. */
+async function sweepPendingOnce(deps: StartAccountDeps, cfg: ChannelGatewayContext["cfg"]): Promise<void> {
+  if (sweptManagers.has(deps.daemons)) return;
+  sweptManagers.add(deps.daemons);
+  try {
+    const referenced = new Set(listAdemuAccountIds(cfg).map((id) => inspectAdemuAccount(cfg, id).daemon.dataDir));
+    const swept = await deps.daemons.sweepPendingPublications((dataDir) => referenced.has(dataDir));
+    if (swept.length) deps.log("pending_publications_swept", { count: swept.length });
+  } catch (err) {
+    deps.log("pending_publication_sweep_failed", { errorClass: err instanceof Error ? err.name : typeof err });
+  }
+}
+
+/** Race a cleanup step against the remaining budget; a slow step is logged and abandoned, never awaited past the deadline. */
+async function bounded(deps: StartAccountDeps, label: string, step: Promise<unknown>, budgetMs: number, log: StartAccountDeps["log"]): Promise<void> {
+  let timedOut = false;
+  await Promise.race([
+    step.catch((err: unknown) => log(`${label}_failed`, { errorClass: err instanceof Error ? err.name : typeof err })),
+    deps.sleep(Math.max(0, budgetMs)).then(() => {
+      timedOut = true;
+    }),
+  ]);
+  if (timedOut) log("cleanup_step_timed_out", { step: label });
+}
 
 export type StartAccountDeps = {
   store: AdemuStore;
@@ -72,6 +101,7 @@ export async function startAccount(ctx: ChannelGatewayContext<ResolvedAdemuAccou
   }
 
   // --- daemon lease -------------------------------------------------------------------------
+  await sweepPendingOnce(deps, ctx.cfg);
   let lease: Lease;
   try {
     lease = await deps.daemons.acquire({ identity: account.daemon, server: account.server, role: "runtime", signal: ctx.abortSignal });
@@ -105,7 +135,13 @@ async function runWithLease(
 
   try {
     // --- session ---------------------------------------------------------------------------
-    let retryCount = 0;
+    // Owned daemon: the 5th consecutive retry rejects the lifetime with DaemonLostError (restart →
+    // respawn). Foreign: retries are unbounded (`recovering` while the client's own loop probes).
+    let retriesExceeded!: (err: Error) => void;
+    const retriesExceededP = new Promise<never>((_, reject) => {
+      retriesExceeded = reject;
+    });
+    retriesExceededP.catch(() => {});
     try {
       session = await openSession({
         token: account.token!,
@@ -113,11 +149,12 @@ async function runWithLease(
         account: { deviceId: account.deviceId!, agentUserId: account.agentUserId!, ownerUserId: account.ownerUserId },
         deps: deps.session,
         onRetry: (info) => {
-          retryCount = info.attempt;
           setStatus(recoveringPatch(strings.status.reconnecting(info.attempt)));
+          if (lease.mode === "owned" && info.attempt >= OWNED_RETRY_LIMIT) {
+            retriesExceeded(new DaemonLostError(`the Ademú device host did not answer ${info.attempt} reconnect attempts`));
+          }
         },
         onReconnected: () => {
-          retryCount = 0;
           setStatus(readyPatch());
         },
       });
@@ -129,7 +166,6 @@ async function runWithLease(
       outcome = c.kind === "blocked" ? { kind: "blocked", lastError: c.lastError } : { kind: "restart", lastError: c.lastError, error: err };
       return outcome;
     }
-    void retryCount;
 
     const ownerUserId = account.ownerUserId ?? session.self.owner_user_id;
     const members = session.members;
@@ -160,6 +196,12 @@ async function runWithLease(
       },
       signal: loopAbort.signal,
       log,
+      onSecurityNotice: (groupId) => {
+        // Fixed copy only — never a field of the frame.
+        setStatus({ lastError: strings.status.securityNotice });
+        log("security_notice", { room: groupId !== undefined });
+        if (groupId) void sendAdemuText({ client: session!.client, groupId, text: strings.room.securityNotice }).catch(() => {});
+      },
     });
     setStatus(readyPatch());
     log("account_ready", { mode: lease.mode });
@@ -169,6 +211,7 @@ async function runWithLease(
       abortPromise(ctx.abortSignal),
       ingress.lifetime.catch((err: unknown) => toOutcome(err)),
       lease.lost.catch((err: unknown) => toOutcome(err)),
+      retriesExceededP.catch((err: unknown) => toOutcome(err)),
     ]);
     outcome = ended;
     deadline = deps.now() + STOP_DEADLINE_MS;
@@ -179,7 +222,8 @@ async function runWithLease(
     loopAbort.abort();
     return outcome;
   } finally {
-    // Cleanup under the absolute deadline, every step in its own nested finally (Codex R1 #8 …).
+    // Cleanup under ONE absolute deadline, every step in its own nested finally and every step
+    // bounded (a hung close or release is logged and abandoned, never awaited past the budget).
     try {
       try {
         try {
@@ -190,10 +234,11 @@ async function runWithLease(
           }
         } finally {
           if (live) unregisterLiveAccount(accountId, live);
-          if (session) await session.close().catch(() => {});
+          if (session) await bounded(deps, "session_close", session.close(), Math.max(0, deadline - deps.now() - RELEASE_TAIL_MS), log);
         }
       } finally {
-        await lease.release().catch((err: unknown) => log("daemon_release_failed", { errorClass: err instanceof Error ? err.name : typeof err }));
+        // The reserved tail: whatever is left, but at least the release cap the manager itself honours.
+        await bounded(deps, "daemon_release", lease.release(), Math.max(RELEASE_TAIL_MS, deadline - deps.now()), log);
       }
     } finally {
       if (outcome.kind === "aborted") setStatus({ running: false, connected: false, lifecycle: "stopped" });

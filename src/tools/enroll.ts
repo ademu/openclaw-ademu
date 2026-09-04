@@ -17,6 +17,7 @@ import { inspectAdemuAccount, listAdemuAccountIds } from "../config.js";
 import { accountExists, applyEnrollment } from "../enroll-config.js";
 import { strings } from "../i18n/strings.js";
 import type { Qr } from "../qr.js";
+import { remedyFor } from "../remedies.js";
 import { accountIdForAgentName } from "../config.js";
 
 export const TOOL_NAME = "ademu_enroll";
@@ -53,7 +54,11 @@ export type EnrollToolDeps = {
 export class EnrollmentRegistry {
   readonly #active = new Map<string, ActiveEnrollment>();
 
+  #prune(): void {
+    for (const [id, e] of this.#active) if (e.lease.disposed) this.#active.delete(id);
+  }
   get(deviceId: string): ActiveEnrollment | undefined {
+    this.#prune();
     return this.#active.get(deviceId);
   }
   set(entry: ActiveEnrollment): void {
@@ -64,6 +69,7 @@ export class EnrollmentRegistry {
   }
   /** The single enrollment owned by this conversation, if any. */
   forSession(sessionKey: string): ActiveEnrollment | undefined {
+    this.#prune();
     for (const e of this.#active.values()) if (e.sessionKey === sessionKey) return e;
     return undefined;
   }
@@ -73,6 +79,7 @@ export class EnrollmentRegistry {
     await Promise.all(all.map((e) => e.lease.dispose(reason)));
   }
   get size(): number {
+    this.#prune();
     return this.#active.size;
   }
 }
@@ -113,7 +120,12 @@ export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToo
       const active = deviceId ? registry.get(deviceId) : undefined;
       if (!active) return text(strings.enroll.toolNoActive, { ok: false });
       const leaseToken = readStringParam(args, "leaseToken");
-      if (active.sessionKey !== sessionKey || leaseToken !== active.leaseToken || (active.requesterSenderId && active.requesterSenderId !== ctx.requesterSenderId)) {
+      const axisMismatch =
+        active.sessionKey !== sessionKey ||
+        leaseToken !== active.leaseToken ||
+        (active.requesterSenderId !== undefined && active.requesterSenderId !== ctx.requesterSenderId) ||
+        (active.agentId !== undefined && active.agentId !== ctx.agentId);
+      if (axisMismatch) {
         return text(strings.enroll.toolLeaseMismatch, { ok: false });
       }
       if (active.lease.disposed) {
@@ -138,6 +150,7 @@ export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToo
         case "confirm":
           return confirmEnrollment({ active, ctx, deps, registry, beforeEffect, replace: false });
         case "replace_token":
+          if (active.state !== "minting_blocked") return text(strings.enroll.toolReplaceNotAllowed, { ok: false, state: active.state });
           return confirmEnrollment({ active, ctx, deps, registry, beforeEffect, replace: true });
         default:
           return text(strings.enroll.toolNoActive, { ok: false });
@@ -169,21 +182,46 @@ async function startEnrollment(p: {
 
   await p.beforeEffect();
   const account = inspectAdemuAccount(cfg, accountId);
-  const lease = await createEnrollmentLease({
-    deps: p.deps.lease,
-    accountId,
-    identity: account.daemon,
-    server: account.server,
-    beforeEffect: p.beforeEffect,
-  });
-  let created: { device_id: string; qr_payload: string };
+  let lease: EnrollmentLease;
   try {
-    await p.beforeEffect();
-    created = await lease.control.createDevice({ agent_name: agentName });
+    lease = await createEnrollmentLease({
+      deps: p.deps.lease,
+      accountId,
+      identity: account.daemon,
+      server: account.server,
+      beforeEffect: p.beforeEffect,
+    });
   } catch (err) {
-    await lease.dispose("start-failed");
+    // Known acquisition failures become fixed, instruct-only remedy text (never an install attempt).
+    const remedy = remedyFor(err);
+    if (remedy) return text(strings.enroll.toolUnavailable(remedy), { ok: false, state: "unavailable" });
     throw err;
   }
+  // From here every failure disposes the lease exactly once (cancel pairing → close → release).
+  try {
+    return await startWithLease({ ...p, lease, agentName, accountId });
+  } catch (err) {
+    if (lease.deviceId) p.registry.delete(lease.deviceId);
+    await lease.dispose("start-failed");
+    const remedy = remedyFor(err);
+    if (remedy) return text(strings.enroll.toolUnavailable(remedy), { ok: false, state: "unavailable" });
+    throw err;
+  }
+}
+
+async function startWithLease(p: {
+  ctx: OpenClawPluginToolContext;
+  deps: EnrollToolDeps;
+  registry: EnrollmentRegistry;
+  sessionKey: string;
+  beforeEffect: () => Promise<void>;
+  lease: EnrollmentLease;
+  agentName: string;
+  accountId: string;
+}): Promise<ToolResult> {
+  const { lease, agentName, accountId } = p;
+  await p.beforeEffect();
+  const created = await lease.control.createDevice({ agent_name: agentName });
   lease.deviceId = created.device_id;
 
   const entry: ActiveEnrollment = {
@@ -224,11 +262,6 @@ async function startEnrollment(p: {
     );
   entry.terminal.catch(() => {});
   p.registry.set(entry);
-  const onDisposed = p.deps.lease.onDisposed;
-  p.deps.lease.onDisposed = (l, reason) => {
-    if (l === lease) p.registry.delete(entry.deviceId);
-    onDisposed?.(l, reason);
-  };
 
   const dataUrl = await p.deps.qr.pngDataUrl(created.qr_payload);
   return text(strings.enroll.toolStart(created.qr_payload, dataUrl), {
@@ -320,6 +353,14 @@ async function confirmEnrollment(p: {
       }),
     );
     active.state = "done";
+    // Tool-door accelerator: the account is committed → publish the setup-spawned daemon now.
+    if (active.lease.daemonLease.mode === "owned") {
+      try {
+        p.deps.lease.daemons.promotePendingPublication(active.lease.daemonLease.identity.dataDir);
+      } catch {
+        /* the runtime's next acquire promotes it anyway */
+      }
+    }
     p.registry.delete(active.deviceId);
     await active.lease.dispose("done");
     return text(strings.enroll.toolConfirmed(active.agentName), { ok: true, state: "done", accountId: common.accountId, deviceId: active.deviceId });
@@ -332,6 +373,12 @@ async function confirmEnrollment(p: {
       }
       if (err.reason === "device_attached") return text(strings.enroll.deviceAttachedRefused, { ok: false, state: "device_attached" });
     }
+    // Anything else is terminal for this enrollment: release the daemon/control resources now,
+    // not at TTL.
+    p.registry.delete(active.deviceId);
+    await active.lease.dispose("confirm-failed");
+    const remedy = remedyFor(err);
+    if (remedy) return text(strings.enroll.toolUnavailable(remedy), { ok: false, state: "failed" });
     throw err;
   }
 }

@@ -151,11 +151,16 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
 
   // Reconnect barrier: `retry` marks live state stale; `reconnected` refreshes it before the loop
   // may continue. Retry counting feeds the owned-daemon loss rule (5 consecutive retries).
+  // Generation-fenced: only the warm-up of the LATEST reconnect may open the barrier, and only when
+  // it succeeded. A failed warm-up keeps the barrier closed and closes the client — the event
+  // iterator ends, the loop halts, the account restarts (never "ready" on a partial cache).
   let retries = 0;
+  let generation = 0;
   let stale: Promise<void> | undefined;
   let release: (() => void) | undefined;
   client.on("retry", (info) => {
     retries = info.attempt;
+    generation++;
     if (!stale) {
       stale = new Promise<void>((r) => {
         release = r;
@@ -164,19 +169,23 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
     params.onRetry?.(info);
   });
   client.on("reconnected", () => {
-    retries = 0;
-    void members
-      .refresh()
-      .catch((err: unknown) => {
-        params.deps.log("session_refresh_failed", { errorClass: err instanceof Error ? err.name : typeof err });
-      })
-      .finally(() => {
+    const mine = generation;
+    void members.refresh().then(
+      () => {
+        if (mine !== generation) return; // a newer outage superseded this warm-up
+        retries = 0;
         const r = release;
         stale = undefined;
         release = undefined;
         r?.();
         params.onReconnected?.();
-      });
+      },
+      (err: unknown) => {
+        if (mine !== generation) return;
+        params.deps.log("session_refresh_failed", { errorClass: err instanceof Error ? err.name : typeof err });
+        void client.close().catch(() => {});
+      },
+    );
   });
 
   return {

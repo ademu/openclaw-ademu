@@ -86,6 +86,8 @@ export const strings = {
       `The phone now shows four safety words. Read them to the user and ask whether they match:\n\n${w.join("   ")}\n\nIf they match, call ademu_enroll with action \"confirm\". If they do not, call \"cancel\".`,
     toolConfirmed: (name: string) => `Enrolled — ${name} is on Ademú now. The user can message you from their phone.`,
     toolLabelExists: "A token for this account already exists on the device. Ask the user whether to replace it (the old one stops working); if yes, call action \"replace_token\".",
+    toolReplaceNotAllowed: "\"replace_token\" is only valid right after \"confirm\" reported that a token for this account already exists and the user agreed to replace it.",
+    toolUnavailable: (remedy: string) => `Enrollment cannot start right now. ${remedy}`,
     toolCancelled: "Enrollment cancelled; nothing was written.",
     toolStatus: (state: string) => `Enrollment state: ${state}.`,
   },

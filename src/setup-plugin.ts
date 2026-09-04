@@ -3,9 +3,28 @@
 // touches the daemon or a session. `channel.ts` spreads this and adds the runtime surfaces.
 import type { ChannelStatusAdapter } from "openclaw/plugin-sdk/channel-contract";
 import type { ChannelPlugin } from "openclaw/plugin-sdk/channel-core";
+import type { ChannelSetupWizard } from "openclaw/plugin-sdk/channel-setup";
 import { ademuConfigAdapter, ademuConfigSchema, CHANNEL_ID, type ResolvedAdemuAccount } from "./config.js";
 import { strings } from "./i18n/strings.js";
 import { channelSecrets } from "./secrets.js";
+import { ademuWizardStatus, createAdemuSetupWizard } from "./setup-wizard.js";
+
+/**
+ * The enrollment wizard, built lazily: OpenClaw loads the SETUP entry for an unconfigured plugin
+ * (`openclaw channels add`), so the wizard must be reachable from here — while the daemon manager,
+ * store and host runtime it needs are only touched inside `finalize` (dynamic import keeps the
+ * setup entry free of the runtime module graph until then).
+ */
+export function lazyAdemuSetupWizard(): ChannelSetupWizard {
+  let built: ChannelSetupWizard | undefined;
+  const get = async () => (built ??= createAdemuSetupWizard((await import("./channel.js")).realWizardDeps()));
+  return {
+    channel: CHANNEL_ID,
+    status: ademuWizardStatus,
+    credentials: [],
+    finalize: async (params) => (await get()).finalize!(params),
+  };
+}
 
 export const ademuMeta: ChannelPlugin["meta"] = {
   id: CHANNEL_ID,
@@ -59,6 +78,7 @@ export const ademuSetupBase = {
   configSchema: ademuConfigSchema,
   secrets: channelSecrets,
   status: ademuStatus,
+  setupWizard: lazyAdemuSetupWizard(),
 } satisfies Partial<ChannelPlugin<ResolvedAdemuAccount>>;
 
 export const ademuSetupPlugin: ChannelPlugin<ResolvedAdemuAccount> = { ...ademuSetupBase };

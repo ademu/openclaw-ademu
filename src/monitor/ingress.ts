@@ -25,7 +25,7 @@ import {
   resolveRequireMention,
   type MessageAccessInput,
 } from "../security.js";
-import { IngressHaltedError } from "../status.js";
+import { IngressHaltedError, IngressProtocolError } from "../status.js";
 import type { AdemuStore } from "../store.js";
 import { AdoptionFailedError, AdoptionTracker, type TurnResultLike } from "./adoption.js";
 import type { Session } from "./session.js";
@@ -61,6 +61,8 @@ export type IngressParams = {
   sendText: (groupId: string, text: string) => Promise<{ message_id: string }>;
   /** Shutdown signal for the loop (NOT propagated to adopted turns). */
   signal: AbortSignal;
+  /** A future `security_notice` live event: the caller sets a fixed status and posts a fixed room note. */
+  onSecurityNotice?: ((groupId: string | undefined) => void) | undefined;
   log: (event: string, fields?: Record<string, string | number | boolean>) => void;
   /** Injected for tests; default = real timers. */
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -109,11 +111,15 @@ export function startIngress(params: IngressParams): IngressHandle {
   });
   lifetime.catch(() => {});
 
+  // Halt: close every tracker generation and end the lifetime. Adoption/ack integrity failures are
+  // IngressHaltedError (recovering → restart replays); a TERMINAL client error surfacing from the
+  // iterator (revoked token, displaced, protocol violation …) is passed through unwrapped so the
+  // status table can classify it as `blocked` instead of restarting forever.
   const halt = (cause: unknown) => {
     if (stopped) return;
     stopped = true;
     for (const t of trackers) t.close();
-    rejectLifetime(cause instanceof IngressHaltedError ? cause : new IngressHaltedError(cause));
+    rejectLifetime(cause instanceof Error ? cause : new IngressHaltedError(cause));
   };
 
   const ack = (seq: number) => {
@@ -171,12 +177,19 @@ export function startIngress(params: IngressParams): IngressHandle {
       ack(seq);
       return;
     }
-    // 5. Mention decision (rooms only).
+    // 5. Route first (the routed agent's own mention patterns count), then the mention decision.
+    const conversationId = normalizeId(ev.group_id);
+    const route = runtime.routing.resolveAgentRoute({
+      cfg,
+      channel: CHANNEL_ID,
+      accountId,
+      peer: { kind: shape.kind, id: conversationId },
+    });
     const wasMentioned = computeWasMentioned({
       text: ev.body,
       senderRole,
       names,
-      mentionRegexes: openclawMentionRegexes(cfg, undefined),
+      mentionRegexes: openclawMentionRegexes(cfg, route.agentId),
     });
     const requireMention = isGroup ? resolveRequireMention({ cfg, groupId: ev.group_id, accountId }) : false;
     const mention = decideMention({
@@ -191,14 +204,7 @@ export function startIngress(params: IngressParams): IngressHandle {
       ack(seq);
       return;
     }
-    // 6. Route, then the context-bound access resolve (the result that enters buildContext).
-    const conversationId = normalizeId(ev.group_id);
-    const route = runtime.routing.resolveAgentRoute({
-      cfg,
-      channel: CHANNEL_ID,
-      accountId,
-      peer: { kind: shape.kind, id: conversationId },
-    });
+    // 6. The context-bound access resolve (the result that enters buildContext).
     const access = await resolveMessageAccess({
       resolver: params.resolver,
       senderUserId: ev.sender_user_id,
@@ -312,10 +318,14 @@ export function startIngress(params: IngressParams): IngressHandle {
         (err: unknown) => tracker.onDispatchSettled(undefined, err),
       );
     inflight.add(dispatchPromise);
-    void dispatchPromise.finally(() => {
-      inflight.delete(dispatchPromise);
-      trackers.delete(tracker);
-    });
+    void dispatchPromise.finally(() => inflight.delete(dispatchPromise));
+    // The tracker stays reachable by stop() until ITS OWN terminal state — a deferred turn's
+    // dispatch promise resolves before adoption, and a late onAdopted after shutdown must hit the
+    // closed generation (throw), not a forgotten tracker.
+    void tracker.settled.then(
+      () => trackers.delete(tracker),
+      () => trackers.delete(tracker),
+    );
 
     // 9. Adoption-ordered ack.
     let outcome;
@@ -341,12 +351,18 @@ export function startIngress(params: IngressParams): IngressHandle {
         if (stopped) break;
         if (!ev.known) {
           log("event_unknown", { event: String(ev.event), seq: ev.seq });
+          if (String(ev.event) === "security_notice") {
+            // Forward-compatible: fixed status copy + a fixed room note; never any field of the frame.
+            const raw = (ev as { raw?: { group_id?: unknown } }).raw;
+            const groupId = typeof raw?.group_id === "string" && looksLikeId(raw.group_id) ? normalizeId(raw.group_id) : undefined;
+            params.onSecurityNotice?.(groupId);
+          }
           continue;
         }
         switch (ev.event) {
           case "message_received": {
             const seq: unknown = ev.seq;
-            if (!validSeq(seq)) throw new IngressHaltedError(new RangeError("invalid seq"));
+            if (!validSeq(seq)) throw new IngressProtocolError("the Ademú device host sent a message_received frame with an invalid seq");
             if (!validMessage(ev)) {
               log("message_malformed", { seq });
               ack(seq);

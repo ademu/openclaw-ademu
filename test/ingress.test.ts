@@ -1,13 +1,14 @@
 // THE correctness pin (plan T7): the ingress loop over a fake client, a fake host runtime with a
 // controllable dispatch, the real security resolver, and the real in-memory store. Every ack rule
 // of §2 R2b is asserted here.
+import { InvalidTokenError } from "@ademu/adc-client";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { describe, expect, it } from "vitest";
 import { AdoptionFailedError } from "../src/monitor/adoption.js";
 import { startIngress, MAX_INFLIGHT, type RuntimeChannelSurface } from "../src/monitor/ingress.js";
 import { openSession } from "../src/monitor/session.js";
 import { createAdemuIngressResolver } from "../src/security.js";
-import { IngressHaltedError } from "../src/status.js";
+import { IngressHaltedError, IngressProtocolError } from "../src/status.js";
 import { AdemuStore } from "../src/store.js";
 import { AGENT, DEVICE, FakeAdcClient, fakeConnect, GUEST, member, OWNER, ROOM_DM, ROOM_GROUP } from "./fakes/adc.js";
 
@@ -59,7 +60,14 @@ function fakeRuntime() {
   return { runtime, dispatches, nextDispatch };
 }
 
-async function world(opts: { lastAckedSeq?: number; watermark?: { deviceId: string; adoptedSeq: number } } = {}) {
+async function world(
+  opts: {
+    lastAckedSeq?: number;
+    watermark?: { deviceId: string; adoptedSeq: number };
+    agentName?: string;
+    onSecurityNotice?: (groupId: string | undefined) => void;
+  } = {},
+) {
   const client = new FakeAdcClient({ lastAckedSeq: opts.lastAckedSeq });
   client.room(ROOM_DM, [member(OWNER, "human", "Marios"), member(AGENT, "agent", "Iris")]);
   client.room(ROOM_GROUP, [member(OWNER, "human", "Marios"), member(GUEST, "human", "Jhessy", "jhessy"), member(AGENT, "agent", "Iris")]);
@@ -77,13 +85,14 @@ async function world(opts: { lastAckedSeq?: number; watermark?: { deviceId: stri
     session,
     store,
     resolver: createAdemuIngressResolver({ accountId: "iris", cfg }),
-    account: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER, agentName: "Iris" },
+    account: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER, agentName: opts.agentName ?? "Iris" },
     mentionAliases: [],
     typingKeepaliveMs: 2000,
     sendText: async (group_id, body) => client.sendText({ group_id, body }),
     signal: ac.signal,
     log: (event, fields) => logs.push({ event, fields }),
     stallMs: 60_000,
+    ...(opts.onSecurityNotice ? { onSecurityNotice: opts.onSecurityNotice } : {}),
   });
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return { client, store, session, rt, handle, logs, ac, settle };
@@ -199,7 +208,8 @@ describe("immediate acks after a gate decision", () => {
     const lifetime = w.handle.lifetime.catch((e: Error) => e);
     w.client.message({ seq: -1 as never });
     const err = await lifetime;
-    expect(err).toBeInstanceOf(IngressHaltedError);
+    // A frame the daemon must never send is a TERMINAL protocol violation (blocked), not a restart loop.
+    expect(err).toBeInstanceOf(IngressProtocolError);
   });
 
   it("unknown events are logged with event + seq only, never the raw payload", async () => {
@@ -372,5 +382,53 @@ describe("projection, commands, typing and shutdown", () => {
     await w.session.members.get(ROOM_GROUP);
     expect(w.client.getMembersCalls).toBe(calls + 1);
     expect(w.client.acks).toEqual([]); // live events carry no ack
+  });
+});
+
+describe("Codex branch-review folds", () => {
+  it("#2 a deferred turn stays under the guillotine: dispatch resolves → stop → late onAdopted throws, no ack, no watermark", async () => {
+    const w = await world();
+    w.client.message({ body: "one" });
+    const d = await w.rt.nextDispatch();
+    d.lifecycle.onDeferred();
+    d.resolve({ dispatched: true, dispatchResult: { queuedFinal: false, counts: {}, deferredToActiveRun: "followup" } });
+    await w.settle();
+    w.handle.stop();
+    await expect(d.lifecycle.onAdopted()).rejects.toBeInstanceOf(AdoptionFailedError);
+    await w.settle();
+    expect(w.client.acks).toEqual([]);
+    expect(w.store.getWatermark("iris")).toBeUndefined();
+  });
+
+  it("#3 a terminal client error from the iterator passes through unwrapped (blocked), not as IngressHaltedError", async () => {
+    const w = await world();
+    const lifetime = w.handle.lifetime.catch((e: unknown) => e);
+    w.client.failStream(new InvalidTokenError());
+    const err = await lifetime;
+    expect(err).toBeInstanceOf(InvalidTokenError);
+    expect(err).not.toBeInstanceOf(IngressHaltedError);
+  });
+
+  it("#16 the ROUTED agent's own identity counts as a mention (account name ≠ agent identity name)", async () => {
+    const w = await world({ agentName: "Bot" });
+    w.client.message({ group_id: ROOM_GROUP, sender_user_id: GUEST, body: "Iris, are you there?" });
+    const d = await w.rt.nextDispatch(); // dispatched: "Iris" is agents.entries.main.identity.name
+    expect(d).toBeDefined();
+    const w2 = await world({ agentName: "Bot" });
+    w2.client.message({ group_id: ROOM_GROUP, sender_user_id: GUEST, body: "nobody in particular" });
+    await w2.settle();
+    expect(w2.rt.dispatches).toHaveLength(0);
+    expect(w2.client.acks).toEqual([0]);
+  });
+
+  it("#21 a future security_notice event reaches the caller with the room id only; nothing from the frame is logged", async () => {
+    const notices: Array<string | undefined> = [];
+    const w = await world({ onSecurityNotice: (g) => notices.push(g) });
+    w.client.unknownEvent("security_notice", { group_id: ROOM_GROUP, reason: "SECRET-DETAIL", raw_blob: "xyz" });
+    w.client.unknownEvent("security_notice", { nothing: true });
+    await w.settle();
+    expect(notices).toEqual([ROOM_GROUP, undefined]);
+    expect(JSON.stringify(w.logs)).not.toContain("SECRET-DETAIL");
+    expect(w.client.acks).toEqual([]);
   });
 });

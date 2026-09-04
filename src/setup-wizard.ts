@@ -5,8 +5,6 @@
 // and in `finally`; a failure THROWS WizardCancelledError (a void return would be recorded as
 // success). The QR goes through `prompter.plain` only (K11) — never `note`, never `runtime.log`.
 import type { AdcClient, AdcClientOptions } from "@ademu/adc-client";
-import { NotInstalledError, DaemonUnreachableError as ControlDaemonUnreachableError } from "@ademu/adc-control";
-import { PlatformPackageMissingError, UnsupportedPlatformError } from "@ademu/adc-bin";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { resolveAgentConfig, tryResolveDefaultAgentId } from "openclaw/plugin-sdk/agent-scope-runtime";
 import type { ChannelSetupWizard } from "openclaw/plugin-sdk/channel-setup";
@@ -14,7 +12,6 @@ import { WizardCancelledError, type WizardPrompter } from "openclaw/plugin-sdk/s
 import {
   connectExisting,
   createEnrollmentLease,
-  EnrollmentError,
   listEnrolledDevices,
   runEnrollment,
   type EnrollmentLease,
@@ -24,7 +21,7 @@ import {
 import { CHANNEL_ID, inspectAdemuAccount, listAdemuAccountIds } from "./config.js";
 import { applyEnrollment } from "./enroll-config.js";
 import { strings } from "./i18n/strings.js";
-import { DaemonUnreachableError, DaemonUnsupportedError } from "./monitor/daemon.js";
+import { remedyFor } from "./remedies.js";
 import type { Qr } from "./qr.js";
 
 export type WizardDeps = {
@@ -50,32 +47,6 @@ export function isAccountEnrolled(cfg: OpenClawConfig, accountId?: string): bool
   });
 }
 
-function remedyFor(err: unknown): string | undefined {
-  if (err instanceof NotInstalledError || err instanceof PlatformPackageMissingError) return strings.enroll.notInstalled;
-  if (err instanceof UnsupportedPlatformError) return strings.status.unsupportedPlatform(err.platform);
-  if (err instanceof DaemonUnsupportedError) return err.message;
-  if (err instanceof DaemonUnreachableError) return strings.enroll.daemonUnreachable(err.logPath);
-  if (err instanceof ControlDaemonUnreachableError) return strings.enroll.daemonUnreachable(undefined);
-  if (err instanceof EnrollmentError) {
-    switch (err.reason) {
-      case "words_mismatch":
-        return strings.enroll.wordsMismatch;
-      case "cancelled":
-      case "aborted":
-        return strings.enroll.cancelled;
-      case "not_enrolled":
-        return strings.enroll.notEnrolledDevice;
-      case "device_attached":
-        return strings.enroll.deviceAttachedRefused;
-      case "label_exists":
-        return strings.enroll.cancelled;
-      default:
-        return `${strings.enroll.cancelled} (${err.reason})`;
-    }
-  }
-  return undefined;
-}
-
 /** Shows the QR: terminal → `plain`; hosted/deferred client → link + openUrl + a note (V22). */
 export async function presentQr(prompter: WizardPrompter, qr: Qr, payload: string, deferToClient: boolean): Promise<void> {
   if (!deferToClient && prompter.plain) {
@@ -86,15 +57,18 @@ export async function presentQr(prompter: WizardPrompter, qr: Qr, payload: strin
   await prompter.openUrl?.(payload);
 }
 
+/** The status descriptor is static (no daemon needed) so the setup-only entry can carry it too. */
+export const ademuWizardStatus: ChannelSetupWizard["status"] = {
+  configuredLabel: strings.enroll.configuredLabel,
+  unconfiguredLabel: strings.enroll.unconfiguredLabel,
+  configuredHint: strings.enroll.configuredHint,
+  resolveConfigured: ({ cfg, accountId }) => isAccountEnrolled(cfg, accountId),
+};
+
 export function createAdemuSetupWizard(deps: WizardDeps): ChannelSetupWizard {
   return {
     channel: CHANNEL_ID,
-    status: {
-      configuredLabel: strings.enroll.configuredLabel,
-      unconfiguredLabel: strings.enroll.unconfiguredLabel,
-      configuredHint: strings.enroll.configuredHint,
-      resolveConfigured: ({ cfg, accountId }) => isAccountEnrolled(cfg, accountId),
-    },
+    status: ademuWizardStatus,
     credentials: [],
     finalize: async ({ cfg, accountId, prompter, options }) => {
       const beforeEffect = options?.beforePersistentEffect ?? (async () => {});
