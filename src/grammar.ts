@@ -32,9 +32,11 @@ export type ConversationShape = {
 };
 
 /**
- * Classifies a conversation from its member list. `direct` iff the members are exactly the owner
- * and the agent. An empty or unknown member list is treated as a group (the conservative side:
- * group manners require the agent to be addressed).
+ * Classifies a conversation from its member list. A room with exactly ONE other member is `direct`
+ * (a one-to-one conversation) — whoever that member is; `ownerOnly` says whether it is the owner. A
+ * stranger's two-member room is therefore a DM from a non-allowlisted sender, which the DM allowlist
+ * drops (decision 5) — never a "group" a stranger could enter by addressing the agent. An empty or
+ * unknown member list is treated as a group (the conservative side: rooms require addressing).
  */
 export function classifyConversation(params: {
   members: readonly MemberEntry[];
@@ -42,8 +44,9 @@ export function classifyConversation(params: {
   ownerUserId: string;
 }): ConversationShape {
   const others = params.members.filter((m) => normalizeId(m.user_id) !== normalizeId(params.agentUserId));
-  const ownerOnly = others.length === 1 && normalizeId(others[0]!.user_id) === normalizeId(params.ownerUserId);
-  return { kind: ownerOnly ? "direct" : "group", others, ownerOnly };
+  const direct = others.length === 1;
+  const ownerOnly = direct && normalizeId(others[0]!.user_id) === normalizeId(params.ownerUserId);
+  return { kind: direct ? "direct" : "group", others, ownerOnly };
 }
 
 /** Human-visible label for a conversation (used in context and status), never the raw ids. */

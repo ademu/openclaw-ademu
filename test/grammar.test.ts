@@ -38,9 +38,9 @@ describe("grammar: conversation classification by membership", () => {
     expect(shape.ownerOnly).toBe(true);
   });
 
-  it("a stranger + agent is a group shape (DM from a non-owner — the allowlist drops it later)", () => {
+  it("a stranger + agent is a DIRECT shape from a non-owner (the DM allowlist drops it; addressing the agent does not help)", () => {
     const shape = classifyConversation({ members: [member(GUEST), member(AGENT, "agent")], agentUserId: AGENT, ownerUserId: OWNER });
-    expect(shape.kind).toBe("group");
+    expect(shape.kind).toBe("direct");
     expect(shape.ownerOnly).toBe(false);
   });
 
