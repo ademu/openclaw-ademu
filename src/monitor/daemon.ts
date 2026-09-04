@@ -347,6 +347,36 @@ export class DaemonManager {
   }
 
   /**
+   * Conservative liveness of the RECORDED child, for spawn suppression (the opposite polarity of
+   * #daemonProcessVerified, which authorizes a kill): an alive pid with MISSING start time or command
+   * is "may still be alive" — only `alive:false`, or a start time that PROVES pid reuse, says gone.
+   * While a recorded child may be alive, nothing is ever spawned beside it.
+   */
+  #recordedChildMayBeAlive(row: OwnershipRow): boolean {
+    if (row.daemonPid == null) return false;
+    const facts = this.#deps.processFacts(row.daemonPid);
+    if (!facts.alive) return false;
+    if (facts.startedAt && row.daemonPidStartedAt && facts.startedAt !== row.daemonPidStartedAt) return false; // pid reused
+    return true;
+  }
+
+  /** `stale` + pid facts kept + the retry-later error: the one way an unreachable live child is left. */
+  #refuseSiblingSpawn(identity: DaemonIdentity, row: OwnershipRow): never {
+    this.#deps.store.cas({
+      dataDir: identity.dataDir,
+      from: [row.state],
+      to: "stale",
+      expectedGeneration: row.generation,
+      set: { ownerPid: null, ownerPidStartedAt: null, deadlineMs: null, reason: "recorded child may still be alive but is not answering" },
+    });
+    this.#deps.log("daemon_child_alive_not_listening", { dataDir: identity.dataDir, state: row.state });
+    throw new DaemonUnreachableError(
+      `a previous Ademú device host process is still running but not answering; it will be retried once it exits (daemon log: ${identity.raw.dataDir}/daemon.log)`,
+      `${identity.raw.dataDir}/daemon.log`,
+    );
+  }
+
+  /**
    * Fail-closed proof that the daemon answering on our sockets is the exact instance we bound: all
    * three canonical paths (session socket REQUIRED), the daemon's own start time, and a live pid
    * whose start time and command match the row. Anything missing or different → foreign, never
@@ -500,6 +530,9 @@ export class DaemonManager {
             return await this.#ownedLease(params, holderId, current, probe.info, undefined);
           }
           if (probe && !probe.matches) return this.#foreignLease(params, holderId, probe.info);
+          // Unreachable: a healthy-but-slow daemon must never get a sibling — only a recorded child
+          // that is proven gone (or its pid proven reused) may be respawned (Codex branch round 14 #1).
+          if (this.#recordedChildMayBeAlive(row)) this.#refuseSiblingSpawn(identity, row);
           // Our daemon is dead: respawn under a new generation.
           const starting = this.#toStarting(identity, [row.state], row.generation);
           if (!starting) continue;
@@ -524,20 +557,7 @@ export class DaemonManager {
             this.#deps.log("daemon_orphan_listener_foreign", { dataDir: identity.dataDir });
             return this.#foreignLease(params, holderId, probe.info);
           }
-          if (row.state === "starting" && this.#daemonProcessVerified(row)) {
-            store.cas({
-              dataDir: identity.dataDir,
-              from: ["starting"],
-              to: "stale",
-              expectedGeneration: row.generation,
-              set: { ownerPid: null, ownerPidStartedAt: null, deadlineMs: null, reason: "orphaned start: spawned child alive but not answering" },
-            });
-            this.#deps.log("daemon_child_alive_not_listening", { dataDir: identity.dataDir });
-            throw new DaemonUnreachableError(
-              `a previous Ademú device host process is still running but not answering; it will be retried once it exits (daemon log: ${identity.raw.dataDir}/daemon.log)`,
-              `${identity.raw.dataDir}/daemon.log`,
-            );
-          }
+          if (row.state === "starting" && this.#recordedChildMayBeAlive(row)) this.#refuseSiblingSpawn(identity, row);
           const starting = this.#toStarting(identity, [row.state], row.generation);
           if (!starting) continue;
           // A reclaimed claim/start that had once been bound keeps its ownership history.
@@ -561,15 +581,9 @@ export class DaemonManager {
             continue;
           }
           if (probe) return this.#foreignLease(params, holderId, probe.info);
-          if (this.#daemonProcessVerified(row)) {
-            // Our recorded child is ALIVE but not listening (a spawn that never came up): never
-            // start a second daemon beside it — retry once it has exited (Codex branch round 11 #2).
-            this.#deps.log("daemon_child_alive_not_listening", { dataDir: identity.dataDir });
-            throw new DaemonUnreachableError(
-              `a previous Ademú device host process is still running but not answering; it will be retried once it exits (daemon log: ${identity.raw.dataDir}/daemon.log)`,
-              `${identity.raw.dataDir}/daemon.log`,
-            );
-          }
+          // Our recorded child MAY be alive but not listening (a spawn that never came up, or slow):
+          // never start a second daemon beside it — retry once it has exited (rounds 11 #2 / 14 #2).
+          if (this.#recordedChildMayBeAlive(row)) this.#refuseSiblingSpawn(identity, row);
           const starting = this.#toStarting(identity, [row.state], row.generation);
           if (!starting) continue;
           return await this.#spawnAndBind(params, holderId, starting, "existing");

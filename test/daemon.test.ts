@@ -1099,6 +1099,63 @@ describe("Codex branch-review folds (daemon)", () => {
     await p1.catch(() => {});
   });
 
+  it("R14#1 an UNREACHABLE bound/pending daemon whose recorded process may still be alive gets no sibling; once gone, exactly one respawn", async () => {
+    for (const state of ["bound", "pending-publication"] as const) {
+      const w = new World();
+      const d = w.addDaemon(DIR);
+      bindLive(w, d);
+      if (state === "pending-publication") w.store.cas({ dataDir: DIR, from: ["bound"], to: "pending-publication", expectedGeneration: 1 });
+      // the daemon stops answering its control socket but its process is alive
+      w.daemons.get(`${DIR}/adc.sock`)!.alive = false;
+      const m = new DaemonManager(w.deps());
+      await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+      expect(w.spawns).toHaveLength(0);
+      const row = w.store.getOwnership(DIR)!;
+      expect(row.state).toBe("stale");
+      expect(row.daemonPid).toBe(d.pid);
+      // the process exits → one respawn
+      w.processes.get(d.pid)!.alive = false;
+      const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+      expect(lease.mode).toBe("owned");
+      expect(w.spawns).toHaveLength(1);
+    }
+  });
+
+  it("R14#2 incomplete process facts (alive pid, no start time / command) BLOCK spawning; only alive:false or proven pid reuse allows it", async () => {
+    // (a) orphaned `starting` with an alive child whose facts are incomplete
+    const a = new World();
+    a.spawnFailsToListen = true;
+    let releaseEnsure!: () => void;
+    a.ensureGate = new Promise<void>((r) => (releaseEnsure = r));
+    const ma = new DaemonManager(a.deps());
+    const p1 = ma.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    p1.catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const pid = a.store.getOwnership(DIR)!.daemonPid!;
+    a.processes.set(pid, { alive: true, startedAt: "", command: "" }); // ps failed: no facts
+    a.clock += STARTING_DEADLINE_MS + 1;
+    const mb = new DaemonManager({ ...a.deps(), selfPid: 200, selfPidStartedAt: "o", processFacts: (p) => (p === 100 ? { alive: false } : p === pid ? { alive: true } : a.deps().processFacts(p)) });
+    await expect(mb.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(a.spawns).toHaveLength(1);
+    expect(a.store.getOwnership(DIR)!).toMatchObject({ state: "stale", daemonPid: pid });
+    releaseEnsure();
+    await p1.catch(() => {});
+    // (b) stale row, alive pid with incomplete facts → still no spawn; proven pid reuse → spawn
+    const b = new World();
+    const d = b.addDaemon(DIR);
+    bindLive(b, d);
+    b.store.cas({ dataDir: DIR, from: ["bound"], to: "stale", expectedGeneration: 1 });
+    b.daemons.get(`${DIR}/adc.sock`)!.alive = false;
+    b.processes.set(d.pid, { alive: true, startedAt: "", command: "" });
+    const m2 = new DaemonManager(b.deps());
+    await expect(m2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(b.spawns).toHaveLength(0);
+    b.processes.set(d.pid, { alive: true, startedAt: "a different start", command: "python3 unrelated" }); // pid reused
+    const lease = await m2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("owned");
+    expect(b.spawns).toHaveLength(1);
+  });
+
   it("R11#2 a spawned child that never listened stays recorded; while it is alive no second daemon is started; once it exits the respawn proceeds", async () => {
     const w = new World();
     w.ensureRejectsAfterSpawn = true;

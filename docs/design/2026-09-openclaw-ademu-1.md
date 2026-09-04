@@ -376,6 +376,12 @@ a daemon that started but never answered is never forgotten and never gets a sib
 foreign; no listener but a recorded child still alive is `stale` (kept, never given a sibling); only
 then is the generation reclaimed and a daemon spawned.
 
+**Round 14 (2 HIGH, folded):** two predicates with opposite polarity now govern a recorded child —
+*kill authorization* is fail-closed (every fact must match) while *spawn suppression* is conservative
+(an alive pid with incomplete facts "may still be alive" and never gets a sibling; only `alive:false` or
+a start time proving pid reuse permits a respawn) — and the rule applies to an unreachable bound daemon
+too, not only to orphaned or stale rows.
+
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its
 `package.json` (`ERR_PACKAGE_PATH_NOT_EXPORTED` at register time). Both fixed; the acceptance now
