@@ -382,6 +382,9 @@ then is the generation reclaimed and a daemon spawned.
 a start time proving pid reuse permits a respawn) — and the rule applies to an unreachable bound daemon
 too, not only to orphaned or stale rows.
 
+**Round 15: APPROVE** (no findings; 275 tests green). The branch campaign closed after 15 rounds and
+78 folded findings — every premise verified in the trees before folding.
+
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its
 `package.json` (`ERR_PACKAGE_PATH_NOT_EXPORTED` at register time). Both fixed; the acceptance now
