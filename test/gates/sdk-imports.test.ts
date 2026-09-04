@@ -33,6 +33,9 @@ export const ALLOWED_SUBPATHS = new Set([
   "string-coerce-runtime",
   "runtime-env",
   "account-id",
+  "account-helpers",
+  "account-resolution",
+  "config-contracts",
   "state-paths",
   "command-auth",
   // The ONE recorded exception: the QR helpers have no focused subpath (design entry, V2).
