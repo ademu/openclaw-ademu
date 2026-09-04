@@ -17,6 +17,8 @@
 // Every timing constant is a named export; every process/fs/net effect goes through `DaemonDeps`
 // so the state machine is testable with fakes.
 import { spawn as realSpawn, execFileSync } from "node:child_process";
+import { createConnection } from "node:net";
+import type { Duplex } from "node:stream";
 import { chmodSync, existsSync, lstatSync, readdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { PlatformPackageMissingError, resolveAdcBinaryPath, UnsupportedPlatformError } from "@ademu/adc-bin";
@@ -35,6 +37,8 @@ export const SHUTDOWN_OP_MS = 1_500;
 export const SIGTERM_GRACE_MS = 500;
 export const HEARTBEAT_MS = 30_000;
 export const PENDING_PUBLICATION_SWEEP_MS = 3_600_000;
+/** Bound on ensureDaemon's pre-spawn bare probe (its `connectFn` seam; the package sets none). */
+export const PROBE_CONNECT_MS = 1_000;
 
 export type Role = "runtime" | "setup";
 export type Mode = "owned" | "foreign";
@@ -64,6 +68,8 @@ export type DaemonDeps = {
   isDirAbsentOrEmpty: (dir: string) => boolean;
   /** For an EXISTING empty dir: verify it is a real directory we own and make it 0700. */
   secureEmptyDir: (dir: string) => "absent" | "ok" | "unsafe";
+  /** ensureDaemon's `connectFn` seam: a unix-socket connect that gives up after PROBE_CONNECT_MS. */
+  probeConnect: (path: string) => Duplex;
   bundledVersion: string;
   platform: string;
   /** Closed-allowlist structured log: never a path with secrets, never `.detail`. */
@@ -178,6 +184,7 @@ export function realDaemonDeps(params: { store: AdemuStore; bundledVersion: stri
     kill: (pid, signal) => process.kill(pid, signal),
     isDirAbsentOrEmpty: (dir) => !existsSync(dir) || readdirSync(dir).length === 0,
     secureEmptyDir: realSecureEmptyDir,
+    probeConnect: boundedProbeConnect,
     bundledVersion: params.bundledVersion,
     platform: process.platform,
     log: params.log ?? (() => {}),
@@ -202,6 +209,22 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
       },
     );
   });
+}
+
+/**
+ * A unix-socket connect that cannot hang: if neither `connect` nor an error arrives within
+ * PROBE_CONNECT_MS the socket is destroyed with an error, which ensureDaemon's bare probe reads as
+ * "nothing answered" (→ spawn). `create` is injectable for tests.
+ */
+export function boundedProbeConnect(path: string, create: (path: string) => Duplex & { setTimeout?: (ms: number, cb: () => void) => unknown; destroy: (err?: Error) => unknown } = (p) => createConnection(p)): Duplex {
+  const socket = create(path);
+  const timer = setTimeout(() => socket.destroy(new Error("probe connect timed out")), PROBE_CONNECT_MS);
+  timer.unref?.();
+  const clear = () => clearTimeout(timer);
+  socket.once("connect", clear);
+  socket.once("error", clear);
+  socket.once("close", clear);
+  return socket;
 }
 
 /** The reachable daemon's own session socket path, or a blocked error — never a derived path. */
@@ -588,8 +611,15 @@ export class DaemonManager {
     }
 
     // The ASYNC authority re-check runs immediately before the spawn; only the sync abort check can
-    // live inside spawnFn (ensureDaemon's probe-then-spawn window is the bare probe, ≤ 1 s).
-    await params.beforeEffect?.();
+    // live inside spawnFn. ensureDaemon's own probe-then-spawn window is its bare probe, which WE
+    // bound to PROBE_CONNECT_MS through the `connectFn` seam (the package's bare probe has no
+    // timeout of its own). A rejected re-check must not leave our `starting` generation behind.
+    try {
+      await params.beforeEffect?.();
+    } catch (err) {
+      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      throw err;
+    }
     if (params.signal?.aborted) {
       store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
       throw new DaemonAbortedError();
@@ -620,7 +650,7 @@ export class DaemonManager {
       return c;
     };
 
-    const ensure = this.#deps.ensureDaemon({ binaryPath, env, spawnFn });
+    const ensure = this.#deps.ensureDaemon({ binaryPath, env, spawnFn, connectFn: this.#deps.probeConnect });
     const abortP = new Promise<never>((_, reject) => {
       if (!params.signal) return;
       const onAbort = () => reject(new DaemonAbortedError());

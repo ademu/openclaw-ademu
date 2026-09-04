@@ -347,6 +347,12 @@ signal; a control connection resolving after an aborted probe is closed once; an
 `ensureDaemon` reached its spawn drops the exact `starting` generation (no 20 s "still starting" after a
 restart); TTL-expiry disposals are tracked so plugin shutdown waits for them.
 
+**Round 9 (3 MEDIUM + 1 LOW, all folded):** a rejected authority re-check right before the spawn drops
+the exact `starting` generation; the package's bare pre-spawn probe has no timeout of its own, so the
+plugin supplies a bounded `connectFn` (1 s) through `ensureDaemon`'s public seam — the "≤ 1 s
+probe-then-spawn window" the authority model relies on is now enforced by us; the chat tool's execution
+signal reaches the daemon acquisition (cancelling during a slow acquire never spawns a setup daemon).
+
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its
 `package.json` (`ERR_PACKAGE_PATH_NOT_EXPORTED` at register time). Both fixed; the acceptance now

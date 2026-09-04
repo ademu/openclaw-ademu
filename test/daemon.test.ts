@@ -9,8 +9,10 @@ import {
   DaemonManager,
   DaemonUnreachableError,
   DaemonUnsupportedError,
+  boundedProbeConnect,
   daemonEnv,
   parseAdcVersion,
+  PROBE_CONNECT_MS,
   RELEASE_CAP_MS,
   STARTING_DEADLINE_MS,
   type ControlLike,
@@ -178,6 +180,9 @@ class World {
         const d = [...this.daemons.values()].find((x) => x.pid === pid);
         if (!d) return;
         if (signal === "SIGKILL" || (signal === "SIGTERM" && d.honoursSigterm)) this.killDaemon(d);
+      },
+      probeConnect: () => {
+        throw new Error("the fake ensureDaemon never dials");
       },
       isDirAbsentOrEmpty: (dir) => (this.dirs.get(dir) ?? "absent") !== "nonempty",
       secureEmptyDir: (dir) => {
@@ -861,6 +866,55 @@ describe("Codex branch-review folds (daemon)", () => {
     const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
     expect(lease.mode).toBe("owned");
     expect(w.clock - t0).toBeLessThan(1000); // no "still starting" wait
+  });
+
+  it("R9#1 a rejected authority re-check right before the spawn drops the exact `starting` row; reacquire is immediate", async () => {
+    const w = new World();
+    const m = new DaemonManager(w.deps());
+    await expect(
+      m.acquire({
+        identity: identityFor(DIR),
+        server: SERVER,
+        role: "setup",
+        beforeEffect: async () => {
+          throw new Error("authority expired");
+        },
+      }),
+    ).rejects.toThrow(/authority expired/);
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)).toBeUndefined();
+    expect(w.store.listHolders(DIR)).toHaveLength(0);
+    const t0 = w.clock;
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("owned");
+    expect(w.clock - t0).toBeLessThan(1000);
+  });
+
+  it("R9#2 boundedProbeConnect destroys a connect that neither connects nor errors within PROBE_CONNECT_MS", async () => {
+    const events = new Map<string, () => void>();
+    let destroyed: Error | undefined;
+    const fake = {
+      once: (ev: string, cb: () => void) => void events.set(ev, cb),
+      destroy: (err?: Error) => {
+        destroyed = err;
+      },
+    } as unknown as import("node:stream").Duplex & { destroy: (err?: Error) => unknown };
+    const vi = await import("vitest");
+    vi.vi.useFakeTimers();
+    try {
+      boundedProbeConnect("/nowhere.sock", () => fake);
+      vi.vi.advanceTimersByTime(PROBE_CONNECT_MS + 1);
+      expect(destroyed?.message).toMatch(/timed out/);
+      // a connect that arrives in time clears the timer: no destroy
+      destroyed = undefined;
+      boundedProbeConnect("/nowhere.sock", () => fake);
+      events.get("connect")!();
+      vi.vi.advanceTimersByTime(PROBE_CONNECT_MS + 1);
+      expect(destroyed).toBeUndefined();
+    } finally {
+      vi.vi.useRealTimers();
+    }
+    expect(PROBE_CONNECT_MS).toBeLessThanOrEqual(1000);
   });
 
   it("#9 an orphaned `stopping` row is recovered when the stopper is dead OR its deadline passed; our live instance has its stop RESUMED", async () => {

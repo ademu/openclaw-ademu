@@ -7,7 +7,7 @@
 import { AlreadyAttachedError, type AdcClient, type AdcClientOptions } from "@ademu/adc-client";
 import { ControlError, type AdcControlClient, type FourWords, type PairingSnapshot } from "@ademu/adc-control";
 import { normalizeId } from "./grammar.js";
-import type { DaemonManager, Lease } from "./monitor/daemon.js";
+import { DaemonAbortedError, type DaemonManager, type Lease } from "./monitor/daemon.js";
 import type { DaemonIdentity } from "./config.js";
 
 export type ControlLike = Pick<
@@ -294,6 +294,7 @@ export async function createEnrollmentLease(params: {
   ttlMs?: number | undefined;
 }): Promise<EnrollmentLease> {
   const { deps } = params;
+  if (params.signal?.aborted) throw new DaemonAbortedError();
   const abort = new AbortController();
   params.signal?.addEventListener("abort", () => abort.abort(), { once: true });
   const daemonLease = await deps.daemons.acquire({

@@ -17,6 +17,7 @@ import { inspectAdemuAccount, listAdemuAccountIds } from "../config.js";
 import { accountExists, applyEnrollment } from "../enroll-config.js";
 import { strings } from "../i18n/strings.js";
 import type { Qr } from "../qr.js";
+import { DaemonAbortedError } from "../monitor/daemon.js";
 import { remedyFor } from "../remedies.js";
 import { accountIdForAgentName } from "../config.js";
 
@@ -156,7 +157,7 @@ export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToo
       const sessionKey = ctx.sessionKey;
 
       if (action === "start") {
-        return startEnrollment({ args, ctx, deps, registry, sessionKey, beforeEffect });
+        return startEnrollment({ args, ctx, deps, registry, sessionKey, beforeEffect, signal });
       }
 
       // Every other action addresses an existing lease bound to this conversation + token.
@@ -224,6 +225,8 @@ async function startEnrollment(p: {
   registry: EnrollmentRegistry;
   sessionKey: string;
   beforeEffect: () => Promise<void>;
+  /** The tool call's execution signal: a cancelled call aborts a slow daemon acquisition too. */
+  signal: AbortSignal | undefined;
 }): Promise<ToolResult> {
   const cfg = (p.ctx.runtimeConfig ?? p.ctx.getRuntimeConfig?.() ?? p.ctx.config ?? {}) as OpenClawConfig;
   const agentName = (readStringParam(p.args, "agentName") ?? "").trim() || strings.enroll.agentNameFallback;
@@ -249,6 +252,7 @@ async function admitAndStart(p: {
   registry: EnrollmentRegistry;
   sessionKey: string;
   beforeEffect: () => Promise<void>;
+  signal: AbortSignal | undefined;
   cfg: OpenClawConfig;
   agentName: string;
   accountId: string;
@@ -274,8 +278,10 @@ async function admitAndStart(p: {
       identity: account.daemon,
       server: account.server,
       beforeEffect: p.beforeEffect,
+      signal: p.signal,
     });
   } catch (err) {
+    if (err instanceof DaemonAbortedError) return text(strings.enroll.toolCancelled, { ok: false, state: "cancelled" });
     // Known acquisition failures become fixed, instruct-only remedy text (never an install attempt).
     const remedy = remedyFor(err);
     if (remedy) return text(strings.enroll.toolUnavailable(remedy), { ok: false, state: "unavailable" });

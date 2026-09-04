@@ -2,14 +2,14 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { afterEach, describe, expect, it } from "vitest";
 import type { EnrollmentLeaseDeps } from "../src/ceremony.js";
-import { DaemonUnreachableError, type DaemonManager, type Lease } from "../src/monitor/daemon.js";
+import { DaemonAbortedError, DaemonUnreachableError, type DaemonManager, type Lease } from "../src/monitor/daemon.js";
 import { createEnrollTool, EnrollmentRegistry, registerEnrollTool, TOOL_NAME, type EnrollToolDeps } from "../src/tools/enroll.js";
 import { FakeAdcClient, OWNER } from "./fakes/adc.js";
 import { FakeControl, NEW_AGENT, NEW_DEVICE, QR, WORDS } from "./fakes/control.js";
 
 const tick = (ms = 3) => new Promise((r) => setTimeout(r, ms));
 
-function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?: unknown) {
+function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?: unknown, acquireGate?: Promise<void>) {
   const control = new FakeControl();
   let released = 0;
   const daemonLease: Lease = {
@@ -27,6 +27,13 @@ function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?: unknow
     acquire: async (p: unknown) => {
       acquires.push(p);
       if (acquireError) throw acquireError;
+      const signal = (p as { signal?: AbortSignal }).signal;
+      if (acquireGate) {
+        await Promise.race([
+          acquireGate,
+          new Promise<never>((_, reject) => signal?.addEventListener("abort", () => reject(new DaemonAbortedError()), { once: true })),
+        ]);
+      }
       return daemonLease;
     },
     promotePendingPublication: (dataDir: string) => {
@@ -382,6 +389,26 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     releaseClose();
     await all;
     expect(w.released()).toBe(1);
+  });
+
+  it("R9#3 the tool call's signal reaches the daemon acquisition: cancelling during a slow acquire yields `cancelled`, no lease", async () => {
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseGate = r;
+    });
+    const w = world({} as OpenClawConfig, undefined, gate);
+    const ac = new AbortController();
+    const startP = w.call({ action: "start", agentName: "Iris" }, {}, ac.signal);
+    await tick(5);
+    const acquireSignal = (w.acquires[0] as { signal?: AbortSignal }).signal;
+    expect(acquireSignal).toBeDefined();
+    expect(acquireSignal!.aborted).toBe(false);
+    ac.abort();
+    expect(acquireSignal!.aborted).toBe(true); // the lease's signal follows the call's signal
+    const r = await startP;
+    expect(r.details).toMatchObject({ ok: false, state: "cancelled" });
+    expect(w.registry.size).toBe(0);
+    releaseGate();
   });
 
   it("R2#8 axes compare exactly (absent → present is a mismatch) and only the same creator tuple may supersede", async () => {
