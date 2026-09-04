@@ -351,6 +351,54 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.released()).toBe(1);
   });
 
+  it("R3#1 a cancel that lands while confirm is probing wins: nothing is written, confirm reports cancelled", async () => {
+    const w = world();
+    let releaseProbe!: () => void;
+    const stall = new Promise<void>((r) => {
+      releaseProbe = r;
+    });
+    const client = new FakeAdcClient({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER });
+    client.stallGetSelf = stall;
+    w.deps.connectSession = async () => client as never;
+    const start = await w.call({ action: "start", agentName: "Iris" });
+    const leaseToken = start.details.leaseToken as string;
+    w.control.emit({ words: WORDS });
+    await tick();
+    const confirmP = w.call({ action: "confirm", leaseToken });
+    await tick(5);
+    w.control.finish("enrolled");
+    await tick(5); // confirm is now parked in the identity probe
+    const cancel = await w.call({ action: "cancel", leaseToken });
+    expect(cancel.details.cancelled).toBe(true);
+    releaseProbe();
+    const result = await confirmP;
+    expect(result.details.ok).toBe(false);
+    expect(w.writes).toHaveLength(0);
+    expect(w.released()).toBe(1);
+  });
+
+  it("R3#3 two simultaneous starts in one conversation admit exactly one; an account created meanwhile is never overwritten", async () => {
+    const w = world();
+    const [a, b] = await Promise.all([w.call({ action: "start", agentName: "Iris" }), w.call({ action: "start", agentName: "Iris" })]);
+    const oks = [a, b].filter((r) => r.details.ok);
+    expect(oks).toHaveLength(1);
+    expect(w.registry.size).toBe(1);
+    const leaseToken = oks[0]!.details.leaseToken as string;
+    // someone writes channels.ademu.accounts.iris while the ceremony runs
+    w.deps.writeConfig = async (mutate) => {
+      const draft = { channels: { ademu: { accounts: { iris: { deviceId: "other", token: "t" } } } } } as unknown as OpenClawConfig;
+      mutate(draft);
+    };
+    w.control.emit({ words: WORDS });
+    await tick();
+    const confirmP = w.call({ action: "confirm", leaseToken });
+    await tick(5);
+    w.control.finish("enrolled");
+    const r = await confirmP;
+    expect(r.details).toMatchObject({ ok: false, state: "account_exists" });
+    expect(w.released()).toBe(1);
+  });
+
   it("#10 after the config write the setup-spawned daemon is promoted (pending-publication → bound)", async () => {
     const w = world();
     const start = await w.call({ action: "start", agentName: "Iris" });

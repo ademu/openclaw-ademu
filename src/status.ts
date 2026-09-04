@@ -21,6 +21,13 @@ export class IdentityMismatchError extends Error {
     this.name = "IdentityMismatchError";
   }
 }
+/** The account was aborted while its session was connecting / warming up. */
+export class SessionAbortedError extends Error {
+  constructor() {
+    super("session open aborted");
+    this.name = "SessionAbortedError";
+  }
+}
 /** A reconnect warm-up (conversations/members) failed: transient — the account restarts. */
 export class SessionWarmupError extends Error {
   constructor() {

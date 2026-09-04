@@ -10,7 +10,11 @@
 // failure HALTS the loop (no ack for N or anything after), the caller republishes `recovering` +
 // `ingressUnavailable`, and the gateway restart replays from the daemon's cursor. Model runs proceed
 // concurrently after adoption, bounded by MAX_INFLIGHT dispatches.
-import type { DeviceEvent, MessageReceivedEvent } from "@ademu/adc-client";
+import { LineTooLongError, ProtocolViolationError, SessionRejectedError, type DeviceEvent, type MessageReceivedEvent } from "@ademu/adc-client";
+
+function isTerminalClientError(err: unknown): boolean {
+  return err instanceof SessionRejectedError || err instanceof ProtocolViolationError || err instanceof LineTooLongError;
+}
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { bindIngressLifecycleToReplyOptions, createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-outbound";
 import { CHANNEL_ID } from "../config.js";
@@ -371,7 +375,15 @@ export function startIngress(params: IngressParams): IngressHandle {
               ack(seq);
               break;
             }
-            await handleMessage(ev);
+            try {
+              await handleMessage(ev);
+            } catch (err) {
+              // Event-PROCESSING failures (members lookup, routing, access, context, dispatch) are the
+              // pre-adoption halt (recovering + ingressUnavailable, replay after restart); only
+              // explicit terminal errors keep their class and end the account as `blocked`.
+              if (err instanceof IngressHaltedError || err instanceof IngressProtocolError || isTerminalClientError(err)) throw err;
+              throw new IngressHaltedError(err);
+            }
             break;
           }
           case "membership_changed":

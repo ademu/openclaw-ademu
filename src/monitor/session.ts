@@ -13,7 +13,7 @@ import {
   type SelfInfo,
 } from "@ademu/adc-client";
 import { normalizeId } from "../grammar.js";
-import { IdentityMismatchError, SessionWarmupError } from "../status.js";
+import { IdentityMismatchError, SessionAbortedError, SessionWarmupError } from "../status.js";
 
 export type SessionDeps = {
   connect: (opts: AdcClientOptions) => Promise<AdcClient>;
@@ -38,6 +38,8 @@ export type OpenSessionParams = {
   deps: SessionDeps;
   onRetry?: ((info: RetryInfo) => void) | undefined;
   onReconnected?: (() => void) | undefined;
+  /** Account shutdown: aborts the connect/warm-up (a late connect success is closed). */
+  signal?: AbortSignal | undefined;
 };
 
 /** Live-only state: conversations and members, refreshed after every (re)attach. */
@@ -70,8 +72,10 @@ export class MembersCache {
   }
 
   /** Warm-up / reconnect barrier body: conversations + members of every active room. */
-  async refresh(): Promise<void> {
+  async refresh(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new SessionAbortedError();
     const { conversations } = await this.#client.listConversations();
+    if (signal?.aborted) throw new SessionAbortedError();
     this.#conversations = conversations;
     this.#members.clear();
     this.#inactive.clear();
@@ -81,6 +85,7 @@ export class MembersCache {
         continue;
       }
       const { members } = await this.#client.getMembers({ group_id: c.group_id });
+      if (signal?.aborted) throw new SessionAbortedError();
       this.#members.set(normalizeId(c.group_id), members);
     }
   }
@@ -132,23 +137,59 @@ export function assertIdentity(hello: DeviceHello, self: SelfInfo, account: Acco
 }
 
 export async function openSession(params: OpenSessionParams): Promise<Session> {
-  const client = await params.deps.connect({
+  const signal = params.signal;
+  if (signal?.aborted) throw new SessionAbortedError();
+  const connecting = params.deps.connect({
     token: params.token,
     socketPath: params.sessionSocketPath,
     takeover: true,
     reconnect: "auto",
   });
+  // Abort during connect: contain a late success (close it) and give up now.
+  const client = await new Promise<AdcClient>((resolve, reject) => {
+    const onAbort = () => {
+      connecting.then((c) => c.close().catch(() => {})).catch(() => {});
+      reject(new SessionAbortedError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    connecting.then(
+      (c) => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(c);
+      },
+      (err: unknown) => {
+        signal?.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
   let self: SelfInfo;
   const members = new MembersCache(client);
+  // Abort during warm-up: closing the client rejects its pending requests, so the awaits below wake.
+  let abortWarmup!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    abortWarmup = () => reject(new SessionAbortedError());
+  });
+  aborted.catch(() => {});
+  const onAbortWarmup = () => {
+    abortWarmup();
+    void client.close().catch(() => {});
+  };
+  signal?.addEventListener("abort", onAbortWarmup, { once: true });
   try {
-    self = await client.getSelf();
+    if (signal?.aborted) throw new SessionAbortedError();
+    // The warm-up is RACED against abort as well: even a request the client never rejects cannot
+    // hold the account past shutdown.
+    self = await Promise.race([client.getSelf(), aborted]);
     assertIdentity(client.hello, self, params.account);
     // The initial warm-up is inside the close-on-failure scope too: a seated, auto-reconnecting
     // client must never be leaked holding the device seat when openSession rejects.
-    await members.refresh();
+    await Promise.race([members.refresh(signal), aborted]);
   } catch (err) {
     await client.close().catch(() => {});
-    throw err;
+    throw signal?.aborted ? new SessionAbortedError() : err;
+  } finally {
+    signal?.removeEventListener("abort", onAbortWarmup);
   }
 
   // Reconnect barrier: `retry` marks live state stale; `reconnected` refreshes it before the loop

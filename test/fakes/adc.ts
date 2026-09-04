@@ -126,6 +126,12 @@ export class FakeAdcClient {
 
   /** Whether `refresh()` calls fail (reconnect warm-up failure). */
   refreshFails = false;
+  /** When set, `listConversations` waits for this promise (abort-during-warm-up tests). */
+  stallListConversations: Promise<void> | undefined;
+  /** When set, `getMembers` rejects (event-processing failure tests). */
+  getMembersFails = false;
+  /** When set, `getSelf` waits for this promise (cancel-during-probe tests). */
+  stallGetSelf: Promise<void> | undefined;
 
   events(): AsyncIterableIterator<DeviceEvent> {
     const q = this.#queue;
@@ -158,6 +164,7 @@ export class FakeAdcClient {
   async close() {
     this.closed = true;
     this.#queue.finish();
+    this.#rejectOnClose?.(new Error("DetachedError: client closed"));
   }
   async request() {
     throw new Error("not used");
@@ -173,15 +180,30 @@ export class FakeAdcClient {
     this.typing.push(params);
     return { status: "sent" };
   }
+  #closedP: Promise<never> | undefined;
+  #rejectOnClose: ((e: unknown) => void) | undefined;
+  /** Like the real client: a pending request rejects when the client is closed. */
+  #untilClosed(): Promise<never> {
+    if (!this.#closedP) {
+      this.#closedP = new Promise<never>((_, rej) => {
+        this.#rejectOnClose = rej;
+      });
+      this.#closedP.catch(() => {});
+    }
+    return this.#closedP;
+  }
   async listConversations() {
     if (this.refreshFails) throw new Error("list_conversations failed");
+    if (this.stallListConversations) await Promise.race([this.stallListConversations, this.#untilClosed()]);
     return { conversations: this.conversations };
   }
   async getMembers(params: { group_id: string }) {
     this.getMembersCalls++;
+    if (this.getMembersFails) throw new Error("get_members failed");
     return { members: this.members.get(params.group_id) ?? [] };
   }
   async getSelf() {
+    if (this.stallGetSelf) await Promise.race([this.stallGetSelf, this.#untilClosed()]);
     return this.self;
   }
   async getMessages() {

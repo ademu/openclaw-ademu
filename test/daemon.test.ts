@@ -681,6 +681,66 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(["stale", "stopped"]).toContain(w.store.getOwnership(DIR)!.state);
   });
 
+  it("R3#6 pid facts or the generation changing AFTER SIGTERM withhold SIGKILL", async () => {
+    // (a) pid reused between SIGTERM and SIGKILL
+    const a = new World();
+    const ma = new DaemonManager(a.deps());
+    const la = await ma.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    const da = a.daemons.get(`${DIR}/adc.sock`)!;
+    da.honoursShutdown = false;
+    da.honoursSigterm = false;
+    const procA = a.processes.get(da.pid)!;
+    const depsA = a.deps();
+    const ma2 = new DaemonManager({
+      ...depsA,
+      kill: (pid, signal) => {
+        a.kills.push({ pid, signal });
+        if (signal === "SIGTERM") {
+          procA.startedAt = "reused";
+          procA.command = "sleep 1000";
+        }
+      },
+    });
+    const la2 = await ma2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    await la.release();
+    await la2.release();
+    expect(a.kills.map((k) => k.signal)).toEqual(["SIGTERM"]);
+
+    // (b) the stopping generation moves between SIGTERM and SIGKILL
+    const b = new World();
+    const mb = new DaemonManager(b.deps());
+    const lb = await mb.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    const db = b.daemons.get(`${DIR}/adc.sock`)!;
+    db.honoursShutdown = false;
+    db.honoursSigterm = false;
+    const depsB = b.deps();
+    const mb2 = new DaemonManager({
+      ...depsB,
+      kill: (pid, signal) => {
+        b.kills.push({ pid, signal });
+        if (signal === "SIGTERM") b.store.cas({ dataDir: DIR, from: ["stopping"], to: "stopping", bumpGeneration: true });
+      },
+    });
+    const lb2 = await mb2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    await lb.release();
+    await lb2.release();
+    expect(b.kills.map((k) => k.signal)).toEqual(["SIGTERM"]);
+  });
+
+  it("R3#4 a claimed upgrade whose stop fails leaves `stale` and yields a FOREIGN lease (never 'owned' over an unproven instance)", async () => {
+    const w = new World();
+    w.bundledVersion = "0.2.5";
+    const old = w.addDaemon(DIR, { version: "0.2.4", honoursShutdown: false, honoursSigterm: false });
+    bindLive(w, old);
+    const deps = w.deps();
+    const m = new DaemonManager({ ...deps, kill: (pid, signal) => w.kills.push({ pid, signal }) });
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("foreign");
+    expect(w.store.getOwnership(DIR)!.state).toBe("stale");
+    expect(w.spawns).toHaveLength(0);
+    expect(w.logs.some((l) => l.event === "daemon_upgrade_failed")).toBe(true);
+  });
+
   it("#9 an orphaned `stopping` row is recovered when the stopper is dead OR its deadline passed; our live instance has its stop RESUMED", async () => {
     // (a) live stopper, expired deadline → recovered, stop resumed (shutdown op sent), then respawn
     const a = new World();

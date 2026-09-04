@@ -704,7 +704,15 @@ export class DaemonManager {
       const running = parseAdcVersion(info.version);
       if (running && running !== this.#deps.bundledVersion) {
         const upgraded = await this.#tryUpgrade(params, holderId, row);
-        if (upgraded) return upgraded;
+        if ("mode" in upgraded) return upgraded;
+        if (upgraded.kind === "failed") {
+          // We claimed the stop and it did not complete: the row is `stale` and whatever answers on
+          // the socket is no longer proven ours — attach foreign, or fail recoverably if nothing answers.
+          const probe = await this.#probe(identity.raw.controlSocket, identity);
+          if (probe) return this.#foreignLease(params, holderId, probe.info);
+          throw new DaemonUnreachableError("the Ademú device host could not be upgraded and no longer answers; check the daemon log", undefined);
+        }
+        // deferred (another live holder): keep the running, still-verified instance.
       }
     }
     const daemonPid = row.daemonPid;
@@ -876,7 +884,7 @@ export class DaemonManager {
     return gone();
   }
 
-  async #tryUpgrade(params: AcquireParams, holderId: string, row: OwnershipRow): Promise<Lease | undefined> {
+  async #tryUpgrade(params: AcquireParams, holderId: string, row: OwnershipRow): Promise<Lease | { kind: "deferred" | "failed" }> {
     const { identity } = params;
     const store = this.#deps.store;
     const claimed = store.tryClaimShutdown({
@@ -891,14 +899,17 @@ export class DaemonManager {
     });
     if (!claimed) {
       this.#deps.log("daemon_upgrade_deferred", { dataDir: identity.dataDir });
-      return undefined;
+      return { kind: "deferred" };
     }
     // tryClaimShutdown does not remove our own holder; keep it — we are about to respawn.
     const clean = await this.#terminate(identity, claimed);
     const stopped = store.cas({ dataDir: identity.dataDir, from: ["stopping"], to: clean ? "stopped" : "stale", expectedGeneration: claimed.generation });
-    if (!stopped || !clean) return undefined;
+    if (!stopped || !clean) {
+      this.#deps.log("daemon_upgrade_failed", { dataDir: identity.dataDir, clean });
+      return { kind: "failed" };
+    }
     const starting = this.#toStarting(identity, ["stopped"], stopped.generation);
-    if (!starting) return undefined;
+    if (!starting) return { kind: "failed" };
     this.#deps.log("daemon_upgrading", { dataDir: identity.dataDir, to: this.#deps.bundledVersion });
     return await this.#spawnAndBind(params, holderId, starting);
   }

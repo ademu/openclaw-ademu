@@ -69,7 +69,8 @@ Ademú; this is it.)
 
 - **Direct chats:** only the owner (the Ademú account that enrolled the agent) is heard; anyone
   else's DM is dropped before the model sees it.
-- **Rooms:** the agent reads everything but answers only when addressed by name, by an alias from
+- **Rooms:** the device receives all room traffic, but a message that does not address the agent is
+  acknowledged and filtered before the model ever sees it; the agent answers only when addressed by name, by an alias from
   `plugins.entries.ademu.config.mentionAliases`, or by the owner (always heard). Per-room settings
   live under `channels.ademu.groups.<conversationId>` (`requireMention`, `toolsBySender`, …).
 - **Sending proactively:** the `message` tool with `channel: "ademu"` and a conversation id

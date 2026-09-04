@@ -51,8 +51,37 @@ export type EnrollToolDeps = {
   writeConfig: (mutate: (draft: OpenClawConfig) => OpenClawConfig) => Promise<void>;
 };
 
+/** The account id already exists in the CURRENT config draft (created while the enrollment ran). */
+export class AccountExistsError extends Error {
+  constructor(readonly accountId: string) {
+    super(`Ademú account "${accountId}" already exists`);
+    this.name = "AccountExistsError";
+  }
+}
+
+/**
+ * The enrollment must still be the live one right before every durable effect: not cancelled
+ * (lease aborted/disposed) and still the registry's entry for its device (not superseded).
+ */
+function assertStillActive(active: ActiveEnrollment, registry: EnrollmentRegistry): void {
+  if (active.lease.disposed || active.lease.signal.aborted || registry.get(active.deviceId) !== active) {
+    throw new EnrollmentError("cancelled");
+  }
+}
+
 export class EnrollmentRegistry {
   readonly #active = new Map<string, ActiveEnrollment>();
+  readonly #starting = new Set<string>();
+
+  /** Synchronous admission: one `start` per conversation at a time (released when start settles). */
+  reserve(sessionKey: string): boolean {
+    if (this.#starting.has(sessionKey)) return false;
+    this.#starting.add(sessionKey);
+    return true;
+  }
+  unreserve(sessionKey: string): void {
+    this.#starting.delete(sessionKey);
+  }
 
   #prune(): void {
     for (const [id, e] of this.#active) if (e.lease.disposed) this.#active.delete(id);
@@ -175,6 +204,28 @@ async function startEnrollment(p: {
   if (accountExists(cfg, accountId)) {
     return text(strings.enroll.toolAccountExists(accountId, listAdemuAccountIds(cfg)), { ok: false, accountId });
   }
+  // Authority first (an expired call must not even dispose the previous lease), then a SYNCHRONOUS
+  // reservation of the conversation so two concurrent starts cannot both pass the checks below.
+  await p.beforeEffect();
+  if (!p.registry.reserve(p.sessionKey)) return text(strings.enroll.toolLeaseMismatch, { ok: false, state: "busy" });
+  try {
+    return await admitAndStart({ ...p, cfg, agentName, accountId });
+  } finally {
+    p.registry.unreserve(p.sessionKey);
+  }
+}
+
+async function admitAndStart(p: {
+  ctx: OpenClawPluginToolContext;
+  deps: EnrollToolDeps;
+  registry: EnrollmentRegistry;
+  sessionKey: string;
+  beforeEffect: () => Promise<void>;
+  cfg: OpenClawConfig;
+  agentName: string;
+  accountId: string;
+}): Promise<ToolResult> {
+  const { cfg, agentName, accountId } = p;
   // One enrollment per conversation at a time. Only the SAME creator tuple (session, sender, agent)
   // may supersede it; anyone else sharing the session key is refused instead of disposing it.
   const previous = p.registry.forSession(p.sessionKey);
@@ -186,7 +237,6 @@ async function startEnrollment(p: {
     await previous.lease.dispose("superseded");
   }
 
-  await p.beforeEffect();
   const account = inspectAdemuAccount(cfg, accountId);
   let lease: EnrollmentLease;
   try {
@@ -335,6 +385,7 @@ async function confirmEnrollment(p: {
       return text(strings.enroll.toolStatus(active.state), { ok: false, state: active.state });
     }
     let minted: { token: string; tokenId: string };
+    assertStillActive(active, p.registry);
     if (p.replace) {
       // Explicit second consent already given (the dedicated action): rotate directly.
       await p.beforeEffect();
@@ -356,8 +407,12 @@ async function confirmEnrollment(p: {
     const identity = await probeIdentity({ ...common, deviceId: active.deviceId, token: minted.token, sessionSocketPath: info.session_socket_path });
 
     await p.beforeEffect();
-    await p.deps.writeConfig((draft) =>
-      applyEnrollment(draft, {
+    // A `cancel` (or supersession) that landed while we were probing must win: nothing is written.
+    assertStillActive(active, p.registry);
+    await p.deps.writeConfig((draft) => {
+      // Re-check against the CURRENT draft: an account created while this enrollment ran is never overwritten.
+      if (accountExists(draft, common.accountId)) throw new AccountExistsError(common.accountId);
+      return applyEnrollment(draft, {
         accountId: common.accountId,
         agentName: active.agentName,
         deviceId: active.deviceId,
@@ -365,8 +420,8 @@ async function confirmEnrollment(p: {
         ownerUserId: identity.ownerUserId,
         token: minted.token,
         grantOwnerAuthority: true, // the initiator is owner-by-scope and confirmed the words from the same phone
-      }),
-    );
+      });
+    });
     active.state = "done";
     // Tool-door accelerator: the account is committed → publish the setup-spawned daemon now.
     if (active.lease.daemonLease.mode === "owned") {
@@ -380,6 +435,11 @@ async function confirmEnrollment(p: {
     await active.lease.dispose("done");
     return text(strings.enroll.toolConfirmed(active.agentName), { ok: true, state: "done", accountId: common.accountId, deviceId: active.deviceId });
   } catch (err) {
+    if (err instanceof AccountExistsError) {
+      p.registry.delete(active.deviceId);
+      await active.lease.dispose("account-exists");
+      return text(strings.enroll.toolAccountExists(err.accountId, [err.accountId]), { ok: false, state: "account_exists" });
+    }
     if (err instanceof EnrollmentError) {
       if (err.reason === "words_mismatch") {
         p.registry.delete(active.deviceId);

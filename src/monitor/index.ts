@@ -157,6 +157,7 @@ async function runWithLease(
         onReconnected: () => {
           setStatus(readyPatch());
         },
+        signal: ctx.abortSignal,
       });
     } catch (err) {
       if (ctx.abortSignal.aborted) return outcome;

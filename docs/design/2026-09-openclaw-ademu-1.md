@@ -309,6 +309,16 @@ of leaving the account deadlocked; every `SessionRejectedError` — including fu
 the initial warm-up is inside the close-on-failure scope; the tool disposes its lease at once when the
 pairing ends revoked/retired in the background and compares every creator axis exactly.
 
+**Round 3 (7 findings, all folded):** a `cancel` landing while `confirm` probes now wins (the enrollment
+must still be the live registry entry, un-aborted, immediately before the mint and before the config
+write); the account shutdown signal reaches the session open (connect and warm-up are raced against it
+and the client is closed on abort); tool admission reserves the conversation synchronously and the
+config write re-checks the current draft (an account created meanwhile is never overwritten); a
+claimed-but-failed upgrade yields a *foreign* lease over its `stale` row instead of "owned"; event-
+processing failures are the restart-and-replay halt again while only iterator/terminal client errors end
+the account as `blocked`; the room wording in README and the resident skill says unaddressed messages
+are filtered before the model.
+
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its
 `package.json` (`ERR_PACKAGE_PATH_NOT_EXPORTED` at register time). Both fixed; the acceptance now

@@ -9,7 +9,7 @@ import { DRAIN_CAP_MS, RELEASE_TAIL_MS, STOP_DEADLINE_MS, startAccount, type Sta
 import type { RuntimeChannelSurface } from "../src/monitor/ingress.js";
 import { getLiveAccount, resetLiveAccountsForTests } from "../src/outbound.js";
 import { AdemuStore } from "../src/store.js";
-import { AGENT, DEVICE, FakeAdcClient, fakeConnect, member, OWNER, ROOM_DM } from "./fakes/adc.js";
+import { AGENT, DEVICE, FakeAdcClient, fakeConnect, GUEST, member, OWNER, ROOM_DM } from "./fakes/adc.js";
 
 const cfg = { channels: { ademu: { accounts: { iris: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER, token: "t" } } } } } as unknown as OpenClawConfig;
 
@@ -324,6 +324,34 @@ describe("startAccount: Codex branch-review folds", () => {
     expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "recovering" });
     expect(w.client.acks).toEqual([]);
     expect(w.dm.lease()!.released).toBe(1);
+  });
+
+  it("R3#2 abort during the initial warm-up (stalled list_conversations) returns promptly, closes the client, releases the lease", async () => {
+    const w = world();
+    let release!: () => void;
+    w.client.stallListConversations = new Promise<void>((r) => {
+      release = r;
+    });
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    expect(w.client.closed).toBe(false);
+    w.ac.abort();
+    await run; // must not wait for the stalled request
+    expect(w.client.closed).toBe(true);
+    expect(w.dm.lease()!.released).toBe(1);
+    release();
+  });
+
+  it("R3#5 an event-processing failure (members lookup throws) is the pre-adoption halt: recovering + ingressUnavailable, no ack", async () => {
+    const w = world();
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    w.client.getMembersFails = true;
+    w.client.message({ body: "hello", sender_user_id: GUEST }); // unknown sender → members refresh → throws
+    const err = await run.catch((e: unknown) => e);
+    expect((err as Error).name).toBe("IngressHaltedError");
+    expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "recovering", ingressUnavailable: true });
+    expect(w.client.acks).toEqual([]);
   });
 
   it("R2#5 an unknown future session rejection (base class) → blocked, not a restart loop", async () => {
