@@ -38,6 +38,8 @@ type ActiveEnrollment = {
   deviceId: string;
   qrPayload: string;
   state: "scanning" | "words" | "confirmed" | "enrolled" | "minting_blocked" | "committing" | "done" | "failed";
+  /** A state-changing action (confirm / replace_token) is in flight: duplicates are refused, never joined. */
+  busy: boolean;
   words: FourWords | undefined;
   terminal: Promise<PairingSnapshot>;
   terminalState: string | undefined;
@@ -181,10 +183,20 @@ export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToo
           return text(strings.enroll.toolWords(words), { ok: true, state: "words", deviceId: active.deviceId, leaseToken: active.leaseToken });
         }
         case "confirm":
-          return confirmEnrollment({ active, ctx, deps, registry, beforeEffect, replace: false });
-        case "replace_token":
-          if (active.state !== "minting_blocked") return text(strings.enroll.toolReplaceNotAllowed, { ok: false, state: active.state });
-          return confirmEnrollment({ active, ctx, deps, registry, beforeEffect, replace: true });
+        case "replace_token": {
+          if (action === "replace_token" && active.state !== "minting_blocked") {
+            return text(strings.enroll.toolReplaceNotAllowed, { ok: false, state: active.state });
+          }
+          // Serialize state-changing actions per enrollment (OpenClaw may run tool calls in parallel):
+          // the SYNCHRONOUS busy claim happens before the first await; a duplicate is refused.
+          if (active.busy) return text(strings.enroll.toolStatus(active.state), { ok: false, state: active.state, busy: true });
+          active.busy = true;
+          try {
+            return await confirmEnrollment({ active, ctx, deps, registry, beforeEffect, replace: action === "replace_token" });
+          } finally {
+            active.busy = false;
+          }
+        }
         default:
           return text(strings.enroll.toolNoActive, { ok: false });
       }
@@ -293,6 +305,7 @@ async function startWithLease(p: {
     deviceId: created.device_id,
     qrPayload: created.qr_payload,
     state: "scanning",
+    busy: false,
     words: undefined,
     terminal: Promise.resolve({ state: "created", qrPayload: created.qr_payload }),
     terminalState: undefined,
@@ -453,8 +466,13 @@ async function confirmEnrollment(p: {
     await active.lease.dispose("done");
     return text(strings.enroll.toolConfirmed(active.agentName), { ok: true, state: "done", accountId: common.accountId, deviceId: active.deviceId });
   } catch (err) {
-    if (!(err instanceof EnrollmentError) && (active.lease.disposed || active.lease.signal.aborted)) {
-      // Whatever failed, it failed because the enrollment was cancelled/superseded underneath us.
+    const cancelled =
+      (err instanceof EnrollmentError && (err.reason === "cancelled" || err.reason === "aborted")) ||
+      (!(err instanceof EnrollmentError) && (active.lease.disposed || active.lease.signal.aborted));
+    if (cancelled) {
+      // It failed because the enrollment was cancelled/superseded underneath us: release, report cancelled.
+      p.registry.delete(active.deviceId);
+      await active.lease.dispose("cancelled");
       return text(strings.enroll.toolCancelled, { ok: false, state: "cancelled" });
     }
     if (err instanceof AccountExistsError) {

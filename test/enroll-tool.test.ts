@@ -372,7 +372,7 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(cancel.details.cancelled).toBe(true);
     releaseProbe();
     const result = await confirmP;
-    expect(result.details.ok).toBe(false);
+    expect(result.details).toMatchObject({ ok: false, state: "cancelled" });
     expect(w.writes).toHaveLength(0);
     expect(w.released()).toBe(1);
   });
@@ -389,7 +389,7 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     const cancel = await w.call({ action: "cancel", leaseToken });
     expect(cancel.details.cancelled).toBe(true);
     const result = await confirmP;
-    expect(result.details.ok).toBe(false);
+    expect(result.details).toMatchObject({ ok: false, state: "cancelled" });
     expect(w.control.calls.some((c) => c.op === "token_mint")).toBe(false);
     expect(w.writes).toHaveLength(0);
     expect(w.released()).toBe(1);
@@ -420,6 +420,60 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     const result = await confirmP;
     expect(result.details.state).toBe("done");
     expect(w.writes).toHaveLength(1);
+  });
+
+  it("R5#1 concurrent confirm / replace_token calls are serialized: exactly one durable operation, the stored token is the surviving one", async () => {
+    const w = world();
+    let mints = 0;
+    w.control.tokenMintImpl = async (p) => {
+      if (!p.replace) throw new (await import("@ademu/adc-control")).ControlError("label_exists", "x");
+      mints++;
+      return { token_id: `tid-${mints}`, label: p.label, token: `adc1_rotated_${mints}`, created_at_ms: 1 };
+    };
+    const start = await w.call({ action: "start", agentName: "Iris" });
+    const leaseToken = start.details.leaseToken as string;
+    w.control.emit({ words: WORDS });
+    await tick();
+    const p1 = w.call({ action: "confirm", leaseToken });
+    const p2 = w.call({ action: "confirm", leaseToken });
+    await tick(5);
+    w.control.finish("enrolled");
+    const [c1, c2] = await Promise.all([p1, p2]);
+    // only one confirm ran; the duplicate was refused as busy
+    expect([c1, c2].filter((r) => r.details.busy === true)).toHaveLength(1);
+    const blocked = [c1, c2].find((r) => r.details.busy !== true)!;
+    expect(blocked.details.state).toBe("label_exists");
+    const [r1, r2] = await Promise.all([w.call({ action: "replace_token", leaseToken }), w.call({ action: "replace_token", leaseToken })]);
+    expect([r1, r2].filter((r) => r.details.busy === true)).toHaveLength(1);
+    expect(mints).toBe(1);
+    expect((w.current() as unknown as { channels: { ademu: { accounts: { iris: { token: string } } } } }).channels.ademu.accounts.iris.token).toBe("adc1_rotated_1");
+    expect(w.writes).toHaveLength(1);
+  });
+
+  it("R5#4 the enrollment is superseded while the host holds the mutation: the callback refuses, nothing is written", async () => {
+    const w = world();
+    let releaseWrite!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseWrite = r;
+    });
+    const origWrite = w.deps.writeConfig;
+    w.deps.writeConfig = async (mutate) => {
+      await gate;
+      await origWrite(mutate);
+    };
+    const start = await w.call({ action: "start", agentName: "Iris" });
+    const leaseToken = start.details.leaseToken as string;
+    w.control.emit({ words: WORDS });
+    await tick();
+    const confirmP = w.call({ action: "confirm", leaseToken });
+    await tick(5);
+    w.control.finish("enrolled");
+    await tick(10); // parked inside writeConfig (committing)
+    w.registry.delete(NEW_DEVICE); // superseded underneath the pending mutation
+    releaseWrite();
+    const result = await confirmP;
+    expect(result.details).toMatchObject({ ok: false, state: "cancelled" });
+    expect(w.writes).toHaveLength(0);
   });
 
   it("R3#3 two simultaneous starts in one conversation admit exactly one; an account created meanwhile is never overwritten", async () => {

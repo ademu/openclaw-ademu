@@ -194,7 +194,14 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
       void closeOnce();
       throw new SessionAbortedError();
     }
-    await closeOnce();
+    // Failure first: close, but never past an abort that arrives while the close hangs.
+    await Promise.race([
+      closeOnce(),
+      new Promise<void>((resolve) => {
+        if (signal?.aborted) resolve();
+        else signal?.addEventListener("abort", () => resolve(), { once: true });
+      }),
+    ]);
     throw err;
   } finally {
     signal?.removeEventListener("abort", onAbortWarmup);
@@ -245,7 +252,7 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
         release = undefined;
         fail = undefined;
         f?.(new SessionWarmupError());
-        void client.close().catch(() => {});
+        void closeOnce();
       },
     );
   });
@@ -257,6 +264,6 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
     members,
     barrier: () => stale ?? Promise.resolve(),
     retries: () => retries,
-    close: () => client.close(),
+    close: () => closeOnce(),
   };
 }

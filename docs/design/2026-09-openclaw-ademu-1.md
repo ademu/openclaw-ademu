@@ -326,6 +326,11 @@ is `committing` — `cancel` is refused instead of promising "nothing written"; 
 memoized and never awaited on the abort path; the tool's conversation reservation precedes its first
 await; the room wording states the `requireMention` default and its `false` override.
 
+**Round 5 (4 findings, all folded):** state-changing tool actions are serialized per enrollment with a
+synchronous busy claim (a duplicate `confirm`/`replace_token` is refused, so a token can never be
+rotated twice with the dead one persisted); the session's memoized close is raced against abort on
+the failure-first path as well; a poll aborted by `cancel` reports `cancelled`.
+
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its
 `package.json` (`ERR_PACKAGE_PATH_NOT_EXPORTED` at register time). Both fixed; the acceptance now

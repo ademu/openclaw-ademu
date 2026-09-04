@@ -358,6 +358,18 @@ describe("startAccount: Codex branch-review folds", () => {
     release();
   });
 
+  it("R5#2 warm-up FAILS first, its close hangs, then abort arrives → the account still returns and releases the lease", async () => {
+    const w = world();
+    w.client.refreshFails = true;
+    w.client.closeHangs = true;
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    w.ac.abort();
+    await run;
+    expect(w.client.closeCalls).toBe(1);
+    expect(w.dm.lease()!.released).toBe(1);
+  });
+
   it("R4#2 a connect that succeeds only AFTER abort is closed (late-success containment)", async () => {
     const w = world();
     let releaseConnect!: () => void;
