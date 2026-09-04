@@ -7,6 +7,7 @@ import type { DaemonIdentity } from "../src/config.js";
 import {
   DaemonAbortedError,
   DaemonManager,
+  DaemonUnreachableError,
   DaemonUnsupportedError,
   daemonEnv,
   parseAdcVersion,
@@ -739,6 +740,29 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(w.store.getOwnership(DIR)!.state).toBe("stale");
     expect(w.spawns).toHaveLength(0);
     expect(w.logs.some((l) => l.event === "daemon_upgrade_failed")).toBe(true);
+  });
+
+  it("R4#4 a claimed upgrade whose stop fails AND whose listener then vanishes → DaemonUnreachableError, holder removed, no owned lease", async () => {
+    const w = new World();
+    w.bundledVersion = "0.2.5";
+    const old = w.addDaemon(DIR, { version: "0.2.4", honoursShutdown: false, honoursSigterm: false });
+    bindLive(w, old);
+    const deps = w.deps();
+    let controlCalls = 0;
+    const m = new DaemonManager({
+      ...deps,
+      kill: (pid, signal) => w.kills.push({ pid, signal }),
+      connectControl: async (socketPath) => {
+        controlCalls++;
+        // 1 = the acquire probe, 2 = the shutdown attempt; afterwards the listener is gone
+        if (controlCalls > 2) throw new Error("ECONNREFUSED");
+        return deps.connectControl(socketPath);
+      },
+    });
+    await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(w.store.getOwnership(DIR)!.state).toBe("stale");
+    expect(w.store.listHolders(DIR)).toHaveLength(0);
+    expect(m.activeLeases).toBe(0);
   });
 
   it("#9 an orphaned `stopping` row is recovered when the stopper is dead OR its deadline passed; our live instance has its stop RESUMED", async () => {

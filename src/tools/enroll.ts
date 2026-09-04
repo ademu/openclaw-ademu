@@ -37,7 +37,7 @@ type ActiveEnrollment = {
   agentName: string;
   deviceId: string;
   qrPayload: string;
-  state: "scanning" | "words" | "confirmed" | "enrolled" | "minting_blocked" | "done" | "failed";
+  state: "scanning" | "words" | "confirmed" | "enrolled" | "minting_blocked" | "committing" | "done" | "failed";
   words: FourWords | undefined;
   terminal: Promise<PairingSnapshot>;
   terminalState: string | undefined;
@@ -168,6 +168,8 @@ export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToo
         case "status":
           return text(strings.enroll.toolStatus(active.state), { ok: true, state: active.state, deviceId: active.deviceId });
         case "cancel": {
+          // Past the final guard the config write is committing: cancel cannot claim "nothing written".
+          if (active.state === "committing") return text(strings.enroll.toolStatus(active.state), { ok: false, state: active.state });
           registry.delete(active.deviceId);
           await active.lease.dispose("cancelled");
           return text(strings.enroll.toolCancelled, { ok: true, cancelled: true });
@@ -204,11 +206,12 @@ async function startEnrollment(p: {
   if (accountExists(cfg, accountId)) {
     return text(strings.enroll.toolAccountExists(accountId, listAdemuAccountIds(cfg)), { ok: false, accountId });
   }
-  // Authority first (an expired call must not even dispose the previous lease), then a SYNCHRONOUS
-  // reservation of the conversation so two concurrent starts cannot both pass the checks below.
-  await p.beforeEffect();
+  // SYNCHRONOUS reservation of the conversation before the first await (two concurrent starts cannot
+  // both pass the checks below), then authority (an expired call must not even dispose the previous
+  // lease), then admission.
   if (!p.registry.reserve(p.sessionKey)) return text(strings.enroll.toolLeaseMismatch, { ok: false, state: "busy" });
   try {
+    await p.beforeEffect();
     return await admitAndStart({ ...p, cfg, agentName, accountId });
   } finally {
     p.registry.unreserve(p.sessionKey);
@@ -358,18 +361,24 @@ async function confirmEnrollment(p: {
   replace: boolean;
 }): Promise<ToolResult> {
   const { active } = p;
+  // The authority check the ceremony runs immediately before each durable effect ALSO proves the
+  // enrollment is still live (not cancelled/superseded) after the awaits that preceded it.
+  const guard = async () => {
+    await p.beforeEffect();
+    assertStillActive(active, p.registry);
+  };
   const common = {
     control: active.lease.control,
     connectSession: p.deps.connectSession,
     accountId: normalizeAccountId(active.lease.accountId),
-    beforeEffect: p.beforeEffect,
+    beforeEffect: guard,
     signal: active.lease.signal,
   };
   try {
     if (active.state === "words" || active.state === "scanning") {
       const words = active.words; // the DAEMON's words, never the model's
       if (!words) return text(strings.enroll.toolWaiting, { ok: false, state: active.state });
-      await p.beforeEffect();
+      await guard();
       try {
         await active.lease.control.confirmWords({ device_id: active.deviceId, words });
       } catch (err) {
@@ -377,7 +386,14 @@ async function confirmEnrollment(p: {
         throw err;
       }
       active.state = "confirmed";
-      const last = await active.terminal;
+      let last: PairingSnapshot;
+      try {
+        last = await active.terminal;
+      } catch (err) {
+        // A cancel/supersession aborts the poll: report it as cancelled, not as a transport error.
+        if (active.lease.disposed || active.lease.signal.aborted) throw new EnrollmentError("cancelled");
+        throw err;
+      }
       if (last.state !== "enrolled") throw new EnrollmentError(last.state === "revoked" || last.state === "retired" ? last.state : "unexpected_state");
       active.state = "enrolled";
     }
@@ -388,7 +404,7 @@ async function confirmEnrollment(p: {
     assertStillActive(active, p.registry);
     if (p.replace) {
       // Explicit second consent already given (the dedicated action): rotate directly.
-      await p.beforeEffect();
+      await guard();
       const m = await active.lease.control.tokenMint({ device_id: active.deviceId, label: tokenLabelFor(common.accountId), replace: true });
       minted = { token: m.token, tokenId: m.token_id };
     } else {
@@ -406,10 +422,12 @@ async function confirmEnrollment(p: {
     if (!info.session_socket_path) throw new EnrollmentError("daemon_too_old");
     const identity = await probeIdentity({ ...common, deviceId: active.deviceId, token: minted.token, sessionSocketPath: info.session_socket_path });
 
-    await p.beforeEffect();
-    // A `cancel` (or supersession) that landed while we were probing must win: nothing is written.
-    assertStillActive(active, p.registry);
+    await guard();
+    // The final guard runs INSIDE the mutation callback (when the host hands us its current draft),
+    // and from here the enrollment is `committing`: `cancel` can no longer claim "nothing written".
+    active.state = "committing";
     await p.deps.writeConfig((draft) => {
+      assertStillActive(active, p.registry);
       // Re-check against the CURRENT draft: an account created while this enrollment ran is never overwritten.
       if (accountExists(draft, common.accountId)) throw new AccountExistsError(common.accountId);
       return applyEnrollment(draft, {
@@ -435,6 +453,10 @@ async function confirmEnrollment(p: {
     await active.lease.dispose("done");
     return text(strings.enroll.toolConfirmed(active.agentName), { ok: true, state: "done", accountId: common.accountId, deviceId: active.deviceId });
   } catch (err) {
+    if (!(err instanceof EnrollmentError) && (active.lease.disposed || active.lease.signal.aborted)) {
+      // Whatever failed, it failed because the enrollment was cancelled/superseded underneath us.
+      return text(strings.enroll.toolCancelled, { ok: false, state: "cancelled" });
+    }
     if (err instanceof AccountExistsError) {
       p.registry.delete(active.deviceId);
       await active.lease.dispose("account-exists");

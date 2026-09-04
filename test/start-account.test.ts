@@ -342,6 +342,44 @@ describe("startAccount: Codex branch-review folds", () => {
     release();
   });
 
+  it("R4#2 abort during warm-up with a HANGING close still returns promptly (close called once, lease released)", async () => {
+    const w = world();
+    w.client.closeHangs = true;
+    let release!: () => void;
+    w.client.stallListConversations = new Promise<void>((r) => {
+      release = r;
+    });
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    w.ac.abort();
+    await run;
+    expect(w.client.closeCalls).toBe(1);
+    expect(w.dm.lease()!.released).toBe(1);
+    release();
+  });
+
+  it("R4#2 a connect that succeeds only AFTER abort is closed (late-success containment)", async () => {
+    const w = world();
+    let releaseConnect!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseConnect = r;
+    });
+    const origConnect = w.deps.session.connect;
+    w.deps.session.connect = async (o) => {
+      await gate;
+      return origConnect(o);
+    };
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    w.ac.abort();
+    await run;
+    expect(w.client.closed).toBe(false);
+    releaseConnect();
+    await settle();
+    expect(w.client.closed).toBe(true);
+    expect(w.dm.lease()!.released).toBe(1);
+  });
+
   it("R3#5 an event-processing failure (members lookup throws) is the pre-adoption halt: recovering + ingressUnavailable, no ack", async () => {
     const w = world();
     const run = startAccount(w.ctx, w.deps);

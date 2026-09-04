@@ -171,9 +171,13 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
     abortWarmup = () => reject(new SessionAbortedError());
   });
   aborted.catch(() => {});
+  // close() is memoized: the abort path and the failure path share ONE close, and the abort path
+  // never awaits it (an unbounded close must not hold the account past its shutdown budget).
+  let closing: Promise<void> | undefined;
+  const closeOnce = () => (closing ??= client.close().catch(() => {}));
   const onAbortWarmup = () => {
     abortWarmup();
-    void client.close().catch(() => {});
+    void closeOnce();
   };
   signal?.addEventListener("abort", onAbortWarmup, { once: true });
   try {
@@ -186,8 +190,12 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
     // client must never be leaked holding the device seat when openSession rejects.
     await Promise.race([members.refresh(signal), aborted]);
   } catch (err) {
-    await client.close().catch(() => {});
-    throw signal?.aborted ? new SessionAbortedError() : err;
+    if (signal?.aborted) {
+      void closeOnce();
+      throw new SessionAbortedError();
+    }
+    await closeOnce();
+    throw err;
   } finally {
     signal?.removeEventListener("abort", onAbortWarmup);
   }

@@ -377,6 +377,51 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.released()).toBe(1);
   });
 
+  it("R4#1 a cancel that lands after the words were confirmed but before the mint wins: no mint, no write", async () => {
+    const w = world();
+    const start = await w.call({ action: "start", agentName: "Iris" });
+    const leaseToken = start.details.leaseToken as string;
+    w.control.emit({ words: WORDS });
+    await tick();
+    const confirmP = w.call({ action: "confirm", leaseToken });
+    await tick(5); // confirm_words sent; confirm is parked waiting for the terminal state
+    expect(w.control.calls.some((c) => c.op === "confirm_words")).toBe(true);
+    const cancel = await w.call({ action: "cancel", leaseToken });
+    expect(cancel.details.cancelled).toBe(true);
+    const result = await confirmP;
+    expect(result.details.ok).toBe(false);
+    expect(w.control.calls.some((c) => c.op === "token_mint")).toBe(false);
+    expect(w.writes).toHaveLength(0);
+    expect(w.released()).toBe(1);
+  });
+
+  it("R4#1 a cancel that lands while the host mutation is pending is refused (committing) and the write completes exactly once", async () => {
+    const w = world();
+    let releaseWrite!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseWrite = r;
+    });
+    const origWrite = w.deps.writeConfig;
+    w.deps.writeConfig = async (mutate) => {
+      await gate; // the host takes its time before handing us the draft
+      await origWrite(mutate);
+    };
+    const start = await w.call({ action: "start", agentName: "Iris" });
+    const leaseToken = start.details.leaseToken as string;
+    w.control.emit({ words: WORDS });
+    await tick();
+    const confirmP = w.call({ action: "confirm", leaseToken });
+    await tick(5);
+    w.control.finish("enrolled");
+    await tick(10); // confirm is inside writeConfig (committing)
+    const cancel = await w.call({ action: "cancel", leaseToken });
+    expect(cancel.details).toMatchObject({ ok: false, state: "committing" });
+    releaseWrite();
+    const result = await confirmP;
+    expect(result.details.state).toBe("done");
+    expect(w.writes).toHaveLength(1);
+  });
+
   it("R3#3 two simultaneous starts in one conversation admit exactly one; an account created meanwhile is never overwritten", async () => {
     const w = world();
     const [a, b] = await Promise.all([w.call({ action: "start", agentName: "Iris" }), w.call({ action: "start", agentName: "Iris" })]);

@@ -35,8 +35,9 @@ own word for something else; a vitest gate scans the copy for it and fails the b
 **Owner-only by construction.** In a direct chat only the **owner** — the Ademú account that scanned
 the QR — is heard; anyone else's DM is dropped before the model sees it (DM policy `allowlist`,
 `allowFrom = [ownerUserId]`, resolved at runtime through OpenClaw's `createChannelIngressResolver`).
-Rooms are `open` because a human added the agent; the agent answers only when addressed (name, alias,
-OpenClaw's own mention patterns) — the owner is always heard.
+Rooms are `open` because a human added the agent; by default the agent answers only when addressed
+(name, alias, OpenClaw's own mention patterns; `groups.<id>.requireMention: false` lets every message
+through) — the owner is always heard.
 
 **Two doors, one ceremony.** `openclaw channels add --channel ademu` (wizard) and the owner-gated
 `ademu_enroll` chat tool share one ceremony module: create device → QR → poll → four words → *human*
@@ -318,6 +319,12 @@ claimed-but-failed upgrade yields a *foreign* lease over its `stale` row instead
 processing failures are the restart-and-replay halt again while only iterator/terminal client errors end
 the account as `blocked`; the room wording in README and the resident skill says unaddressed messages
 are filtered before the model.
+
+**Round 4 (5 findings, all folded):** the enrollment's liveness is re-asserted after every awaited
+authority check and inside the host's mutation callback, and once the write is in flight the enrollment
+is `committing` — `cancel` is refused instead of promising "nothing written"; the session's close is
+memoized and never awaited on the abort path; the tool's conversation reservation precedes its first
+await; the room wording states the `requireMention` default and its `false` override.
 
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its

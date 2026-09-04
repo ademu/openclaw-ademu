@@ -161,10 +161,15 @@ export class FakeAdcClient {
   ackThrough(ev: { seq: number }) {
     this.ack(ev.seq);
   }
+  /** When set, `close()` never resolves (hung-close tests). */
+  closeHangs = false;
+  closeCalls = 0;
   async close() {
+    this.closeCalls++;
     this.closed = true;
     this.#queue.finish();
     this.#rejectOnClose?.(new Error("DetachedError: client closed"));
+    if (this.closeHangs) await new Promise(() => {});
   }
   async request() {
     throw new Error("not used");
