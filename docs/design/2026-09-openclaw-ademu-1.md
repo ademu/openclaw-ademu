@@ -400,6 +400,11 @@ acceptance and E2E use.
 **unauthenticated** (CLI 0.23.3): 48 files / 62 661 bytes, source
 `github:ademu/openclaw-ademu@feat/openclaw-ademu-1`. Publishing stays a launch-calendar item.
 
+**Plugin PR:** ademu/openclaw-ademu#1 — first CI run all green: `test (node 22.22.3)`, `test (node 24.15.0)`,
+`acceptance (openclaw host)` (headless install into a fresh OpenClaw 2026.9.1 state dir), and the
+required `ci-gate`. `beta.yml`'s first run is a `workflow_dispatch` after the merge (the workflow must
+exist on the default branch to be dispatchable).
+
 **Repo gates (T21):** ruleset "main gate" id 22259787 (PR required / 0 reviews, no force-push or
 deletion, required check `ci-gate`, admin bypass); Issues enabled. **Monorepo pointer PR (T22):**
 ademu/AdemuMLS#221.
