@@ -1,0 +1,798 @@
+// DaemonManager (design entry §2 R1/R2/R11, plan T5): who runs the Ademú device host (adc daemon),
+// where, and who may stop it.
+//
+//   identity  = the canonical (dataDir, controlSocket[, sessionSocket]) pair — §2 R1.
+//   ownership = a row in the plugin's SQLite (`daemon_ownership`) with a closed state enum and a
+//               generation that fences EVERY transition — §2 R2. No row ⇒ FOREIGN: attach only,
+//               never spawn, never stop, never upgrade.
+//   holders   = cross-process leases (`daemon_holders`, heartbeat 30 s). Only the gateway RUNTIME
+//               role may stop a daemon, and only through the atomic fence: sweep stale holders → no
+//               other live holder → CAS bound→stopping (new generation) → shutdown op → kill fallback.
+//               Setup leases (wizard, chat tool) may spawn but NEVER stop anything.
+//   spawn     = `ensureDaemon` from @ademu/adc-control with OUR `spawnFn`, which injects the five
+//               env vars (ADC_DATA_DIR, ADC_SOCKET_PATH, ADC_SESSION_SOCKET_PATH, ADC_REST_BASE_URL,
+//               ADC_WS_URL), re-checks abort synchronously, and persists the CHILD pid/start facts
+//               into the `starting` row before returning (daemon_info carries no pid).
+//
+// Every timing constant is a named export; every process/fs/net effect goes through `DaemonDeps`
+// so the state machine is testable with fakes.
+import { spawn as realSpawn, execFileSync } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { PlatformPackageMissingError, resolveAdcBinaryPath, UnsupportedPlatformError } from "@ademu/adc-bin";
+import { connect as connectControlReal, ensureDaemon as ensureDaemonReal, type ChildLike, type DaemonInfoResult } from "@ademu/adc-control";
+import { canonicalizePath, type DaemonIdentity } from "../config.js";
+import type { AdemuStore, OwnershipRow, OwnershipState } from "../store.js";
+
+export const STARTING_DEADLINE_MS = 20_000;
+export const STOPPING_DEADLINE_MS = 10_000;
+export const WAIT_POLL_MS = 250;
+export const WAIT_FOR_BOUND_MS = 20_000;
+export const WAIT_WHILE_STOPPING_MS = 15_000;
+export const RELEASE_CAP_MS = 2_500;
+export const SHUTDOWN_OP_MS = 1_500;
+export const SIGTERM_GRACE_MS = 500;
+export const HEARTBEAT_MS = 30_000;
+export const PENDING_PUBLICATION_SWEEP_MS = 3_600_000;
+
+export type Role = "runtime" | "setup";
+export type Mode = "owned" | "foreign";
+
+export type ServerEndpoints = { restBaseUrl: string; wsUrl: string };
+
+export type ProcessFacts = { alive: boolean; startedAt?: string; command?: string };
+
+export type ControlLike = {
+  daemonInfo(): Promise<DaemonInfoResult>;
+  request<R>(op: string, params?: object, options?: { timeoutMs?: number }): Promise<R>;
+  close(): Promise<void>;
+};
+
+export type DaemonDeps = {
+  store: AdemuStore;
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  processFacts: (pid: number) => ProcessFacts;
+  selfPid: number;
+  selfPidStartedAt: string;
+  spawn: (cmd: string, argv: string[], opts: object) => ChildLike & { pid?: number | undefined };
+  ensureDaemon: typeof ensureDaemonReal;
+  connectControl: (socketPath: string) => Promise<ControlLike>;
+  resolveBinaryPath: () => string;
+  kill: (pid: number, signal: NodeJS.Signals) => void;
+  isDirAbsentOrEmpty: (dir: string) => boolean;
+  bundledVersion: string;
+  platform: string;
+  /** Closed-allowlist structured log: never a path with secrets, never `.detail`. */
+  log: (event: string, fields?: Record<string, string | number | boolean>) => void;
+};
+
+export class DaemonUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DaemonUnsupportedError";
+  }
+}
+export class DaemonBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DaemonBusyError";
+  }
+}
+export class DaemonUnreachableError extends Error {
+  constructor(
+    message: string,
+    readonly logPath?: string,
+  ) {
+    super(message);
+    this.name = "DaemonUnreachableError";
+  }
+}
+export class DaemonAbortedError extends Error {
+  constructor() {
+    super("daemon acquisition aborted");
+    this.name = "DaemonAbortedError";
+  }
+}
+export class DaemonLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DaemonLostError";
+  }
+}
+
+export type AcquireParams = {
+  identity: DaemonIdentity;
+  server: ServerEndpoints;
+  role: Role;
+  signal?: AbortSignal | undefined;
+  /** Authority re-check (async), awaited immediately before ANY spawn (Codex R8 #2). */
+  beforeEffect?: (() => Promise<void>) | undefined;
+};
+
+export type Lease = {
+  mode: Mode;
+  role: Role;
+  identity: DaemonIdentity;
+  holderId: string;
+  info: {
+    controlSocketPath: string;
+    sessionSocketPath: string;
+    daemonVersion?: string | undefined;
+    generation?: number | undefined;
+    logPath?: string | undefined;
+  };
+  /** Rejects when an OWNED daemon exits or this lease's holder row was swept (fail closed). Never resolves. */
+  lost: Promise<never>;
+  release(): Promise<void>;
+};
+
+/** `"0.2.4 (abc123)"` → `"0.2.4"`; unparsable → undefined (never triggers an upgrade). */
+export function parseAdcVersion(version: string | undefined): string | undefined {
+  const m = /^\s*v?(\d+\.\d+\.\d+)/.exec(version ?? "");
+  return m ? m[1] : undefined;
+}
+
+export function daemonEnv(identity: DaemonIdentity, server: ServerEndpoints, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return {
+    ...base,
+    ADC_DATA_DIR: identity.raw.dataDir,
+    ADC_SOCKET_PATH: identity.raw.controlSocket,
+    ADC_SESSION_SOCKET_PATH: identity.raw.sessionSocket,
+    ADC_REST_BASE_URL: server.restBaseUrl,
+    ADC_WS_URL: server.wsUrl,
+  };
+}
+
+function realProcessFacts(pid: number): ProcessFacts {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return { alive: false };
+  }
+  try {
+    const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim();
+    const command = execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" }).trim();
+    return { alive: true, startedAt, command };
+  } catch {
+    return { alive: true };
+  }
+}
+
+export function realDaemonDeps(params: { store: AdemuStore; bundledVersion: string; log?: DaemonDeps["log"] }): DaemonDeps {
+  const self = realProcessFacts(process.pid);
+  return {
+    store: params.store,
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    processFacts: realProcessFacts,
+    selfPid: process.pid,
+    selfPidStartedAt: self.startedAt ?? "",
+    spawn: (cmd, argv, opts) => realSpawn(cmd, argv, opts as never) as unknown as ChildLike & { pid?: number },
+    ensureDaemon: ensureDaemonReal,
+    connectControl: async (socketPath) => (await connectControlReal({ socketPath })) as unknown as ControlLike,
+    resolveBinaryPath: resolveAdcBinaryPath,
+    kill: (pid, signal) => process.kill(pid, signal),
+    isDirAbsentOrEmpty: (dir) => !existsSync(dir) || readdirSync(dir).length === 0,
+    bundledVersion: params.bundledVersion,
+    platform: process.platform,
+    log: params.log ?? (() => {}),
+  };
+}
+
+type Probe = { info: DaemonInfoResult; matches: boolean };
+
+/** True when the daemon at the other end is exactly the identity we own (all three paths). */
+export function infoMatchesIdentity(info: DaemonInfoResult, identity: DaemonIdentity): boolean {
+  const dataDir = info.data_dir ? canonicalizePath(info.data_dir) : "";
+  const control = info.socket_path ? canonicalizePath(info.socket_path) : "";
+  const session = info.session_socket_path ? canonicalizePath(info.session_socket_path) : "";
+  return dataDir === identity.dataDir && control === identity.controlSocket && (!session || session === identity.sessionSocket);
+}
+
+export class DaemonManager {
+  readonly #deps: DaemonDeps;
+  /** Per-identity closing promise: a later acquire awaits a release in flight (never overlaps). */
+  readonly #closing = new Map<string, Promise<void>>();
+  readonly #leases = new Set<Lease>();
+
+  constructor(deps: DaemonDeps) {
+    this.#deps = deps;
+  }
+
+  get activeLeases(): number {
+    return this.#leases.size;
+  }
+
+  // ------------------------------------------------------------------ probing
+
+  async #probe(controlSocket: string, identity: DaemonIdentity): Promise<Probe | undefined> {
+    let control: ControlLike | undefined;
+    try {
+      control = await this.#deps.connectControl(controlSocket);
+      const info = await control.daemonInfo();
+      return { info, matches: infoMatchesIdentity(info, identity) };
+    } catch {
+      return undefined;
+    } finally {
+      await control?.close().catch(() => {});
+    }
+  }
+
+  #ownerAlive(row: OwnershipRow): boolean {
+    if (row.ownerPid == null) return false;
+    const facts = this.#deps.processFacts(row.ownerPid);
+    if (!facts.alive) return false;
+    return !row.ownerPidStartedAt || !facts.startedAt || facts.startedAt === row.ownerPidStartedAt;
+  }
+
+  #expired(row: OwnershipRow): boolean {
+    return row.deadlineMs != null && this.#deps.now() > row.deadlineMs;
+  }
+
+  #isProcessAlive = (pid: number, pidStartedAt: string): boolean => {
+    const facts = this.#deps.processFacts(pid);
+    return facts.alive && (!pidStartedAt || !facts.startedAt || facts.startedAt === pidStartedAt);
+  };
+
+  /** Bound daemon facts still describe a live `adc daemon run` process (defeats pid reuse). */
+  #daemonProcessVerified(row: OwnershipRow): boolean {
+    if (row.daemonPid == null) return false;
+    const facts = this.#deps.processFacts(row.daemonPid);
+    if (!facts.alive) return false;
+    if (row.daemonPidStartedAt && facts.startedAt && facts.startedAt !== row.daemonPidStartedAt) return false;
+    if (facts.command && !/adc(\s|$).*daemon\s+run/.test(facts.command) && !/\badc\b.*\bdaemon\b/.test(facts.command)) return false;
+    return true;
+  }
+
+  // ------------------------------------------------------------------ acquire
+
+  async acquire(params: AcquireParams): Promise<Lease> {
+    const { identity, role } = params;
+    if (this.#deps.platform === "win32") {
+      throw new DaemonUnsupportedError("Ademú is not available on Windows yet (no adc daemon build).");
+    }
+    const pending = this.#closing.get(identity.dataDir);
+    if (pending) await pending;
+
+    const holderId = `${role}:${this.#deps.selfPid}:${randomUUID()}`;
+    await this.#registerHolder(identity, holderId, role, params.signal);
+
+    try {
+      const lease = await this.#acquireInner(params, holderId);
+      this.#leases.add(lease);
+      return lease;
+    } catch (err) {
+      this.#deps.store.removeHolder(holderId);
+      throw err;
+    }
+  }
+
+  async #registerHolder(identity: DaemonIdentity, holderId: string, role: Role, signal?: AbortSignal): Promise<void> {
+    const deadline = this.#deps.now() + WAIT_WHILE_STOPPING_MS;
+    for (;;) {
+      if (signal?.aborted) throw new DaemonAbortedError();
+      const ok = this.#deps.store.addHolder({
+        holderId,
+        dataDir: identity.dataDir,
+        role,
+        pid: this.#deps.selfPid,
+        pidStartedAt: this.#deps.selfPidStartedAt,
+        heartbeatMs: this.#deps.now(),
+      });
+      if (ok) return;
+      // The daemon is `stopping`: wait for the transition (or recover an orphaned stop).
+      const row = this.#deps.store.getOwnership(identity.dataDir);
+      if (row?.state === "stopping" && !this.#ownerAlive(row) && this.#expired(row)) {
+        await this.#recoverOrphanedStopping(row, identity);
+        continue;
+      }
+      if (this.#deps.now() > deadline) throw new DaemonBusyError("the Ademú device host is stopping; try again in a moment");
+      await this.#deps.sleep(WAIT_POLL_MS);
+    }
+  }
+
+  async #recoverOrphanedStopping(row: OwnershipRow, identity: DaemonIdentity): Promise<void> {
+    const probe = await this.#probe(identity.raw.controlSocket, identity);
+    const to: OwnershipState = probe?.matches ? "bound" : "stopped";
+    this.#deps.store.cas({ dataDir: identity.dataDir, from: ["stopping"], to, expectedGeneration: row.generation, set: { reason: "orphaned stop recovered" } });
+    this.#deps.log("daemon_stopping_recovered", { dataDir: identity.dataDir, to });
+  }
+
+  async #acquireInner(params: AcquireParams, holderId: string): Promise<Lease> {
+    const { identity } = params;
+    const store = this.#deps.store;
+    const deadline = this.#deps.now() + WAIT_FOR_BOUND_MS;
+
+    for (;;) {
+      if (params.signal?.aborted) throw new DaemonAbortedError();
+      const row = store.getOwnership(identity.dataDir);
+
+      if (!row) {
+        const probe = await this.#probe(identity.raw.controlSocket, identity);
+        if (probe) return this.#foreignLease(params, holderId, probe.info);
+        if (!this.#deps.isDirAbsentOrEmpty(identity.raw.dataDir)) return this.#foreignLease(params, holderId, undefined);
+        // Fresh: claim BEFORE spawn.
+        const claimed = store.claim({
+          dataDir: identity.dataDir,
+          controlSocket: identity.controlSocket,
+          sessionSocket: identity.sessionSocket,
+          ownerPid: this.#deps.selfPid,
+          ownerPidStartedAt: this.#deps.selfPidStartedAt,
+        });
+        if (!claimed) continue; // someone else claimed between our read and insert — re-decide
+        const starting = this.#toStarting(identity, ["claimed"], 0);
+        if (!starting) continue;
+        return await this.#spawnAndBind(params, holderId, starting);
+      }
+
+      switch (row.state) {
+        case "bound":
+        case "pending-publication": {
+          const probe = await this.#probe(identity.raw.controlSocket, identity);
+          if (probe?.matches) {
+            let current = row;
+            if (row.state === "pending-publication" && params.role === "runtime") {
+              current = store.cas({ dataDir: identity.dataDir, from: ["pending-publication"], to: "bound", expectedGeneration: row.generation }) ?? row;
+              this.#deps.log("daemon_promoted", { dataDir: identity.dataDir });
+            }
+            return await this.#ownedLease(params, holderId, current, probe.info, undefined);
+          }
+          if (probe && !probe.matches) return this.#foreignLease(params, holderId, probe.info);
+          // Our daemon is dead: respawn under a new generation.
+          const starting = this.#toStarting(identity, [row.state], row.generation);
+          if (!starting) continue;
+          return await this.#spawnAndBind(params, holderId, starting);
+        }
+        case "claimed":
+        case "starting": {
+          if (this.#ownerAlive(row) && !this.#expired(row)) {
+            if (this.#deps.now() > deadline) throw new DaemonBusyError("the Ademú device host is still starting");
+            await this.#deps.sleep(WAIT_POLL_MS);
+            continue;
+          }
+          // Reclaim an orphaned claim/start by generation CAS.
+          const starting = this.#toStarting(identity, [row.state], row.generation);
+          if (!starting) continue;
+          const probe = await this.#probe(identity.raw.controlSocket, identity);
+          if (probe?.matches && row.daemonPid != null && this.#daemonProcessVerified(row)) {
+            const bound = this.#bind(params.role, starting, probe.info, row.daemonPid, row.daemonPidStartedAt);
+            if (bound) return await this.#ownedLease(params, holderId, bound, probe.info, undefined);
+            continue;
+          }
+          if (probe) {
+            // A live listener we cannot prove is ours: give the row up, attach as foreign.
+            store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+            return this.#foreignLease(params, holderId, probe.info);
+          }
+          return await this.#spawnAndBind(params, holderId, starting);
+        }
+        case "stopping": {
+          if (this.#ownerAlive(row) && !this.#expired(row)) {
+            if (this.#deps.now() > deadline) throw new DaemonBusyError("the Ademú device host is stopping");
+            await this.#deps.sleep(WAIT_POLL_MS);
+            continue;
+          }
+          await this.#recoverOrphanedStopping(row, identity);
+          continue;
+        }
+        case "stopped":
+        case "stale": {
+          const probe = await this.#probe(identity.raw.controlSocket, identity);
+          if (probe?.matches && row.daemonPid != null && this.#daemonProcessVerified(row)) {
+            const bound = store.cas({ dataDir: identity.dataDir, from: [row.state], to: "bound", expectedGeneration: row.generation });
+            if (bound) return await this.#ownedLease(params, holderId, bound, probe.info, undefined);
+            continue;
+          }
+          if (probe) return this.#foreignLease(params, holderId, probe.info);
+          const starting = this.#toStarting(identity, [row.state], row.generation);
+          if (!starting) continue;
+          return await this.#spawnAndBind(params, holderId, starting);
+        }
+        default:
+          throw new Error(`unknown ownership state ${String((row as { state: string }).state)}`);
+      }
+    }
+  }
+
+  #toStarting(identity: DaemonIdentity, from: readonly OwnershipState[], expectedGeneration: number): OwnershipRow | undefined {
+    return this.#deps.store.cas({
+      dataDir: identity.dataDir,
+      from,
+      to: "starting",
+      expectedGeneration,
+      bumpGeneration: true,
+      set: {
+        ownerPid: this.#deps.selfPid,
+        ownerPidStartedAt: this.#deps.selfPidStartedAt,
+        deadlineMs: this.#deps.now() + STARTING_DEADLINE_MS,
+        daemonPid: null,
+        daemonPidStartedAt: null,
+        reason: null,
+      },
+    });
+  }
+
+  #bind(role: Role, starting: OwnershipRow, info: DaemonInfoResult, daemonPid: number | null, daemonPidStartedAt: string | null): OwnershipRow | undefined {
+    return this.#deps.store.cas({
+      dataDir: starting.dataDir,
+      from: ["starting"],
+      to: role === "setup" ? "pending-publication" : "bound",
+      expectedGeneration: starting.generation,
+      set: {
+        daemonPid,
+        daemonPidStartedAt,
+        daemonStartedAtMs: info.started_at_ms,
+        daemonDataDir: info.data_dir,
+        daemonSocketPath: info.socket_path,
+        daemonSessionSocketPath: info.session_socket_path ?? null,
+        adcVersion: parseAdcVersion(info.version) ?? null,
+        bundledVersion: this.#deps.bundledVersion,
+        ownerPid: null,
+        ownerPidStartedAt: null,
+        deadlineMs: null,
+      },
+    });
+  }
+
+  // ------------------------------------------------------------------ spawn
+
+  async #spawnAndBind(params: AcquireParams, holderId: string, starting: OwnershipRow): Promise<Lease> {
+    const { identity, server, role } = params;
+    const store = this.#deps.store;
+    let binaryPath: string;
+    try {
+      binaryPath = this.#deps.resolveBinaryPath();
+    } catch (err) {
+      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      if (err instanceof UnsupportedPlatformError) throw new DaemonUnsupportedError(`Ademú is not available on ${err.platform}/${err.arch} yet.`);
+      if (err instanceof PlatformPackageMissingError) {
+        throw new DaemonUnreachableError(`the Ademú device host binary package is missing (${err.packageName}); reinstall the plugin`);
+      }
+      throw err;
+    }
+
+    // The ASYNC authority re-check runs immediately before the spawn; only the sync abort check can
+    // live inside spawnFn (ensureDaemon's probe-then-spawn window is the bare probe, ≤ 1 s).
+    await params.beforeEffect?.();
+    if (params.signal?.aborted) {
+      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      throw new DaemonAbortedError();
+    }
+
+    const env = daemonEnv(identity, server);
+    let child: (ChildLike & { pid?: number | undefined }) | undefined;
+    let exited: { code: unknown; signal: unknown } | undefined;
+    const exitWaiters = new Set<() => void>();
+
+    const spawnFn = (cmd: string, argv: string[], opts: object) => {
+      if (params.signal?.aborted) throw new DaemonAbortedError();
+      const c = this.#deps.spawn(cmd, argv, { ...(opts as object), env });
+      child = c;
+      // Persist the CHILD facts under our generation NOW (daemon_info carries no pid).
+      const facts = c.pid != null ? this.#deps.processFacts(c.pid) : { alive: false };
+      store.cas({
+        dataDir: identity.dataDir,
+        from: ["starting"],
+        to: "starting",
+        expectedGeneration: starting.generation,
+        set: { daemonPid: c.pid ?? null, daemonPidStartedAt: facts.startedAt ?? null },
+      });
+      c.on("exit", (...args: unknown[]) => {
+        exited = { code: args[0], signal: args[1] };
+        for (const w of exitWaiters) w();
+      });
+      return c;
+    };
+
+    const ensure = this.#deps.ensureDaemon({ binaryPath, env, spawnFn });
+    const abortP = new Promise<never>((_, reject) => {
+      if (!params.signal) return;
+      const onAbort = () => reject(new DaemonAbortedError());
+      if (params.signal.aborted) onAbort();
+      else params.signal.addEventListener("abort", onAbort, { once: true });
+    });
+
+    let result: Awaited<ReturnType<typeof ensureDaemonReal>>;
+    try {
+      result = await Promise.race([ensure, abortP]);
+    } catch (err) {
+      if (err instanceof DaemonAbortedError) {
+        // Contain a late success: observe the ensureDaemon promise; bind under the current
+        // generation in the role's terminal state (runtime → bound, then the fenced release;
+        // setup → pending-publication, left idle — setup never stops anything).
+        void ensure
+          .then(async (late) => {
+            if (!late.spawned) {
+              store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+              return;
+            }
+            const probe = await this.#probe(identity.raw.controlSocket, identity);
+            if (!probe?.matches) return;
+            const bound = this.#bind(role, starting, probe.info, child?.pid ?? null, null);
+            if (bound && role === "runtime") {
+              await this.#stopOwnedDaemon(identity, bound, holderId, "aborted start");
+            }
+          })
+          .catch(() => {});
+        throw err;
+      }
+      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      throw new DaemonUnreachableError(
+        `the Ademú device host did not start; check channels.ademu.server and the daemon log at ${identity.raw.dataDir}/daemon.log`,
+        `${identity.raw.dataDir}/daemon.log`,
+      );
+    }
+
+    if (!result.spawned) {
+      // A listener won the probe-then-spawn race: it is not ours.
+      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      const probe = await this.#probe(identity.raw.controlSocket, identity);
+      return this.#foreignLease(params, holderId, probe?.info);
+    }
+
+    const probe = await this.#probe(identity.raw.controlSocket, identity);
+    if (!probe) {
+      throw new DaemonUnreachableError(`the Ademú device host started but its control socket did not answer; see ${result.logPath}`, result.logPath);
+    }
+    if (!probe.matches) {
+      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      return this.#foreignLease(params, holderId, probe.info);
+    }
+    const current = store.getOwnership(identity.dataDir);
+    const bound = this.#bind(role, starting, probe.info, current?.daemonPid ?? child?.pid ?? null, current?.daemonPidStartedAt ?? null);
+    if (!bound) throw new DaemonBusyError("the Ademú device host changed hands while starting");
+    this.#deps.log("daemon_spawned", { dataDir: identity.dataDir, role, generation: bound.generation });
+    return await this.#ownedLease(params, holderId, bound, probe.info, {
+      exited: () => exited,
+      onExit: (cb) => {
+        exitWaiters.add(cb);
+      },
+      logPath: result.logPath,
+    });
+  }
+
+  // ------------------------------------------------------------------ leases
+
+  #foreignLease(params: AcquireParams, holderId: string, info: DaemonInfoResult | undefined): Lease {
+    const { identity } = params;
+    this.#deps.log("daemon_attached_foreign", { dataDir: identity.dataDir, reachable: Boolean(info) });
+    const hb = this.#startHeartbeat(holderId, () => false);
+    const lease: Lease = {
+      mode: "foreign",
+      role: params.role,
+      identity,
+      holderId,
+      info: {
+        controlSocketPath: identity.raw.controlSocket,
+        sessionSocketPath: info?.session_socket_path || identity.raw.sessionSocket,
+        daemonVersion: parseAdcVersion(info?.version),
+      },
+      lost: hb.lost,
+      release: async () => {
+        hb.stop();
+        this.#deps.store.removeHolder(holderId);
+        this.#leases.delete(lease);
+      },
+    };
+    return lease;
+  }
+
+  async #ownedLease(
+    params: AcquireParams,
+    holderId: string,
+    row: OwnershipRow,
+    info: DaemonInfoResult,
+    child: { exited: () => unknown; onExit: (cb: () => void) => void; logPath: string } | undefined,
+  ): Promise<Lease> {
+    const { identity, role } = params;
+    // Upgrade (runtime only, through the fence): the bound daemon's version ≠ the bundled one.
+    if (role === "runtime") {
+      const running = parseAdcVersion(info.version);
+      if (running && running !== this.#deps.bundledVersion) {
+        const upgraded = await this.#tryUpgrade(params, holderId, row);
+        if (upgraded) return upgraded;
+      }
+    }
+    const daemonPid = row.daemonPid;
+    const hb = this.#startHeartbeat(holderId, () => {
+      if (child?.exited()) return true;
+      if (daemonPid != null) return !this.#deps.processFacts(daemonPid).alive;
+      return false;
+    });
+    child?.onExit(() => hb.fail(new DaemonLostError("the Ademú device host exited")));
+    const lease: Lease = {
+      mode: "owned",
+      role,
+      identity,
+      holderId,
+      info: {
+        controlSocketPath: identity.raw.controlSocket,
+        sessionSocketPath: info.session_socket_path || identity.raw.sessionSocket,
+        daemonVersion: parseAdcVersion(info.version),
+        generation: row.generation,
+        logPath: child?.logPath,
+      },
+      lost: hb.lost,
+      release: async () => {
+        hb.stop();
+        this.#leases.delete(lease);
+        if (role !== "runtime") {
+          this.#deps.store.removeHolder(holderId);
+          return;
+        }
+        const closing = this.#releaseRuntime(identity, holderId, "last account stopped");
+        this.#closing.set(identity.dataDir, closing);
+        try {
+          await closing;
+        } finally {
+          if (this.#closing.get(identity.dataDir) === closing) this.#closing.delete(identity.dataDir);
+        }
+      },
+    };
+    return lease;
+  }
+
+  #startHeartbeat(holderId: string, lostCheck: () => boolean): { lost: Promise<never>; stop: () => void; fail: (err: Error) => void } {
+    let reject!: (err: Error) => void;
+    const lost = new Promise<never>((_, rej) => {
+      reject = rej;
+    });
+    lost.catch(() => {});
+    let stopped = false;
+    const tick = () => {
+      if (stopped) return;
+      if (!this.#deps.store.heartbeat(holderId)) {
+        reject(new DaemonLostError("this lease's holder record was swept; re-acquire"));
+        return;
+      }
+      if (lostCheck()) {
+        reject(new DaemonLostError("the Ademú device host is gone"));
+        return;
+      }
+      timer = setTimeout(tick, HEARTBEAT_MS);
+      timer.unref?.();
+    };
+    let timer: NodeJS.Timeout | undefined = setTimeout(tick, HEARTBEAT_MS);
+    timer.unref?.();
+    return {
+      lost,
+      stop: () => {
+        stopped = true;
+        if (timer) clearTimeout(timer);
+      },
+      fail: (err) => reject(err),
+    };
+  }
+
+  // ------------------------------------------------------------------ stop / upgrade / sweep
+
+  async #releaseRuntime(identity: DaemonIdentity, holderId: string, reason: string): Promise<void> {
+    const store = this.#deps.store;
+    const row = store.getOwnership(identity.dataDir);
+    if (!row || (row.state !== "bound" && row.state !== "pending-publication")) {
+      store.removeHolder(holderId);
+      return;
+    }
+    await this.#stopOwnedDaemon(identity, row, holderId, reason);
+  }
+
+  /** The fenced stop. Removes our holder afterwards; leaves the daemon running if the fence denies. */
+  async #stopOwnedDaemon(identity: DaemonIdentity, row: OwnershipRow, holderId: string, reason: string): Promise<boolean> {
+    const store = this.#deps.store;
+    const claimed = store.tryClaimShutdown({
+      dataDir: identity.dataDir,
+      holderId,
+      expectedGeneration: row.generation,
+      stopperPid: this.#deps.selfPid,
+      stopperPidStartedAt: this.#deps.selfPidStartedAt,
+      deadlineMs: this.#deps.now() + STOPPING_DEADLINE_MS,
+      reason,
+      isProcessAlive: this.#isProcessAlive,
+    });
+    store.removeHolder(holderId);
+    if (!claimed) {
+      this.#deps.log("daemon_stop_deferred", { dataDir: identity.dataDir, reason });
+      return false;
+    }
+    const exitedCleanly = await this.#terminate(identity, claimed);
+    // Re-read the generation immediately before recording the outcome (the fence's last check).
+    store.cas({
+      dataDir: identity.dataDir,
+      from: ["stopping"],
+      to: exitedCleanly ? "stopped" : "stale",
+      expectedGeneration: claimed.generation,
+      set: { ownerPid: null, ownerPidStartedAt: null, deadlineMs: null, reason: exitedCleanly ? reason : "did not exit within the stop budget" },
+    });
+    this.#deps.log("daemon_stopped", { dataDir: identity.dataDir, clean: exitedCleanly });
+    return true;
+  }
+
+  /** shutdown op (bounded) → observe exit → SIGTERM → SIGKILL, capped at RELEASE_CAP_MS. */
+  async #terminate(identity: DaemonIdentity, row: OwnershipRow): Promise<boolean> {
+    const start = this.#deps.now();
+    const remaining = () => Math.max(0, RELEASE_CAP_MS - (this.#deps.now() - start));
+    const pid = row.daemonPid;
+    const verified = pid != null && this.#daemonProcessVerified(row);
+    const gone = () => (pid == null ? !existsSync(identity.raw.controlSocket) : !this.#deps.processFacts(pid).alive);
+
+    let control: ControlLike | undefined;
+    try {
+      control = await this.#deps.connectControl(identity.raw.controlSocket);
+      await control.request("shutdown", {}, { timeoutMs: Math.min(SHUTDOWN_OP_MS, remaining()) });
+    } catch {
+      /* fall through to signals */
+    } finally {
+      await control?.close().catch(() => {});
+    }
+    while (!gone() && this.#deps.now() - start < SHUTDOWN_OP_MS && remaining() > 0) await this.#deps.sleep(100);
+    if (gone()) return true;
+    if (!verified) return false; // never signal a pid we cannot prove is ours
+    try {
+      this.#deps.kill(pid!, "SIGTERM");
+    } catch {
+      /* already gone */
+    }
+    const termUntil = this.#deps.now() + SIGTERM_GRACE_MS;
+    while (!gone() && this.#deps.now() < termUntil && remaining() > 0) await this.#deps.sleep(100);
+    if (gone()) return true;
+    try {
+      this.#deps.kill(pid!, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+    while (!gone() && remaining() > 0) await this.#deps.sleep(100);
+    return gone();
+  }
+
+  async #tryUpgrade(params: AcquireParams, holderId: string, row: OwnershipRow): Promise<Lease | undefined> {
+    const { identity } = params;
+    const store = this.#deps.store;
+    const claimed = store.tryClaimShutdown({
+      dataDir: identity.dataDir,
+      holderId,
+      expectedGeneration: row.generation,
+      stopperPid: this.#deps.selfPid,
+      stopperPidStartedAt: this.#deps.selfPidStartedAt,
+      deadlineMs: this.#deps.now() + STOPPING_DEADLINE_MS,
+      reason: `upgrade to ${this.#deps.bundledVersion}`,
+      isProcessAlive: this.#isProcessAlive,
+    });
+    if (!claimed) {
+      this.#deps.log("daemon_upgrade_deferred", { dataDir: identity.dataDir });
+      return undefined;
+    }
+    // tryClaimShutdown does not remove our own holder; keep it — we are about to respawn.
+    const clean = await this.#terminate(identity, claimed);
+    const stopped = store.cas({ dataDir: identity.dataDir, from: ["stopping"], to: clean ? "stopped" : "stale", expectedGeneration: claimed.generation });
+    if (!stopped || !clean) return undefined;
+    const starting = this.#toStarting(identity, ["stopped"], stopped.generation);
+    if (!starting) return undefined;
+    this.#deps.log("daemon_upgrading", { dataDir: identity.dataDir, to: this.#deps.bundledVersion });
+    return await this.#spawnAndBind(params, holderId, starting);
+  }
+
+  /**
+   * Runtime start sweep: `pending-publication` daemons older than PENDING_PUBLICATION_SWEEP_MS whose
+   * enrollment never produced an account are stopped THROUGH THE FENCE.
+   */
+  async sweepPendingPublications(isReferenced: (dataDir: string) => boolean): Promise<string[]> {
+    const swept: string[] = [];
+    for (const row of this.#deps.store.listOwnership()) {
+      if (row.state !== "pending-publication") continue;
+      if (this.#deps.now() - row.updatedAtMs < PENDING_PUBLICATION_SWEEP_MS) continue;
+      if (isReferenced(row.dataDir)) continue;
+      const identity: DaemonIdentity = {
+        dataDir: row.dataDir,
+        controlSocket: row.controlSocket,
+        sessionSocket: row.sessionSocket,
+        raw: { dataDir: row.dataDir, controlSocket: row.controlSocket, sessionSocket: row.sessionSocket },
+        explicit: { dataDir: true, socketPath: true },
+      };
+      const holderId = `runtime:${this.#deps.selfPid}:sweep:${randomUUID()}`;
+      if (!this.#deps.store.addHolder({ holderId, dataDir: row.dataDir, role: "runtime", pid: this.#deps.selfPid, pidStartedAt: this.#deps.selfPidStartedAt, heartbeatMs: this.#deps.now() })) continue;
+      if (await this.#stopOwnedDaemon(identity, row, holderId, "pending enrollment never published")) swept.push(row.dataDir);
+    }
+    return swept;
+  }
+}
