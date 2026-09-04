@@ -372,6 +372,10 @@ their own tests.
 abandons the `starting` generation (as `stale` with the child's pid facts when a child had spawned), so
 a daemon that started but never answered is never forgotten and never gets a sibling.
 
+**Round 13 (1 HIGH + 1 LOW, folded):** an orphaned start is resolved in a fixed order — a listener is
+foreign; no listener but a recorded child still alive is `stale` (kept, never given a sibling); only
+then is the generation reclaimed and a daemon spawned.
+
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its
 `package.json` (`ERR_PACKAGE_PATH_NOT_EXPORTED` at register time). Both fixed; the acceptance now

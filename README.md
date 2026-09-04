@@ -11,7 +11,8 @@ device host (the `adc` daemon) so there is nothing else to install.
 - A **blue tick** on your phone means the device host received the message *and OpenClaw committed
   to handling it* — before the model runs. It is not a "read" or "answered" signal.
 
-Minimum host: **OpenClaw ≥ 2026.8.1** (tested with 2026.9.1). Node 22.22+ or 24.15+. macOS and
+Minimum host: **OpenClaw ≥ 2026.8.1** (tested with 2026.9.1). Node `>=22.22.3 <23`, `>=24.15.0 <25`
+or `>=25.9.0` (OpenClaw's own range). macOS and
 Linux (Windows is not supported yet — the channel reports `blocked` there).
 
 ## Install

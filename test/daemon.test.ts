@@ -1075,6 +1075,30 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(w.spawns).toHaveLength(1);
   });
 
+  it("R13#1 an EXPIRED `starting` row whose recorded child is still alive is not reclaimed: stale with its pid facts, no sibling spawn", async () => {
+    const w = new World();
+    let releaseEnsure!: () => void;
+    w.ensureGate = new Promise<void>((r) => (releaseEnsure = r));
+    w.spawnFailsToListen = true;
+    const first = new DaemonManager(w.deps());
+    const p1 = first.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    p1.catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    const before = w.store.getOwnership(DIR)!;
+    expect(before.state).toBe("starting");
+    expect(before.daemonPid).not.toBeNull();
+    w.clock += STARTING_DEADLINE_MS + 1; // the starter looks orphaned (deadline passed) while its child lives
+    const second = new DaemonManager({ ...w.deps(), selfPid: 200, selfPidStartedAt: "other-start", processFacts: (pid) => (pid === 100 ? { alive: false } : w.deps().processFacts(pid)) });
+    await expect(second.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(w.spawns).toHaveLength(1);
+    const after = w.store.getOwnership(DIR)!;
+    expect(after.state).toBe("stale");
+    expect(after.daemonPid).toBe(before.daemonPid);
+    expect(after.daemonPidStartedAt).toBe(before.daemonPidStartedAt);
+    releaseEnsure();
+    await p1.catch(() => {});
+  });
+
   it("R11#2 a spawned child that never listened stays recorded; while it is alive no second daemon is started; once it exits the respawn proceeds", async () => {
     const w = new World();
     w.ensureRejectsAfterSpawn = true;

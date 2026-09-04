@@ -512,19 +512,34 @@ export class DaemonManager {
             await this.#deps.sleep(WAIT_POLL_MS);
             continue;
           }
-          // Reclaim an orphaned claim/start by generation CAS.
-          const starting = this.#toStarting(identity, [row.state], row.generation);
-          if (!starting) continue;
+          // Orphaned claim/start (starter dead or its deadline passed). Order matters:
+          //   1. a LISTENER answers → foreign (nothing correlates it to the recorded pid — daemon_info
+          //      carries no pid — so we can never prove it is the child we spawned; the row is given up);
+          //   2. no listener but the recorded child is ALIVE → `stale` with its pid facts, nothing spawns
+          //      beside it until it exits (Codex branch round 13 #1);
+          //   3. otherwise reclaim by exact-generation CAS and spawn.
           const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
           if (probe) {
-            // A listener answers after an orphaned claim/start. Nothing correlates that listener to
-            // the pid the crashed starter recorded (daemon_info carries no pid), so we can never
-            // PROVE it is the child we spawned: give the row up and attach as FOREIGN. (Narrows the
-            // plan's "probe-and-bind a surviving detached daemon" — Codex branch round 2 #2.)
-            store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+            store.deleteOwnership({ dataDir: identity.dataDir, state: row.state, generation: row.generation });
             this.#deps.log("daemon_orphan_listener_foreign", { dataDir: identity.dataDir });
             return this.#foreignLease(params, holderId, probe.info);
           }
+          if (row.state === "starting" && this.#daemonProcessVerified(row)) {
+            store.cas({
+              dataDir: identity.dataDir,
+              from: ["starting"],
+              to: "stale",
+              expectedGeneration: row.generation,
+              set: { ownerPid: null, ownerPidStartedAt: null, deadlineMs: null, reason: "orphaned start: spawned child alive but not answering" },
+            });
+            this.#deps.log("daemon_child_alive_not_listening", { dataDir: identity.dataDir });
+            throw new DaemonUnreachableError(
+              `a previous Ademú device host process is still running but not answering; it will be retried once it exits (daemon log: ${identity.raw.dataDir}/daemon.log)`,
+              `${identity.raw.dataDir}/daemon.log`,
+            );
+          }
+          const starting = this.#toStarting(identity, [row.state], row.generation);
+          if (!starting) continue;
           // A reclaimed claim/start that had once been bound keeps its ownership history.
           return await this.#spawnAndBind(params, holderId, starting, row.daemonStartedAtMs != null ? "existing" : "fresh");
         }
