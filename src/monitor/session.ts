@@ -71,23 +71,32 @@ export class MembersCache {
     else this.#members.delete(normalizeId(groupId));
   }
 
-  /** Warm-up / reconnect barrier body: conversations + members of every active room. */
-  async refresh(signal?: AbortSignal): Promise<void> {
+  /**
+   * Warm-up / reconnect barrier body: conversations + members of every active room. The result is
+   * built OFF-cache and published atomically only when `publish()` (the caller's generation check)
+   * still agrees — a slow, superseded refresh can never overwrite a newer one.
+   */
+  async refresh(signal?: AbortSignal, publish: () => boolean = () => true): Promise<void> {
     if (signal?.aborted) throw new SessionAbortedError();
     const { conversations } = await this.#client.listConversations();
     if (signal?.aborted) throw new SessionAbortedError();
-    this.#conversations = conversations;
-    this.#members.clear();
-    this.#inactive.clear();
+    const members = new Map<string, MemberEntry[]>();
+    const inactive = new Set<string>();
     for (const c of conversations) {
       if (!c.active) {
-        this.#inactive.add(normalizeId(c.group_id));
+        inactive.add(normalizeId(c.group_id));
         continue;
       }
-      const { members } = await this.#client.getMembers({ group_id: c.group_id });
+      const res = await this.#client.getMembers({ group_id: c.group_id });
       if (signal?.aborted) throw new SessionAbortedError();
-      this.#members.set(normalizeId(c.group_id), members);
+      members.set(normalizeId(c.group_id), res.members);
     }
+    if (!publish()) return;
+    this.#conversations = conversations;
+    this.#members.clear();
+    for (const [k, v] of members) this.#members.set(k, v);
+    this.#inactive.clear();
+    for (const k of inactive) this.#inactive.add(k);
   }
 
   /** Synchronous cache read (outbound target classification); undefined when not cached. */
@@ -238,7 +247,7 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
   });
   client.on("reconnected", () => {
     const mine = generation;
-    void members.refresh().then(
+    void members.refresh(undefined, () => mine === generation).then(
       () => {
         if (mine !== generation) return; // a newer outage superseded this warm-up
         retries = 0;
@@ -254,8 +263,9 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
         params.deps.log("session_refresh_failed", { errorClass: err instanceof Error ? err.name : typeof err });
         // REJECT the barrier (a loop body already parked on it must wake and halt — closing the
         // iterator alone cannot unblock it), then close the client so the account restarts.
+        // The barrier STAYS the rejected promise (later callers must not see "fresh") until the
+        // next retry replaces it or the account is torn down.
         const f = fail;
-        stale = undefined;
         release = undefined;
         fail = undefined;
         f?.(new SessionWarmupError());

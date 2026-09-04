@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { DaemonIdentity } from "../src/config.js";
 import {
   DaemonAbortedError,
+  DaemonBusyError,
   DaemonManager,
   DaemonUnreachableError,
   DaemonUnsupportedError,
@@ -78,6 +79,11 @@ class World {
   ensureGate: Promise<void> | undefined;
   /** When set, ensureDaemon's pre-spawn probe waits for this promise BEFORE calling spawnFn (abort-before-spawn tests). */
   preSpawnGate: Promise<void> | undefined;
+  /** Every `connectFn` handed to the fake ensureDaemon (R9#2 wiring proof). */
+  ensureConnectFns: Array<unknown> = [];
+  readonly probeConnect = () => {
+    throw new Error("the fake ensureDaemon never dials");
+  };
   platform = "darwin";
   bundledVersion = "0.2.4";
   selfPid = 100;
@@ -149,6 +155,7 @@ class World {
         return child;
       },
       ensureDaemon: async (deps: EnsureDaemonDeps = {}): Promise<EnsureDaemonResult> => {
+        this.ensureConnectFns.push(deps.connectFn);
         const dir = deps.env!.ADC_DATA_DIR!;
         const socket = deps.env!.ADC_SOCKET_PATH!;
         const base = { socketPath: socket, dataDir: dir, logPath: `${dir}/daemon.log` };
@@ -181,9 +188,7 @@ class World {
         if (!d) return;
         if (signal === "SIGKILL" || (signal === "SIGTERM" && d.honoursSigterm)) this.killDaemon(d);
       },
-      probeConnect: () => {
-        throw new Error("the fake ensureDaemon never dials");
-      },
+      probeConnect: this.probeConnect,
       isDirAbsentOrEmpty: (dir) => (this.dirs.get(dir) ?? "absent") !== "nonempty",
       secureEmptyDir: (dir) => {
         this.secured.push(dir);
@@ -916,6 +921,98 @@ describe("Codex branch-review folds (daemon)", () => {
     }
     expect(PROBE_CONNECT_MS).toBeLessThanOrEqual(1000);
   });
+
+  it("R10#1 a rejected authority check on a RESPAWN keeps ownership (stopped), never deletes it; reacquire is owned", async () => {
+    for (const from of ["stopped", "bound"] as const) {
+      const w = new World();
+      const d = w.addDaemon(DIR);
+      bindLive(w, d);
+      if (from === "stopped") w.store.cas({ dataDir: DIR, from: ["bound"], to: "stopped", expectedGeneration: 1 });
+      w.killDaemon(d); // nothing listens; a respawn is due
+      const m = new DaemonManager(w.deps());
+      await expect(
+        m.acquire({
+          identity: identityFor(DIR),
+          server: SERVER,
+          role: "runtime",
+          beforeEffect: async () => {
+            throw new Error("authority expired");
+          },
+        }),
+      ).rejects.toThrow(/authority expired/);
+      expect(w.store.getOwnership(DIR)!.state).toBe("stopped"); // preserved, not deleted
+      const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+      expect(lease.mode).toBe("owned");
+      expect(w.spawns).toHaveLength(1);
+    }
+  });
+
+  it("R10#2 a starter whose `starting` generation expired and was reclaimed during its slow authority check does NOT spawn", async () => {
+    const w = new World();
+    let releaseAuthority!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseAuthority = r;
+    });
+    const slow = new DaemonManager(w.deps());
+    const first = slow.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime", beforeEffect: () => gate });
+    first.catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    expect(w.store.getOwnership(DIR)!.state).toBe("starting");
+    // the starter's deadline passes; another process (dead-looking starter) reclaims and spawns
+    w.clock += STARTING_DEADLINE_MS + 1;
+    const other = new World();
+    void other;
+    const reclaimer = new DaemonManager({ ...w.deps(), selfPid: 200, selfPidStartedAt: "other-start", processFacts: (pid) => (pid === 100 ? { alive: false } : (w.deps().processFacts(pid))) });
+    const second = await reclaimer.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(second.mode).toBe("owned");
+    expect(w.spawns).toHaveLength(1);
+    releaseAuthority();
+    await expect(first).rejects.toBeInstanceOf(DaemonBusyError);
+    expect(w.spawns).toHaveLength(1); // the superseded starter never spawned
+    expect(w.store.getOwnership(DIR)!.state).toBe("bound");
+  });
+
+  it("R9#2 (wiring) ensureDaemon receives the bounded probe connectFn", async () => {
+    const w = new World();
+    const m = new DaemonManager(w.deps());
+    await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(w.ensureConnectFns).toEqual([w.probeConnect]);
+  });
+
+  it("R10#6 a control connection resolving after the shutdown connect timed out is closed once", async () => {
+    const w = new World();
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    const d = w.daemons.get(`${DIR}/adc.sock`)!;
+    let releaseConnect!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseConnect = r;
+    });
+    let closes = 0;
+    let gateActive = false;
+    const deps = w.deps();
+    const m2 = new DaemonManager({
+      ...deps,
+      connectControl: async (socketPath) => {
+        if (gateActive) await gate;
+        const c = await deps.connectControl(socketPath);
+        return { ...c, close: async () => void closes++ };
+      },
+      kill: (pid, signal) => {
+        w.kills.push({ pid, signal });
+        if (signal === "SIGTERM") w.killDaemon(d);
+      },
+    });
+    const lease2 = await m2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    await lease.release();
+    gateActive = true;
+    const releasing = lease2.release(); // the shutdown connect hangs → real-clock timeout → signals
+    await releasing;
+    expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
+    releaseConnect();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(closes).toBe(1);
+  }, 10_000);
 
   it("#9 an orphaned `stopping` row is recovered when the stopper is dead OR its deadline passed; our live instance has its stop RESUMED", async () => {
     // (a) live stopper, expired deadline → recovered, stop resumed (shutdown op sent), then respawn

@@ -353,6 +353,14 @@ plugin supplies a bounded `connectFn` (1 s) through `ensureDaemon`'s public seam
 probe-then-spawn window" the authority model relies on is now enforced by us; the chat tool's execution
 signal reaches the daemon acquisition (cancelling during a slow acquire never spawns a setup daemon).
 
+**Round 10 (1 HIGH + 2 MEDIUM + 3 LOW, all folded):** abandoning a `starting` generation is
+origin-aware — a fresh claim is deleted, existing ownership is preserved as `stopped`/`stale` (round 9's
+fix had made a rejected authority check on a *respawn* downgrade our own daemon to foreign forever); a
+slow authority check refreshes its generation by CAS and the spawn re-verifies the generation
+synchronously, so only the current winner ever calls `ensureDaemon`; the members cache publishes a
+refresh atomically and only for the current reconnect generation, and a failed warm-up leaves the
+barrier rejected; the shutdown path contains a late control connection and bounds its close.
+
 **Headless acceptance caught two more** (exactly the K1 trap the risks ledger predicted): the first
 tarball carried a stale `dist/` built before the tool existed, and `@ademu/adc-bin` does not export its
 `package.json` (`ERR_PACKAGE_PATH_NOT_EXPORTED` at register time). Both fixed; the acceptance now

@@ -41,6 +41,8 @@ export const PENDING_PUBLICATION_SWEEP_MS = 3_600_000;
 export const PROBE_CONNECT_MS = 1_000;
 
 export type Role = "runtime" | "setup";
+/** Whether a `starting` generation came from a never-bound fresh claim or from existing ownership. */
+type SpawnOrigin = "fresh" | "existing";
 export type Mode = "owned" | "foreign";
 
 export type ServerEndpoints = { restBaseUrl: string; wsUrl: string };
@@ -476,7 +478,7 @@ export class DaemonManager {
         if (!claimed) continue; // someone else claimed between our read and insert — re-decide
         const starting = this.#toStarting(identity, ["claimed"], 0);
         if (!starting) continue;
-        return await this.#spawnAndBind(params, holderId, starting);
+        return await this.#spawnAndBind(params, holderId, starting, "fresh");
       }
 
       switch (row.state) {
@@ -501,7 +503,7 @@ export class DaemonManager {
           // Our daemon is dead: respawn under a new generation.
           const starting = this.#toStarting(identity, [row.state], row.generation);
           if (!starting) continue;
-          return await this.#spawnAndBind(params, holderId, starting);
+          return await this.#spawnAndBind(params, holderId, starting, "existing");
         }
         case "claimed":
         case "starting": {
@@ -523,7 +525,8 @@ export class DaemonManager {
             this.#deps.log("daemon_orphan_listener_foreign", { dataDir: identity.dataDir });
             return this.#foreignLease(params, holderId, probe.info);
           }
-          return await this.#spawnAndBind(params, holderId, starting);
+          // A reclaimed claim/start that had once been bound keeps its ownership history.
+          return await this.#spawnAndBind(params, holderId, starting, row.daemonStartedAtMs != null ? "existing" : "fresh");
         }
         case "stopping": {
           if (this.#ownerAlive(row) && !this.#expired(row)) {
@@ -545,7 +548,7 @@ export class DaemonManager {
           if (probe) return this.#foreignLease(params, holderId, probe.info);
           const starting = this.#toStarting(identity, [row.state], row.generation);
           if (!starting) continue;
-          return await this.#spawnAndBind(params, holderId, starting);
+          return await this.#spawnAndBind(params, holderId, starting, "existing");
         }
         default:
           throw new Error(`unknown ownership state ${String((row as { state: string }).state)}`);
@@ -595,14 +598,36 @@ export class DaemonManager {
 
   // ------------------------------------------------------------------ spawn
 
-  async #spawnAndBind(params: AcquireParams, holderId: string, starting: OwnershipRow): Promise<Lease> {
+  /**
+   * Give up a `starting` generation we could not turn into a bound instance. A FRESH claim (never
+   * bound) is deleted; EXISTING ownership (respawn of a bound/stopped/stale daemon) is preserved and
+   * CASed back to `stopped` (nothing runs) or `stale` (an unverified listener answers) — deleting it
+   * would downgrade our own daemon to foreign forever (Codex branch round 10 #1).
+   */
+  #abandonStarting(identity: DaemonIdentity, starting: OwnershipRow, origin: SpawnOrigin, to: "stopped" | "stale", reason: string): void {
+    const store = this.#deps.store;
+    if (origin === "fresh") {
+      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      return;
+    }
+    store.cas({
+      dataDir: identity.dataDir,
+      from: ["starting"],
+      to,
+      expectedGeneration: starting.generation,
+      set: { ownerPid: null, ownerPidStartedAt: null, deadlineMs: null, reason },
+    });
+  }
+
+  async #spawnAndBind(params: AcquireParams, holderId: string, starting: OwnershipRow, origin: SpawnOrigin): Promise<Lease> {
     const { identity, server, role } = params;
     const store = this.#deps.store;
+    const abandon = (to: "stopped" | "stale", reason: string) => this.#abandonStarting(identity, starting, origin, to, reason);
     let binaryPath: string;
     try {
       binaryPath = this.#deps.resolveBinaryPath();
     } catch (err) {
-      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      abandon("stopped", "binary unavailable");
       if (err instanceof UnsupportedPlatformError) throw new DaemonUnsupportedError(`Ademú is not available on ${err.platform}/${err.arch} yet.`);
       if (err instanceof PlatformPackageMissingError) {
         throw new DaemonUnreachableError(`the Ademú device host binary package is missing (${err.packageName}); reinstall the plugin`);
@@ -617,13 +642,28 @@ export class DaemonManager {
     try {
       await params.beforeEffect?.();
     } catch (err) {
-      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      abandon("stopped", "authority check rejected before spawn");
       throw err;
     }
     if (params.signal?.aborted) {
-      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      abandon("stopped", "aborted before spawn");
       throw new DaemonAbortedError();
     }
+    // The authority check may have outlived our `starting` deadline: refresh the generation's
+    // owner/deadline by exact-generation CAS — if it loses, another process reclaimed the identity
+    // and ONLY that winner may call ensureDaemon (Codex branch round 10 #2).
+    const refreshed = store.cas({
+      dataDir: identity.dataDir,
+      from: ["starting"],
+      to: "starting",
+      expectedGeneration: starting.generation,
+      set: { ownerPid: this.#deps.selfPid, ownerPidStartedAt: this.#deps.selfPidStartedAt, deadlineMs: this.#deps.now() + STARTING_DEADLINE_MS },
+    });
+    if (!refreshed) throw new DaemonBusyError("the Ademú device host changed hands while starting");
+    const stillOurGeneration = () => {
+      const current = store.getOwnership(identity.dataDir);
+      return current?.state === "starting" && current.generation === starting.generation;
+    };
 
     const env = daemonEnv(identity, server);
     let child: (ChildLike & { pid?: number | undefined }) | undefined;
@@ -632,6 +672,8 @@ export class DaemonManager {
 
     const spawnFn = (cmd: string, argv: string[], opts: object) => {
       if (params.signal?.aborted) throw new DaemonAbortedError();
+      // Synchronous last look: our exact generation must still own the identity at the spawn instant.
+      if (!stillOurGeneration()) throw new DaemonBusyError("the Ademú device host changed hands while starting");
       const c = this.#deps.spawn(cmd, argv, { ...(opts as object), env });
       child = c;
       // Persist the CHILD facts under our generation NOW (daemon_info carries no pid).
@@ -669,7 +711,7 @@ export class DaemonManager {
         void ensure
           .then(async (late) => {
             if (!late.spawned) {
-              store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+              abandon("stale", "listener answered during an aborted start");
               return;
             }
             const probe = await this.#probe(identity.raw.controlSocket, identity);
@@ -684,11 +726,11 @@ export class DaemonManager {
           .catch(() => {
             // ensureDaemon rejected after our abort (spawnFn threw before any child existed): the
             // exact `starting` generation must not linger until its deadline.
-            if (!child) store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+            if (!child) abandon("stopped", "aborted before spawn");
           });
         throw err;
       }
-      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      abandon("stopped", "daemon did not start");
       throw new DaemonUnreachableError(
         `the Ademú device host did not start; check channels.ademu.server and the daemon log at ${identity.raw.dataDir}/daemon.log`,
         `${identity.raw.dataDir}/daemon.log`,
@@ -697,7 +739,7 @@ export class DaemonManager {
 
     if (!result.spawned) {
       // A listener won the probe-then-spawn race: it is not ours.
-      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      abandon("stale", "a listener won the probe-then-spawn race");
       const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
       return this.#foreignLease(params, holderId, probe?.info);
     }
@@ -707,7 +749,7 @@ export class DaemonManager {
       throw new DaemonUnreachableError(`the Ademú device host started but its control socket did not answer; see ${result.logPath}`, result.logPath);
     }
     if (!probe.matches) {
-      store.deleteOwnership({ dataDir: identity.dataDir, state: "starting", generation: starting.generation });
+      abandon("stale", "the listener after spawn is not the identity we started");
       return this.#foreignLease(params, holderId, probe.info);
     }
     const current = store.getOwnership(identity.dataDir);
@@ -900,8 +942,16 @@ export class DaemonManager {
     const gone = () => (pid == null ? !existsSync(identity.raw.controlSocket) : !this.#deps.processFacts(pid).alive);
 
     let control: ControlLike | undefined;
+    let connectTimedOut = false;
     try {
-      control = await withTimeout(this.#deps.connectControl(identity.raw.controlSocket), Math.min(SHUTDOWN_OP_MS, remaining()));
+      const connecting = this.#deps.connectControl(identity.raw.controlSocket);
+      connecting.then((c) => (connectTimedOut ? void c.close().catch(() => {}) : undefined)).catch(() => {});
+      try {
+        control = await withTimeout(connecting, Math.min(SHUTDOWN_OP_MS, remaining()));
+      } catch (err) {
+        connectTimedOut = true;
+        throw err;
+      }
       // Last look immediately BEFORE the daemon-global shutdown op: the row must still be OUR
       // `stopping` generation and the listener must still be the bound instance (a replacement
       // that slipped onto the socket between the fence and this connect is never shut down).
@@ -915,7 +965,7 @@ export class DaemonManager {
     } catch {
       /* unreachable or slow: fall through to the (verified-pid-only) signals */
     } finally {
-      await control?.close().catch(() => {});
+      if (control) await withTimeout(control.close(), Math.max(1, remaining())).catch(() => {});
     }
     while (!gone() && this.#deps.now() - start < SHUTDOWN_OP_MS && remaining() > 0) await this.#deps.sleep(100);
     if (gone()) return true;
@@ -973,7 +1023,7 @@ export class DaemonManager {
     const starting = this.#toStarting(identity, ["stopped"], stopped.generation);
     if (!starting) return { kind: "failed" };
     this.#deps.log("daemon_upgrading", { dataDir: identity.dataDir, to: this.#deps.bundledVersion });
-    return await this.#spawnAndBind(params, holderId, starting);
+    return await this.#spawnAndBind(params, holderId, starting, "existing");
   }
 
   /**

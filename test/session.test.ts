@@ -171,6 +171,47 @@ describe("openSession", () => {
     expect(getEventListeners(shared.signal, "abort")).toHaveLength(0);
   });
 
+  it("R10#3 a slow superseded refresh finishing LAST cannot overwrite the latest membership; barrier() after a failed warm-up rejects", async () => {
+    const client = new FakeAdcClient();
+    client.room(ROOM_GROUP, [member(OWNER), member(AGENT, "agent")]);
+    const { connect } = fakeConnect(client);
+    const session = await openSession({ token: "t", sessionSocketPath: "/s", account: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER }, deps: { connect, now: () => 0, log } });
+    // generation 1's refresh is slow; generation 2's refresh completes first with the GUEST added
+    let releaseSlow!: () => void;
+    const slow = new Promise<void>((r) => {
+      releaseSlow = r;
+    });
+    const original = client.listConversations.bind(client);
+    let calls = 0;
+    client.listConversations = async () => {
+      calls++;
+      if (calls === 1) {
+        const snapshot = await original(); // captured BEFORE the guest joins
+        await slow;
+        return snapshot;
+      }
+      return original();
+    };
+    client.emit("retry", { attempt: 1, delayMs: 1 });
+    client.emit("reconnected"); // gen 1 (slow)
+    await new Promise((r) => setTimeout(r, 2));
+    client.emit("retry", { attempt: 1, delayMs: 1 });
+    client.room(ROOM_GROUP, [member(OWNER), member(GUEST), member(AGENT, "agent")]);
+    client.emit("reconnected"); // gen 2 (fast)
+    await new Promise((r) => setTimeout(r, 5));
+    expect((await session.members.get(ROOM_GROUP)).some((m) => m.user_id === GUEST)).toBe(true);
+    releaseSlow(); // the stale refresh finishes last — must NOT publish
+    await new Promise((r) => setTimeout(r, 5));
+    expect((await session.members.get(ROOM_GROUP)).some((m) => m.user_id === GUEST)).toBe(true);
+
+    // failed warm-up: a barrier obtained AFTERWARDS still rejects (the account is going down)
+    client.emit("retry", { attempt: 1, delayMs: 1 });
+    client.refreshFails = true;
+    client.emit("reconnected");
+    await new Promise((r) => setTimeout(r, 5));
+    await expect(session.barrier()).rejects.toBeInstanceOf(SessionWarmupError);
+  });
+
   it("R2#6 a failed INITIAL warm-up closes the just-seated client and rejects openSession", async () => {
     const client = new FakeAdcClient();
     client.refreshFails = true;
