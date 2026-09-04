@@ -85,6 +85,11 @@ export class MembersCache {
     }
   }
 
+  /** Synchronous cache read (outbound target classification); undefined when not cached. */
+  peek(groupId: string): MemberEntry[] | undefined {
+    return this.#members.get(normalizeId(groupId));
+  }
+
   async get(groupId: string): Promise<MemberEntry[]> {
     const key = normalizeId(groupId);
     const cached = this.#members.get(key);

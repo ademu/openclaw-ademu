@@ -1,3 +1,5 @@
-// Lightweight setup-only entry (onboarding, channel status, SecretRef discovery). Task T10 replaces
-// this stub with `defineSetupPluginEntry(setupPlugin)` from `openclaw/plugin-sdk/channel-core`.
-export {};
+// Lightweight setup-only entry (onboarding, channel status, SecretRef discovery) — plan T10.
+import { defineSetupPluginEntry } from "openclaw/plugin-sdk/channel-core";
+import { ademuSetupPlugin } from "./src/setup-plugin.js";
+
+export default defineSetupPluginEntry(ademuSetupPlugin);

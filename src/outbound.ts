@@ -32,7 +32,7 @@ export class AccountNotRunningError extends Error {
 }
 
 /** The subset of the session client outbound needs (the fake in tests implements it too). */
-export type OutboundClient = Pick<AdcClient, "sendText" | "sendReaction">;
+export type OutboundClient = Pick<AdcClient, "sendText" | "sendReaction" | "sendTyping">;
 
 export type LiveAccount = {
   client: OutboundClient;
