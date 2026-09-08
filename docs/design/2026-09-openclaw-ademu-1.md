@@ -1,8 +1,7 @@
 # OPENCLAW-ADEMU-1 — the Ademú channel plugin for OpenClaw
 
 *Design record, written for strangers. Companion plan: `docs/superpowers/plans/2026-09-03-slice-openclaw-ademu-1.md`.
-Compat-floor derivation: `compat-floor.md`. Status: **executing** (2026-09-04); the close-out section is
-filled when the E2E legs run.*
+Compat-floor derivation: `compat-floor.md`. Status: **closed** (2026-09-08); §13 is the close-out.*
 
 ## 1. What this is
 
@@ -438,8 +437,94 @@ says green.
 deletion, required check `ci-gate`, admin bypass); Issues enabled. **Monorepo pointer PR (T22):**
 ademu/AdemuMLS#221.
 
-## 13. Close-out
+## 13. Close-out (2026-09-08)
 
-Filled at E2E: one outcome line per V/R/rider, the eight E2E legs (isolated daemon legs 1–7; leg 8 =
-read-only attach to the production daemon in foreign mode, recording the takeover displacement of the
-device's current mind), the first `beta.yml` run.
+**Where the E2E ran.** Not on the dev Mac as planned but on the owner's Hetzner VPS (Linux), a fresh
+OpenClaw install with no other Ademú daemon on the machine — so the isolated-daemon legs ran against a
+clean host and leg 8 (the read-only attach to the production daemon, Mac-only) did not run. Legs 1–3
+and 6 passed; 4 is open with its fix landed; 5, 7 and 8 are tracked as issues (below).
+
+### E2E legs — one line each
+
+- **Leg 1 (install from the `npm pack` tarball):** PASS — `plugins install npm-pack:…` on the VPS,
+  plugin loaded, channel + tool registered after `gateway restart`.
+- **Leg 2 (door one, `openclaw channels add --channel ademu`):** PASS — QR rendered in the SSH terminal,
+  phone scan, four words matched, enrolled; a fresh plugin-owned daemon under the OpenClaw state dir.
+- **Leg 3 (residency):** PASS — message from the phone → green (read) tick → typing indicator → reply;
+  reaction path exercised.
+- **Leg 4 (door two, chat tool):** OPEN — finding #1 (`activation.onStartup:false` kept the plugin
+  unloaded before the first account; fixed to `true`, gate-tested). The owner's re-test with the fixed
+  build is pending → issue.
+- **Leg 5 (room manners with a second human):** NOT RUN → issue.
+- **Leg 6 (lifecycle):** PASS for the two steps run — `gateway restart` brought the channel back and a
+  fresh message was answered (a message adopted right before the restart lost its reply, as recorded in
+  §3/K3 — observed live); `pkill` of the owned daemon → `recovering` → respawn → ready → reply. The
+  token-rotation → connect-existing step was NOT RUN → issue.
+- **Leg 7 (uninstall → config gone incl. the R3 prune → restore via connect-existing):** NOT RUN → issue.
+- **Leg 8 (foreign mode: read-only attach to the production daemon, takeover displacement recorded):**
+  NOT RUN (Mac-only) → issue. Foreign mode is covered by the daemon test suite only.
+
+### Approval riders — one line each
+
+- **Rider R1 (cumulative-ack halt rule):** built as §3 R3 and pinned by the ingress tests (no ack for N
+  or later on any pre-adoption failure; restart replays from the daemon cursor); live: the restart step
+  of leg 6 showed adoption + ack committing before the model run exactly as specified.
+- **Rider R2 (durable ownership, default-isolated data dir, foreign = attach-only):** built as §4;
+  OWNED mode demonstrated live (spawn under `<state>/ademu/adc`, kill → respawn, restart re-attach);
+  FOREIGN mode demonstrated by tests only (leg 8 not run).
+- **Rider R3 (typing keepalive 2000 ms):** built (`typingKeepaliveMs` default 2000 → reply-pipeline
+  `keepaliveIntervalMs`); typing observed live on leg 3.
+
+### Design refinements R1–R11 — one line each
+
+- **R1 daemon identity channel-level, default isolated:** as built; live on the VPS (defaults only, no
+  `socketPath`/`dataDir` configured).
+- **R2 durable ownership state machine:** as built (§4); live: `bound` row survived a gateway restart and
+  a daemon kill (respawn under a new generation).
+- **R2b ack at adoption (Option B):** as built (§3); live: green tick before the reply on every message.
+- **R2c keepalive 2000 ms:** as built; live.
+- **R3 owner authority `ademu:<ownerUserId>`:** as built with Riders A (confirm copy) and B (prune on
+  removal/logout); the wizard asked the Rider-A question live; the prune is unit-tested (leg 7 not run).
+- **R4 no `auth.login`:** held; connect-existing is the wizard's second branch (not exercised live).
+- **R5 token in config, SecretRef-capable:** as built; the wizard wrote it live.
+- **R6 `heartbeat.sendTyping`:** as built (not observable in the legs run).
+- **R7 Windows guard:** as built (blocked before any resolver); unit-tested only.
+- **R8 skills assertion in CI:** `skills list --json` works headless (acceptance lane), symlink fallback
+  kept; live: the resident and enroll skills were visible to the agent in the TUI.
+- **R9 plugin-owned `node:sqlite`:** as built; live on Node ≥ 22.22.3 on the VPS.
+- **R10 at-most-once for callback-free zero-output completions:** recorded residual, unchanged; not
+  observed in the legs.
+- **R11 server endpoints default to production:** as built; live — the VPS daemon reached Ademú with
+  zero configuration.
+
+### Verification dispositions V1–V29 — outcome
+
+Every row of §9 HELD at execution as written there, with these additions from the live run: **V13**
+ClawHub `package publish --dry-run` works unauthenticated (48 files) — publishing stays a local
+release step; **V14** the headless acceptance is real (CI lane green on every PR run) but it seeds an
+account before inspecting, which is why it could not catch finding #1 — a no-account inspect step is
+a follow-up; **V15/V20** held (peer range never checked; new plugin code needed `gateway restart` — the
+owner hit exactly this when the skill appeared only after a restart); **V16** held (VPS Node in range);
+**V19** the TUI connects with `operator.admin`, so its sender is owner — the tool's absence on the first
+try was finding #1, not the owner gate; **V22** the terminal QR scanned fine over SSH; **V29** moot on
+the VPS (no production daemon there) — the Mac hazard remains recorded for leg 8.
+
+### Repo and release facts
+
+- Plugin PR ademu/openclaw-ademu#1: Codex adversarial branch review APPROVE at round 15 (78 findings
+  folded); CI (`test` ×2 Node versions, `acceptance`, required `ci-gate`) green on every head; merged
+  2026-09-08. The post-APPROVE delta is the one-line `onStartup` flip + its gate test + docs
+  (owner-accepted without a further round).
+- Ruleset "main gate" id 22259787 (PR required, no force-push/delete, required check `ci-gate`); Issues
+  enabled.
+- Monorepo pointer PR ademu/AdemuMLS#221 (design index + `docs/design/agents.md` pointer).
+- ClawHub dry-run: works unauthenticated; npm/ClawHub publishing remain launch-calendar items.
+- `beta.yml` first run: dispatched right after the merge (it must exist on `main` to be dispatchable);
+  the result is recorded in the follow-up close-out commit.
+- Version stays **0.1.0 (unreleased)**; exact `@ademu/adc-bin` pin 0.2.4.
+
+### Follow-ups opened at close-out
+
+E2E legs 4 (re-test), 5, 6-rotation, 7, 8 as issues; launch hardening: a post-restart notice or
+transcript re-run for a turn whose model run was killed after adoption (leg 6 observation); a
+no-account inspect step in the acceptance lane (V14).
