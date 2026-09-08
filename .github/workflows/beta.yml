@@ -1,0 +1,43 @@
+# beta — nightly canary against `openclaw@beta` (decision #7). Informational: it never blocks a PR.
+# It installs the beta INTO the plugin tree (`npm i --no-save`) so the SDK import gate and `tsc`
+# resolve the beta's exports, then runs the same headless acceptance against the beta host.
+# When it goes red, follow the procedure in the design entry (§ Versioning): open an issue
+# `beta: <symbol/subpath> — <what changed>`, check the beta's removal ledger, land the replacement.
+name: beta
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  beta:
+    name: openclaw@beta canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - name: swap the SDK for openclaw@beta (in-tree, not saved)
+        run: |
+          set -eu
+          npm i --no-save openclaw@beta
+          node -p "'openclaw ' + require('openclaw/package.json').version"
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm test
+      - name: install the beta host globally
+        run: |
+          set -eu
+          npm i -g openclaw@beta
+          openclaw --version
+      - name: headless acceptance against beta
+        run: bash scripts/ci-acceptance.sh
