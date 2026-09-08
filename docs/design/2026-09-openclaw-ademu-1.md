@@ -519,12 +519,15 @@ the VPS (no production daemon there) — the Mac hazard remains recorded for leg
   enabled.
 - Monorepo pointer PR ademu/AdemuMLS#221 (design index + `docs/design/agents.md` pointer).
 - ClawHub dry-run: works unauthenticated; npm/ClawHub publishing remain launch-calendar items.
-- `beta.yml` first run: dispatched right after the merge (it must exist on `main` to be dispatchable);
-  the result is recorded in the follow-up close-out commit.
+- `beta.yml` first run (2026-09-08, right after the merge): RED — in our own version-print step, not in
+  any gate: `require('openclaw/package.json')` → `ERR_PACKAGE_PATH_NOT_EXPORTED` (OpenClaw does not
+  export `./package.json`; the same class as the adc-bin fix in T18 — second occurrence, so the repo
+  now has zero exports-map `package.json` requires). Fixed to a file-path read; second run on the fix
+  branch: GREEN, `openclaw@beta` resolving to the already-pinned 2026.9.1 (no SDK drift to report).
 - Version stays **0.1.0 (unreleased)**; exact `@ademu/adc-bin` pin 0.2.4.
 
 ### Follow-ups opened at close-out
 
-E2E legs 4 (re-test), 5, 6-rotation, 7, 8 as issues; launch hardening: a post-restart notice or
-transcript re-run for a turn whose model run was killed after adoption (leg 6 observation); a
-no-account inspect step in the acceptance lane (V14).
+ademu/openclaw-ademu issues #2 (leg 4 re-test), #3 (leg 5), #4 (leg 6 rotation step), #5 (leg 7),
+#6 (leg 8, Mac-only foreign mode), #7 (launch hardening: reply lost when the gateway restarts after
+adoption), #8 (acceptance lane: inspect with no account — would have caught finding #1).
