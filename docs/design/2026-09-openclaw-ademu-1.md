@@ -417,6 +417,13 @@ lease service — with zero accounts `server-channels.ts` starts nothing (`listA
 and `registerFull` opens neither SQLite nor a daemon (entries test). The headless acceptance had not
 caught this because it seeds an account before inspecting (V14/R8).
 
+**E2E on the owner's Hetzner VPS (Linux, 2026-09-08), so far:** leg 2 (door one, `openclaw channels
+add --channel ademu`) PASSED — QR in the SSH terminal, phone scan, four words, enrolled, first agent
+device created from a fresh plugin-owned daemon. The chat door (TUI) still did not produce the tool for
+the owner; left OPEN for a re-test against the `onStartup: true` build (finding #1) — if it fails
+there too, a second cause is to be found (the TUI connects with `operator.admin`, so the owner gate is
+not it).
+
 **Repo gates (T21):** ruleset "main gate" id 22259787 (PR required / 0 reviews, no force-push or
 deletion, required check `ci-gate`, admin bypass); Issues enabled. **Monorepo pointer PR (T22):**
 ademu/AdemuMLS#221.
