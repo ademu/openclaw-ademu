@@ -30,7 +30,7 @@ jobs:
         run: |
           set -eu
           npm i --no-save openclaw@beta
-          node -p "'openclaw ' + require('openclaw/package.json').version"
+          node -p "'openclaw ' + require('./node_modules/openclaw/package.json').version"
       - run: npm run build
       - run: npm run typecheck
       - run: npm test
