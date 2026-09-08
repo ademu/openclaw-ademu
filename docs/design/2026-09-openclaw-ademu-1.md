@@ -12,7 +12,7 @@ and the mind drives it over a local socket. This plugin makes **OpenClaw** that 
 daemon (`@ademu/adc-bin`, exact version per release), enrolls an OpenClaw agent as a device through
 Ademú's four-word ceremony, and then runs the device as a resident OpenClaw channel — messages in
 (already decrypted by the daemon, with cryptographic sender identity), typing while the model composes,
-replies out (encrypted before they leave the machine), reactions, blue ticks.
+replies out (encrypted before they leave the machine), reactions, green ticks.
 
 It is an **external** plugin (`@ademu/openclaw-ademu`, manifest id `ademu`), built only on OpenClaw's
 public `openclaw/plugin-sdk/*` surfaces, against a pinned host (`openclaw@2026.9.1`) with a derived
@@ -21,10 +21,10 @@ packages changed for this slice; every gap became a documented disposition inste
 
 ## 2. Decisions (the ratified ones, in plain words)
 
-**Decision 1 — the blue tick is a promise about ownership, not about a reply.** Ademú's read-receipt
+**Decision 1 — the green tick is a promise about ownership, not about a reply.** Ademú's read-receipt
 weight ack (`ack`) is cumulative: acking sequence N acks everything before it. The plugin acks a message
 only after OpenClaw has **committed its adoption** of that message — core's `onAdopted` callback, which
-fires after the user turn is durably recorded and *before* the model runs. So a blue tick means "the
+fires after the user turn is durably recorded and *before* the model runs. So a green tick means "the
 daemon retained this until OpenClaw took durable ownership", never "the agent answered". (Letter change
 from the original "ack after durable admit" to "ack after adoption": see §3, Option B.)
 
@@ -423,6 +423,16 @@ device created from a fresh plugin-owned daemon. The chat door (TUI) still did n
 the owner; left OPEN for a re-test against the `onStartup: true` build (finding #1) — if it fails
 there too, a second cause is to be found (the TUI connects with `operator.admin`, so the owner gate is
 not it).
+
+**E2E leg 3 (residency) PASSED on the VPS (2026-09-08):** message from the phone → green tick → typing →
+reply; reaction path exercised. **Leg 6, restart step, observed as designed:** a message sent and the
+gateway restarted within a second showed the green (read) tick — adoption had committed and acked it —
+and no reply ever came: the restart killed the model run and OpenClaw does not resume interrupted
+channel runs. This is the recorded limitation from §3/K3 ("a restart mid-turn can lose that turn's
+reply, never the message"), now seen live; a launch-hardening candidate is a post-restart "I was
+restarted while answering" notice or a re-run from the transcript. **Copy correction from the same
+session:** Ademú's read receipt is GREEN (gray = delivered); every surface that said "blue tick" now
+says green.
 
 **Repo gates (T21):** ruleset "main gate" id 22259787 (PR required / 0 reviews, no force-push or
 deletion, required check `ci-gate`, admin bypass); Issues enabled. **Monorepo pointer PR (T22):**

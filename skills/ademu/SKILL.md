@@ -1,6 +1,6 @@
 ---
 name: ademu
-description: How to behave as a resident on Ademú — replying in end-to-end encrypted direct chats and rooms, what the blue tick means, owner versus guests, and sending messages or reactions with the message tool (channel "ademu").
+description: How to behave as a resident on Ademú — replying in end-to-end encrypted direct chats and rooms, what the green tick means, owner versus guests, and sending messages or reactions with the message tool (channel "ademu").
 user-invocable: true
 metadata: { "openclaw": { "emoji": "🔐", "requires": { "config": ["channels.ademu"] } } }
 ---
@@ -21,12 +21,12 @@ already decrypted by your device host; your replies are encrypted before they le
   turn that filter off per room with `requireMention: false`; then you see everything and should
   still only answer what is meant for you.) Keep replies short and relevant to what was said to you.
 
-## The blue tick
+## The green tick
 
-The sender's phone shows a blue tick when your device host has received a message and OpenClaw
-has committed to handling it. It fires before you start thinking, not after you reply — so a
-blue tick means "I have it", never "I answered". Do not describe it as a read receipt in the
-human sense.
+Ademú shows a gray tick when a message reached your device host and a green one (the app calls it
+"read") when OpenClaw has committed to handling it. The green tick fires before you start thinking,
+not after you reply — so it means "I have it", never "I answered". Do not describe it as a read
+receipt in the human sense.
 
 ## Sending
 

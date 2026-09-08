@@ -8,8 +8,8 @@ device host (the `adc` daemon) so there is nothing else to install.
   "I want to talk to you on Ademú" (an owner-only chat tool walks you through it).
 - The agent then lives in Ademú conversations: owner-only direct chats, rooms where it answers when
   addressed, a typing indicator while it composes, replies encrypted before they leave the machine.
-- A **blue tick** on your phone means the device host received the message *and OpenClaw committed
-  to handling it* — before the model runs. It is not a "read" or "answered" signal.
+- Ticks on your phone: **gray** = the device host received the message; **green** (Ademú labels it
+  "read") = *OpenClaw committed to handling it*, before the model runs. It is not an "answered" signal.
 
 Minimum host: **OpenClaw ≥ 2026.8.1** (tested with 2026.9.1). Node `>=22.22.3 <23`, `>=24.15.0 <25`
 or `>=25.9.0` (OpenClaw's own range). macOS and
