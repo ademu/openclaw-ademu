@@ -77,6 +77,19 @@
             },
             "additionalProperties": false
           },
+          "enrollmentPage": {
+            "type": "object",
+            "properties": {
+              "autoOpen": {
+                "type": "boolean"
+              },
+              "baseUrl": {
+                "type": "string",
+                "format": "uri"
+              }
+            },
+            "additionalProperties": false
+          },
           "groups": {
             "type": "object",
             "propertyNames": {

@@ -44,6 +44,33 @@ confirms → `confirm_words` with the **daemon's** words (never user- or model-t
 `enrolled` → mint a device token labelled `openclaw-<accountId>` → read the identity facts from the
 session's `get_self`. The token is returned exactly once and written straight into config.
 
+**Enrollment effort — a non-negotiable requirement (owner, recorded 2026-09-17).** Whichever door is
+used, the user's actions are exactly three: (1) ask OpenClaw to connect to Ademú (or run
+`openclaw channels add --channel ademu`), (2) scan the QR shown by the agent device with the Ademú app,
+(3) confirm that the four safety words match. No further command, copy-paste, file, or setting may be
+asked of the user. The wizard meets it with the terminal QR. The chat door meets it with the markdown
+data-URL image where the client renders images (the web UI) and, everywhere else — OpenClaw's **TUI
+renders no images** — with the **enrollment page** (implemented 2026-09-17, `src/enrollment-page.ts`,
+`src/enrollment-page-html.ts`; the design is the field-proven one from the earlier harness plugin):
+a page served by the plugin on the gateway's own HTTP server via `api.registerHttpRoute({ path:
+"/plugins/ademu", match: "prefix", auth: "plugin", replaceExisting: true })` — a data-free HTML shell at
+`/plugins/ademu/enroll/<pageToken>`, a polled `/state` JSON (the QR as a data URL, then the daemon's
+words, then the outcome) and a `/confirm` POST for the host-captured yes, which runs the tool's own
+confirm path (`confirmFromPage`: the daemon's words, the token mint, the config write with the routing
+binding). `start` **auto-opens** the page in the gateway host's browser (`open` / `xdg-open` /
+`cmd /c start`, detached) when its URL is loopback — exactly when the TUI user is on that machine —
+and returns the URL in any case (a pointer may transit the model; payloads never; a mangled URL fails
+safe to 404). The page token is a 160-bit ceremony-scoped bearer capability held in memory; the
+anti-substitution property still rests entirely on the human comparing the words with the phone. The
+route answers 404 to non-loopback clients unless `channels.ademu.enrollmentPage.baseUrl` or
+`gateway.publicOrigin` is set (then it never auto-opens: the browser is elsewhere);
+`enrollmentPage.autoOpen: false` opts out. Registration happens in `registerFull`, which OpenClaw runs
+in both the "full" and the per-tool-execution "tool-discovery" passes, so the registry the route reads
+is a `globalThis` singleton (`sharedEnrollmentRegistry`) and the route replaces itself. Finished
+enrollments stay readable (bounded `#recent`) so the page renders its outcome and a chat `status`/`wait`
+after a page-side yes says "done" instead of "nothing in progress". The wizard's hosted path keeps
+using the SDK's own hook for this idea, `prompter.openUrl` (V22).
+
 **Instruct-only install.** If the bundled binary is missing for a platform, the plugin says so and
 stops; it never downloads or installs anything on its own.
 
@@ -204,6 +231,22 @@ keepalive (approval rider R3; Ademú's receiver TTL is ~3 s) plus `heartbeat.sen
   other than you"); the tool grants automatically (its initiator is owner-by-scope and confirmed the
   words from the same phone). *Rider B:* removing the account (`config.deleteAccount`) or logging it
   out (`gateway.logoutAccount`) prunes the entry when no other Ademú account shares that owner.
+- **Routing binding (2026-09-17, owner-ratified).** The third enrollment write, chat door only: the
+  tool's config mutation also appends `bindings: [{ agentId, match: { channel: "ademu", accountId } }]`
+  for the *enrolling* agent — `ctx.agentId`, which must name a configured agent (`listAgentIds`); there
+  is **no fallback to a default agent**. Refusals happen at `start`, before any device exists, and are
+  re-checked inside the write: no configured agent for the conversation → refused; the account's route
+  already owned by another agent → refused, never overwritten. The wizard door is unchanged (OpenClaw's
+  own `channels add` flow asks "Route these channel accounts to agents now?"). *Rider B, extended:*
+  `config.deleteAccount` prunes the account's own route row (wildcard/peer-scoped rows and other channels
+  stay); logout keeps the account block and therefore its binding. Implementation: `src/bindings.ts`
+  mirrors the host's private `applyAgentBindings` (not importable from any public plugin-sdk subpath);
+  one recorded divergence — the host "upgrades" a same-agent channel-wide row in place, the plugin
+  appends an account-scoped row instead (a chat tool never edits a binding it did not write);
+  `test/gates/binding-shape.test.ts` pins the host shape. Why: verified 2026-09-16 on OpenClaw 2026.8.2
+  that an unbound account under `agents.ownership: "explicit"` makes the router throw
+  `AGENT_SELECTION_REQUIRED` → ingress halts before adoption → the account restart-loops with gray
+  ticks and no reply; with implicit ownership the message reaches the default agent instead.
 - No `auth.login`: OpenClaw's login path may not mutate channel config. Reconnecting an enrolled device
   is the wizard's "Connect an already-enrolled agent" (mints a new token under the same label; an
   existing label asks for explicit replace consent → `replace: true`).
@@ -253,7 +296,7 @@ bait-tree self-test).
 SDK durable ingress queue (trust-gated; Tier C note); Control UI QR parity (`loginWithQrStart/Wait`
 has no words step); `auth.login`; `accountScopedRestart`; ambient `room_event` injection; a proper
 icon (the shipped one is generated); npm/ClawHub publishing (launch calendar); Windows; media, threads,
-edit/unsend; residual R10 (at-most-once for callback-free zero-output completions).
+edit/unsend; residual R10 (at-most-once for callback-free zero-output completions). Using the enrollment page from the wizard's hosted (Control UI) path; a `/ademu` re-display command.
 
 ## 11. Versioning
 
@@ -436,6 +479,14 @@ says green.
 **Repo gates (T21):** ruleset "main gate" id 22259787 (PR required / 0 reviews, no force-push or
 deletion, required check `ci-gate`, admin bypass); Issues enabled. **Monorepo pointer PR (T22):**
 ademu/AdemuMLS#221.
+
+**Enrollment page (2026-09-17).** The three-action requirement (§2) was found unmet on the TUI (no image
+rendering → only the `ademu://` text). Shipped the gateway-served enrollment page + loopback auto-open
+described in §2, sharing the tool's registry and confirm path; `test/enrollment-page.test.ts` drives the
+real route on a loopback `http.Server` against enrollments the real tool created (shell without ceremony
+data + nonce CSP, token and exposure gates, method guards, rate limits, scan → words → Yes → enrolled with
+exactly one `confirm_words`, mismatch, cancel-from-chat, confirm-from-chat, `label_exists`). New SDK
+symbols: `core → resolveGatewayPort`, `config-contracts → resolveGatewayPublicOrigin` (floor unchanged).
 
 ## 13. Close-out (2026-09-08)
 

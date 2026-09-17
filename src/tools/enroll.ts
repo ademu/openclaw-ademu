@@ -1,20 +1,24 @@
 // Door two (plan T13): the owner-gated `ademu_enroll` chat tool. Actions: start (QR as a markdown
-// data-URL image + the ademu:// link) → wait (the daemon's four words) → confirm (the human said they
-// match) → config write via mutateConfigFile. Leases are bound to their creator (sessionKey + a
-// random leaseToken), expire after 3 minutes, and are disposed on every terminal path and on plugin
-// shutdown (registerService). The model never supplies the words: `confirm` re-reads them from the
-// daemon-fed snapshot held by the lease.
+// data-URL image + the ademu:// link + the enrollment page URL, auto-opened in the gateway host's
+// browser when loopback) → wait (the daemon's four words) → confirm (the human said they match, in
+// chat OR on the enrollment page's Yes button) → config write via mutateConfigFile. Leases are bound
+// to their creator (sessionKey + a random leaseToken), expire after 3 minutes, and are disposed on
+// every terminal path and on plugin shutdown (registerService). The model never supplies the words:
+// `confirm` re-reads them from the daemon-fed snapshot held by the lease.
 import type { AdcClient, AdcClientOptions } from "@ademu/adc-client";
 import { ControlError, type FourWords, type PairingSnapshot } from "@ademu/adc-control";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
+import { listAgentIds } from "openclaw/plugin-sdk/agent-scope-runtime";
 import { optionalPositiveIntegerSchema, readPositiveIntegerParam, readStringParam } from "openclaw/plugin-sdk/channel-actions";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { Type } from "typebox";
+import { applyRouteBinding, findRouteBinding, RouteBindingConflictError } from "../bindings.js";
 import { createEnrollmentLease, EnrollmentError, mintAccountToken, probeIdentity, tokenLabelFor, type EnrollmentLease, type EnrollmentLeaseDeps } from "../ceremony.js";
-import { inspectAdemuAccount, listAdemuAccountIds } from "../config.js";
+import { CHANNEL_ID, inspectAdemuAccount, listAdemuAccountIds } from "../config.js";
 import { accountExists, applyEnrollment } from "../enroll-config.js";
+import { enrollmentPageUrl, shouldAutoOpenEnrollmentPage } from "../enrollment-page.js";
 import { strings } from "../i18n/strings.js";
 import type { Qr } from "../qr.js";
 import { DaemonAbortedError } from "../monitor/daemon.js";
@@ -29,9 +33,11 @@ type ToolResult = { content: Array<{ type: "text"; text: string }>; details: Rec
 const text = (msg: string, details: Record<string, unknown>): ToolResult => ({ content: [{ type: "text", text: msg }], details });
 
 /** One in-progress enrollment, bound to its creator. */
-type ActiveEnrollment = {
+export type ActiveEnrollment = {
   lease: EnrollmentLease;
   leaseToken: string;
+  /** Bearer capability of the enrollment page (browser surface); ceremony-scoped, in memory only. */
+  pageToken: string;
   sessionKey: string;
   requesterSenderId: string | undefined;
   agentId: string | undefined;
@@ -52,6 +58,8 @@ export type EnrollToolDeps = {
   connectSession: (opts: AdcClientOptions) => Promise<AdcClient>;
   qr: Qr;
   writeConfig: (mutate: (draft: OpenClawConfig) => OpenClawConfig) => Promise<void>;
+  /** Launches the gateway host's browser at `url`; resolves whether the launcher was spawned. */
+  openUrl: (url: string) => Promise<boolean>;
 };
 
 /** The account id already exists in the CURRENT config draft (created while the enrollment ran). */
@@ -60,6 +68,24 @@ export class AccountExistsError extends Error {
     super(`Ademú account "${accountId}" already exists`);
     this.name = "AccountExistsError";
   }
+}
+
+/** The conversation is not attributed to a configured OpenClaw agent, so the account cannot be routed. */
+export class EnrollingAgentUnknownError extends Error {
+  constructor() {
+    super("the enrolling conversation names no configured OpenClaw agent");
+    this.name = "EnrollingAgentUnknownError";
+  }
+}
+
+/**
+ * The enrolling agent: `ctx.agentId` must be present and name a configured agent (`listAgentIds` and
+ * the tool context both carry the host's canonical ids, so plain equality is the comparison). There is
+ * NO fallback to a default agent — an account that cannot be routed to its enrolling agent is refused.
+ */
+export function requireEnrollingAgentId(cfg: OpenClawConfig, agentId: string | undefined): string {
+  if (!agentId || !listAgentIds(cfg).includes(agentId)) throw new EnrollingAgentUnknownError();
+  return agentId;
 }
 
 /**
@@ -75,6 +101,17 @@ function assertStillActive(active: ActiveEnrollment, registry: EnrollmentRegistr
 export class EnrollmentRegistry {
   readonly #active = new Map<string, ActiveEnrollment>();
   readonly #starting = new Set<string>();
+  /**
+   * Finished enrollments (done/failed/cancelled/expired), bounded, so the enrollment page can render
+   * its outcome and a chat `status`/`wait` after a page-side confirm says "done" rather than "nothing
+   * in progress". Never consulted by the liveness guard (`get`).
+   */
+  readonly #recent = new Map<string, ActiveEnrollment>();
+  #remember(entry: ActiveEnrollment): void {
+    this.#recent.delete(entry.deviceId);
+    this.#recent.set(entry.deviceId, entry);
+    while (this.#recent.size > 16) this.#recent.delete(this.#recent.keys().next().value as string);
+  }
 
   /** Synchronous admission: one `start` per conversation at a time (released when start settles). */
   reserve(sessionKey: string): boolean {
@@ -87,27 +124,60 @@ export class EnrollmentRegistry {
   }
 
   #prune(): void {
-    for (const [id, e] of this.#active) if (e.lease.disposed) this.#active.delete(id);
+    for (const [id, e] of this.#active) {
+      if (e.lease.disposed) {
+        this.#active.delete(id);
+        this.#remember(e);
+      }
+    }
   }
+  /** The LIVE entry for a device (the liveness guard's view). */
   get(deviceId: string): ActiveEnrollment | undefined {
     this.#prune();
     return this.#active.get(deviceId);
+  }
+  /** Live or recently finished: the tool's addressing view (a finished entry reports its outcome). */
+  lookup(deviceId: string): ActiveEnrollment | undefined {
+    return this.get(deviceId) ?? this.#recent.get(deviceId);
   }
   set(entry: ActiveEnrollment): void {
     this.#active.set(entry.deviceId, entry);
   }
   delete(deviceId: string): void {
+    const e = this.#active.get(deviceId);
     this.#active.delete(deviceId);
+    if (e) this.#remember(e);
   }
   /** Forget `entry` only if it is still the registry's entry for its device (a successor is left alone). */
   forget(entry: ActiveEnrollment): void {
-    if (this.#active.get(entry.deviceId) === entry) this.#active.delete(entry.deviceId);
+    if (this.#active.get(entry.deviceId) === entry) {
+      this.#active.delete(entry.deviceId);
+      this.#remember(entry);
+    }
   }
-  /** The single enrollment owned by this conversation, if any. */
+  /** The single LIVE enrollment owned by this conversation, if any. */
   forSession(sessionKey: string): ActiveEnrollment | undefined {
     this.#prune();
     for (const e of this.#active.values()) if (e.sessionKey === sessionKey) return e;
     return undefined;
+  }
+  /** The most recently finished enrollment of this conversation, if any. */
+  recentForSession(sessionKey: string): ActiveEnrollment | undefined {
+    this.#prune();
+    let found: ActiveEnrollment | undefined;
+    for (const e of this.#recent.values()) if (e.sessionKey === sessionKey) found = e;
+    return found;
+  }
+  /** The live or recent enrollment whose page token is `token` (timing-safe; single-digit entry counts). */
+  findByPageToken(token: string): ActiveEnrollment | undefined {
+    this.#prune();
+    const probe = Buffer.from(token, "utf8");
+    let found: ActiveEnrollment | undefined;
+    for (const e of [...this.#recent.values(), ...this.#active.values()]) {
+      const candidate = Buffer.from(e.pageToken, "utf8");
+      if (candidate.length === probe.length && timingSafeEqual(candidate, probe)) found = e;
+    }
+    return found;
   }
   readonly #pending = new Set<Promise<void>>();
   /** Background disposals stay tracked until they settle, so plugin shutdown waits for them too. */
@@ -129,6 +199,23 @@ export class EnrollmentRegistry {
 
 function newLeaseToken(): string {
   return randomBytes(12).toString("base64url");
+}
+
+/** 160 bits, lowercase hex: URL-safe and matched by `ENROLLMENT_PAGE_TOKEN_RE` in the page module. */
+function newPageToken(): string {
+  return randomBytes(20).toString("hex");
+}
+
+/**
+ * OpenClaw registers a plugin more than once in one gateway process (the startup "full" pass and a
+ * fresh "tool-discovery" pass per tool execution). The enrollment page's HTTP route and the tool must
+ * see the SAME registry, so it lives on `globalThis` (survives even a duplicated module graph).
+ */
+const SHARED_REGISTRY_KEY = Symbol.for("ademu.openclaw.enrollmentRegistry");
+export function sharedEnrollmentRegistry(): EnrollmentRegistry {
+  const globals = globalThis as { [SHARED_REGISTRY_KEY]?: EnrollmentRegistry };
+  globals[SHARED_REGISTRY_KEY] ??= new EnrollmentRegistry();
+  return globals[SHARED_REGISTRY_KEY];
 }
 
 export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToolDeps, registry: EnrollmentRegistry) {
@@ -160,9 +247,11 @@ export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToo
         return startEnrollment({ args, ctx, deps, registry, sessionKey, beforeEffect, signal });
       }
 
-      // Every other action addresses an existing lease bound to this conversation + token.
-      const deviceId = readStringParam(args, "deviceId") ?? registry.forSession(sessionKey)?.deviceId;
-      const active = deviceId ? registry.get(deviceId) : undefined;
+      // Every other action addresses an existing lease bound to this conversation + token (a recently
+      // finished one too, so a confirm made on the enrollment page is reported here as done).
+      const deviceId =
+        readStringParam(args, "deviceId") ?? registry.forSession(sessionKey)?.deviceId ?? registry.recentForSession(sessionKey)?.deviceId;
+      const active = deviceId ? registry.lookup(deviceId) : undefined;
       if (!active) return text(strings.enroll.toolNoActive, { ok: false });
       const leaseToken = readStringParam(args, "leaseToken");
       // Every bound axis compares EXACTLY, `undefined` included: a lease created without a sender or
@@ -174,6 +263,10 @@ export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToo
         active.agentId !== ctx.agentId;
       if (axisMismatch) {
         return text(strings.enroll.toolLeaseMismatch, { ok: false });
+      }
+      if (active.state === "done") {
+        // Finished — typically confirmed on the enrollment page while the model was waiting.
+        return text(strings.enroll.toolAlreadyDone(active.agentName), { ok: true, state: "done", deviceId: active.deviceId });
       }
       if (active.lease.disposed) {
         registry.delete(active.deviceId);
@@ -206,7 +299,7 @@ export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToo
           if (active.busy) return text(strings.enroll.toolStatus(active.state), { ok: false, state: active.state, busy: true });
           active.busy = true;
           try {
-            return await confirmEnrollment({ active, ctx, deps, registry, beforeEffect, replace: action === "replace_token" });
+            return await confirmEnrollment({ active, deps, registry, beforeEffect, replace: action === "replace_token" });
           } finally {
             active.busy = false;
           }
@@ -233,6 +326,18 @@ async function startEnrollment(p: {
   const accountId = normalizeAccountId(readStringParam(p.args, "accountId") ?? accountIdForAgentName(agentName));
   if (accountExists(cfg, accountId)) {
     return text(strings.enroll.toolAccountExists(accountId, listAdemuAccountIds(cfg)), { ok: false, accountId });
+  }
+  // Routing is decided BEFORE any device exists: the enrolling agent must be a configured agent, and the
+  // account's route must not already belong to another agent. Both are re-checked at confirm.
+  try {
+    requireEnrollingAgentId(cfg, p.ctx.agentId);
+  } catch (err) {
+    if (err instanceof EnrollingAgentUnknownError) return text(strings.enroll.toolAgentUnknown, { ok: false, state: "agent_unknown" });
+    throw err;
+  }
+  const routed = findRouteBinding(cfg, { channel: CHANNEL_ID, accountId });
+  if (routed && routed.agentId !== p.ctx.agentId) {
+    return text(strings.enroll.toolRoutingConflict(accountId, routed.agentId), { ok: false, state: "routing_conflict", accountId });
   }
   // SYNCHRONOUS reservation of the conversation before the first await (two concurrent starts cannot
   // both pass the checks below), then authority (an expired call must not even dispose the previous
@@ -305,6 +410,7 @@ async function startWithLease(p: {
   registry: EnrollmentRegistry;
   sessionKey: string;
   beforeEffect: () => Promise<void>;
+  cfg: OpenClawConfig;
   lease: EnrollmentLease;
   agentName: string;
   accountId: string;
@@ -317,6 +423,7 @@ async function startWithLease(p: {
   const entry: ActiveEnrollment = {
     lease,
     leaseToken: newLeaseToken(),
+    pageToken: newPageToken(),
     sessionKey: p.sessionKey,
     requesterSenderId: p.ctx.requesterSenderId,
     agentId: p.ctx.agentId,
@@ -351,9 +458,11 @@ async function startWithLease(p: {
         return last;
       },
       (err: unknown) => {
-        entry.failure = err instanceof Error ? err.name : "poll_failed";
-        entry.state = "failed";
-        if (!lease.disposed) {
+        // A poll aborted by our own dispose (cancel, supersession, mismatch, TTL) is not a failure of
+        // the enrollment: the entry keeps the state/failure that led to the dispose (the page reads them).
+        if (!lease.disposed && !lease.signal.aborted) {
+          entry.failure = err instanceof Error ? err.name : "poll_failed";
+          entry.state = "failed";
           p.registry.forget(entry);
           p.registry.track(lease.dispose("poll-failed"));
         }
@@ -364,12 +473,27 @@ async function startWithLease(p: {
   p.registry.set(entry);
 
   const dataUrl = await p.deps.qr.pngDataUrl(created.qr_payload);
-  return text(strings.enroll.toolStart(created.qr_payload, dataUrl), {
+  // The enrollment page: the ONE surface where a TUI user sees the QR, the words, and the Yes button.
+  // Auto-opened only when its URL is loopback (the user is then on this machine); best-effort, never
+  // fatal — the URL in the result is the fallback. The URL is a pointer the model may paste; the
+  // payload and the words never transit the model.
+  const pageUrl = enrollmentPageUrl(p.cfg, entry.pageToken);
+  let opened = false;
+  if (shouldAutoOpenEnrollmentPage(p.cfg, pageUrl)) {
+    try {
+      opened = await p.deps.openUrl(pageUrl);
+    } catch {
+      opened = false;
+    }
+  }
+  return text(strings.enroll.toolStart(created.qr_payload, dataUrl, pageUrl, opened), {
     ok: true,
     state: "scanning",
     deviceId: created.device_id,
     accountId,
     leaseToken: entry.leaseToken,
+    pageUrl,
+    pageOpened: opened,
   });
 }
 
@@ -384,9 +508,29 @@ async function waitForWords(active: ActiveEnrollment, timeoutMs: number): Promis
   return active.words;
 }
 
+/**
+ * The enrollment page's host-captured yes: the same confirm path as the chat action, minus the tool
+ * call (no execution signal to check — the ceremony's own liveness guard still runs before every
+ * durable effect). Refuses to join an in-flight confirm. Returns the result the page renders.
+ */
+export async function confirmFromPage(
+  active: ActiveEnrollment,
+  deps: EnrollToolDeps,
+  registry: EnrollmentRegistry,
+): Promise<{ ok: boolean; state: string; message: string }> {
+  if (active.busy) return { ok: false, state: active.state, message: strings.enroll.toolStatus(active.state) };
+  active.busy = true;
+  try {
+    const r = await confirmEnrollment({ active, deps, registry, beforeEffect: async () => {}, replace: false });
+    const details = r.details as { ok?: boolean; state?: string };
+    return { ok: details.ok === true, state: details.state ?? active.state, message: r.content[0]?.text ?? "" };
+  } finally {
+    active.busy = false;
+  }
+}
+
 async function confirmEnrollment(p: {
   active: ActiveEnrollment;
-  ctx: OpenClawPluginToolContext;
   deps: EnrollToolDeps;
   registry: EnrollmentRegistry;
   beforeEffect: () => Promise<void>;
@@ -458,11 +602,15 @@ async function confirmEnrollment(p: {
     // The final guard runs INSIDE the mutation callback (when the host hands us its current draft),
     // and from here the enrollment is `committing`: `cancel` can no longer claim "nothing written".
     active.state = "committing";
+    let routedAgentId = "";
     await p.deps.writeConfig((draft) => {
       assertStillActive(active, p.registry);
       // Re-check against the CURRENT draft: an account created while this enrollment ran is never overwritten.
       if (accountExists(draft, common.accountId)) throw new AccountExistsError(common.accountId);
-      return applyEnrollment(draft, {
+      // The enrolling agent (captured at start) must still be configured; the route is written in the SAME
+      // mutation as the account so the account never exists unrouted. A conflict throws → nothing written.
+      routedAgentId = requireEnrollingAgentId(draft, active.agentId);
+      const enrolled = applyEnrollment(draft, {
         accountId: common.accountId,
         agentName: active.agentName,
         deviceId: active.deviceId,
@@ -471,6 +619,7 @@ async function confirmEnrollment(p: {
         token: minted.token,
         grantOwnerAuthority: true, // the initiator is owner-by-scope and confirmed the words from the same phone
       });
+      return applyRouteBinding(enrolled, { channel: CHANNEL_ID, accountId: common.accountId, agentId: routedAgentId });
     });
     active.state = "done";
     // Tool-door accelerator: the account is committed → publish the setup-spawned daemon now.
@@ -483,7 +632,13 @@ async function confirmEnrollment(p: {
     }
     p.registry.forget(active);
     await active.lease.dispose("done");
-    return text(strings.enroll.toolConfirmed(active.agentName), { ok: true, state: "done", accountId: common.accountId, deviceId: active.deviceId });
+    return text(`${strings.enroll.toolConfirmed(active.agentName)}\n\n${strings.enroll.toolRouted(routedAgentId, common.accountId)}`, {
+      ok: true,
+      state: "done",
+      accountId: common.accountId,
+      deviceId: active.deviceId,
+      routing: { agentId: routedAgentId, accountId: common.accountId },
+    });
   } catch (err) {
     const cancelled =
       (err instanceof EnrollmentError && (err.reason === "cancelled" || err.reason === "aborted")) ||
@@ -499,8 +654,21 @@ async function confirmEnrollment(p: {
       await active.lease.dispose("account-exists");
       return text(strings.enroll.toolAccountExists(err.accountId, [err.accountId]), { ok: false, state: "account_exists" });
     }
+    if (err instanceof EnrollingAgentUnknownError) {
+      // The agent roster changed underneath the ceremony: the account is NOT written unrouted.
+      p.registry.forget(active);
+      await active.lease.dispose("agent-unknown");
+      return text(strings.enroll.toolAgentUnknown, { ok: false, state: "agent_unknown" });
+    }
+    if (err instanceof RouteBindingConflictError) {
+      p.registry.forget(active);
+      await active.lease.dispose("routing-conflict");
+      return text(strings.enroll.toolRoutingConflict(err.accountId, err.existingAgentId), { ok: false, state: "routing_conflict", accountId: err.accountId });
+    }
     if (err instanceof EnrollmentError) {
       if (err.reason === "words_mismatch") {
+        active.state = "failed";
+        active.failure = "words_mismatch";
         p.registry.forget(active);
         await active.lease.dispose("words-mismatch");
         return text(strings.enroll.wordsMismatch, { ok: false, state: "words_mismatch" });
@@ -517,7 +685,7 @@ async function confirmEnrollment(p: {
   }
 }
 
-export function registerEnrollTool(api: OpenClawPluginApi, deps: EnrollToolDeps, registry = new EnrollmentRegistry()): EnrollmentRegistry {
+export function registerEnrollTool(api: OpenClawPluginApi, deps: EnrollToolDeps, registry = sharedEnrollmentRegistry()): EnrollmentRegistry {
   api.registerTool((ctx) => createEnrollTool(ctx, deps, registry) as never, { name: TOOL_NAME });
   api.registerService({
     id: "ademu-enroll-leases",

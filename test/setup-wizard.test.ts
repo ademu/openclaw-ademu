@@ -120,6 +120,8 @@ describe("setup wizard: new enrollment", () => {
     expect(cfg.channels.ademu.enabled).toBe(true);
     expect(cfg.channels.ademu.accounts.iris).toMatchObject({ enabled: true, agentName: "Iris", deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_secret_1" });
     expect(cfg.commands.ownerAllowFrom).toEqual([`ademu:${OWNER}`]);
+    // routing is the HOST's step on this door (`channels add` asks which agent): the wizard writes no binding
+    expect((cfg as unknown as { bindings?: unknown }).bindings).toBeUndefined();
     // the words note shows the daemon words; the grant confirm carries Rider A copy
     expect(log.find((l) => l.kind === "note" && l.title === "Safety words")?.message).toContain(WORDS.join("   "));
     expect(log.filter((l) => l.kind === "confirm").map((l) => l.message)).toEqual([

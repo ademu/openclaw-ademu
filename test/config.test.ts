@@ -188,6 +188,21 @@ describe("owner authority entry (R3) and account deletion (Rider B)", () => {
     const list = (next as unknown as { commands: { ownerAllowFrom: string[] } }).commands.ownerAllowFrom;
     expect(list).toEqual(["telegram:123", "ademu:owner-1"]);
   });
+
+  it("deleting an account prunes exactly its own route binding and leaves every other row", () => {
+    const rows = [
+      { agentId: "iris", match: { channel: "ademu", accountId: "iris" } },
+      { agentId: "ledger", match: { channel: "ademu", accountId: "*" } },
+      { agentId: "iris", match: { channel: "telegram", accountId: "iris" } },
+      { type: "acp", agentId: "x", match: { channel: "ademu", accountId: "iris" } },
+    ];
+    const withBindings = { ...two, bindings: rows } as unknown as OpenClawConfig;
+    const next = ademuConfigAdapter.deleteAccount!({ cfg: withBindings, accountId: "iris" });
+    expect((next as unknown as { bindings: unknown[] }).bindings).toEqual(rows.slice(1));
+    // an account with no binding of its own leaves the array identical
+    const untouched = ademuConfigAdapter.deleteAccount!({ cfg: withBindings, accountId: "eve" });
+    expect((untouched as unknown as { bindings: unknown[] }).bindings).toEqual(rows);
+  });
 });
 
 describe("manifest schema parity with the code schema", () => {

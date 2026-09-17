@@ -7,78 +7,7 @@ import { createEnrollTool, EnrollmentRegistry, registerEnrollTool, TOOL_NAME, ty
 import { FakeAdcClient, OWNER } from "./fakes/adc.js";
 import { FakeControl, NEW_AGENT, NEW_DEVICE, QR, WORDS } from "./fakes/control.js";
 
-const tick = (ms = 3) => new Promise((r) => setTimeout(r, ms));
-
-function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?: unknown, acquireGate?: Promise<void>) {
-  const control = new FakeControl();
-  let released = 0;
-  const daemonLease: Lease = {
-    mode: "owned",
-    role: "setup",
-    identity: { dataDir: "/d" } as never,
-    holderId: "h",
-    info: { controlSocketPath: "/d/adc.sock", sessionSocketPath: "/d/adc-session.sock" },
-    lost: new Promise<never>(() => {}),
-    release: async () => void released++,
-  };
-  const acquires: unknown[] = [];
-  const promotions: string[] = [];
-  const daemons = {
-    acquire: async (p: unknown) => {
-      acquires.push(p);
-      if (acquireError) throw acquireError;
-      const signal = (p as { signal?: AbortSignal }).signal;
-      if (acquireGate) {
-        await Promise.race([
-          acquireGate,
-          new Promise<never>((_, reject) => signal?.addEventListener("abort", () => reject(new DaemonAbortedError()), { once: true })),
-        ]);
-      }
-      return daemonLease;
-    },
-    promotePendingPublication: (dataDir: string) => {
-      promotions.push(dataDir);
-      return true;
-    },
-  } as unknown as DaemonManager;
-  const timers: Array<{ fn: () => void; ms: number }> = [];
-  const lease: EnrollmentLeaseDeps = {
-    daemons,
-    connectControl: async () => control,
-    now: () => 0,
-    setTimer: (fn, ms) => {
-      timers.push({ fn, ms });
-      return timers.length;
-    },
-    clearTimer: () => {},
-  };
-  const client = new FakeAdcClient({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER });
-  const writes: OpenClawConfig[] = [];
-  let current = cfg;
-  const deps: EnrollToolDeps = {
-    lease,
-    connectSession: async () => client as never,
-    qr: { terminal: async () => "", pngDataUrl: async () => "data:image/png;base64,QUJD" },
-    writeConfig: async (mutate) => {
-      current = mutate(current);
-      writes.push(current);
-    },
-  };
-  const registry = new EnrollmentRegistry();
-  const ctx = (over: Partial<OpenClawPluginToolContext> = {}): OpenClawPluginToolContext => ({
-    senderIsOwner: true,
-    sessionKey: "agent:main:webchat:owner",
-    requesterSenderId: "owner-1",
-    agentId: "main",
-    runtimeConfig: current,
-    ...over,
-  });
-  const tool = (over: Partial<OpenClawPluginToolContext> = {}) => createEnrollTool(ctx(over), deps, registry)!;
-  const signal = new AbortController().signal;
-  const call = async (args: Record<string, unknown>, over: Partial<OpenClawPluginToolContext> = {}, sig: AbortSignal | undefined = signal) =>
-    tool(over).execute("call-1", args, sig);
-  return { control, deps, registry, tool, call, writes, acquires, promotions, released: () => released, timers, current: () => current };
-}
+import { tick, world } from "./fakes/enroll-world.js";
 
 afterEach(() => {});
 
@@ -144,14 +73,21 @@ describe("ademu_enroll: the four-step flow", () => {
     expect(w.control.calls.find((c) => c.op === "confirm_words")?.params).toEqual({ device_id: NEW_DEVICE, words: WORDS });
     w.control.finish("enrolled");
     const done = await confirmP;
-    expect(done.details).toMatchObject({ ok: true, state: "done", accountId: "iris" });
+    expect(done.details).toMatchObject({ ok: true, state: "done", accountId: "iris", routing: { agentId: "main", accountId: "iris" } });
     expect(done.content[0]!.text).toContain("Enrolled");
+    expect(done.content[0]!.text).toContain('routed to OpenClaw agent "main"');
 
     expect(w.writes).toHaveLength(1);
-    const cfg = w.current() as unknown as { channels: { ademu: { enabled: boolean; accounts: Record<string, Record<string, unknown>> } }; commands: { ownerAllowFrom: string[] } };
+    const cfg = w.current() as unknown as {
+      channels: { ademu: { enabled: boolean; accounts: Record<string, Record<string, unknown>> } };
+      commands: { ownerAllowFrom: string[] };
+      bindings: unknown[];
+    };
     expect(cfg.channels.ademu.enabled).toBe(true);
     expect(cfg.channels.ademu.accounts.iris).toMatchObject({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_secret_1", agentName: "Iris" });
     expect(cfg.commands.ownerAllowFrom).toEqual([`ademu:${OWNER}`]);
+    // the routing binding lands in the SAME write as the account, in the wizard's shape
+    expect(cfg.bindings).toEqual([{ agentId: "main", match: { channel: "ademu", accountId: "iris" } }]);
     expect(w.control.calls.find((c) => c.op === "token_mint")?.params).toEqual({ device_id: NEW_DEVICE, label: "openclaw-iris" });
     expect(w.registry.size).toBe(0);
     expect(w.released()).toBe(1);
@@ -237,6 +173,109 @@ describe("ademu_enroll: the four-step flow", () => {
   });
 });
 
+describe("ademu_enroll: routing binding (the account is never written unrouted)", () => {
+  async function enroll(w: ReturnType<typeof world>, over: Partial<OpenClawPluginToolContext> = {}, agentName = "Iris") {
+    const start = await w.call({ action: "start", agentName }, over);
+    expect(start.details.ok).toBe(true);
+    const leaseToken = start.details.leaseToken as string;
+    w.control.emit({ words: WORDS });
+    await tick();
+    const confirmP = w.call({ action: "confirm", leaseToken }, over);
+    await tick(5);
+    w.control.finish("enrolled");
+    return confirmP;
+  }
+  const bindingsOf = (w: ReturnType<typeof world>) => (w.current() as unknown as { bindings?: unknown[] }).bindings;
+
+  it("routes the account to the enrolling agent on a multi-agent roster", async () => {
+    const w = world(ROSTER("iris", "ledger", "main"));
+    const done = await enroll(w, { agentId: "iris" });
+    expect(done.details).toMatchObject({ ok: true, state: "done", routing: { agentId: "iris", accountId: "iris" } });
+    expect(bindingsOf(w)).toEqual([{ agentId: "iris", match: { channel: "ademu", accountId: "iris" } }]);
+    expect(w.writes).toHaveLength(1);
+  });
+
+  it("appends to existing bindings in host order and keeps non-route rows", async () => {
+    const existing = [
+      { agentId: "iris", match: { channel: "ademu", accountId: "iris" } },
+      { agentId: "ledger", match: { channel: "ademu", accountId: "ledger" } },
+      { type: "acp", agentId: "x", match: { channel: "ademu", accountId: "z" } },
+    ];
+    const w = world({ ...ROSTER("main", "work", "iris", "ledger"), bindings: existing, agents: { ownership: "explicit", entries: { main: {}, work: {}, iris: {}, ledger: {} } } } as unknown as OpenClawConfig);
+    const done = await enroll(w, { agentId: "main" }, "Repro");
+    expect(done.details).toMatchObject({ ok: true, routing: { agentId: "main", accountId: "repro" } });
+    expect(bindingsOf(w)).toEqual([existing[0], existing[1], { agentId: "main", match: { channel: "ademu", accountId: "repro" } }, existing[2]]);
+  });
+
+  it("start is refused when the conversation carries no agent id: no device, no lease", async () => {
+    const w = world();
+    const r = await w.call({ action: "start", agentName: "Iris" }, NO_AXES);
+    expect(r.details).toMatchObject({ ok: false, state: "agent_unknown" });
+    expect(r.content[0]!.text).toContain("Nothing was written");
+    expect(w.control.calls.some((c) => c.op === "create_device")).toBe(false);
+    expect(w.acquires).toHaveLength(0);
+    expect(w.registry.size).toBe(0);
+  });
+
+  it("start is refused when the agent id names no configured agent (never a default fallback)", async () => {
+    const w = world(ROSTER("iris", "ledger"));
+    const r = await w.call({ action: "start", agentName: "Iris" }, { agentId: "ghost" });
+    expect(r.details).toMatchObject({ ok: false, state: "agent_unknown" });
+    expect(w.acquires).toHaveLength(0);
+    // and the roster-less default "main" is only accepted because the host lists it as configured
+    const ok = await world().call({ action: "start", agentName: "Iris" });
+    expect(ok.details.ok).toBe(true);
+  });
+
+  it("start is refused when the account id is already routed to another agent", async () => {
+    const w = world({ bindings: [{ agentId: "ledger", match: { channel: "ademu", accountId: "iris" } }], ...ROSTER("main", "ledger") } as unknown as OpenClawConfig);
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(r.details).toMatchObject({ ok: false, state: "routing_conflict", accountId: "iris" });
+    expect(r.content[0]!.text).toContain("openclaw agents unbind --agent ledger --bind ademu:iris");
+    expect(w.acquires).toHaveLength(0);
+    // the same agent already holding the route is not a conflict
+    const same = await w.call({ action: "start", agentName: "Iris" }, { agentId: "ledger" });
+    expect(same.details.ok).toBe(true);
+  });
+
+  it("confirm re-checks against the CURRENT draft: an agent removed mid-ceremony → refused, nothing written, lease disposed", async () => {
+    const w = world(ROSTER("iris", "main"));
+    const start = await w.call({ action: "start", agentName: "Iris" }, { agentId: "iris" });
+    const leaseToken = start.details.leaseToken as string;
+    w.deps.writeConfig = async (mutate) => {
+      mutate(ROSTER("main")); // the host's draft no longer lists `iris`
+    };
+    w.control.emit({ words: WORDS });
+    await tick();
+    const confirmP = w.call({ action: "confirm", leaseToken }, { agentId: "iris" });
+    await tick(5);
+    w.control.finish("enrolled");
+    const r = await confirmP;
+    expect(r.details).toMatchObject({ ok: false, state: "agent_unknown" });
+    expect(w.writes).toHaveLength(0);
+    expect(w.registry.size).toBe(0);
+    expect(w.released()).toBe(1);
+  });
+
+  it("confirm re-checks the route: a binding claimed by another agent mid-ceremony → refused, nothing written", async () => {
+    const w = world(ROSTER("iris", "ledger"));
+    const start = await w.call({ action: "start", agentName: "Iris" }, { agentId: "iris" });
+    const leaseToken = start.details.leaseToken as string;
+    w.deps.writeConfig = async (mutate) => {
+      mutate({ ...ROSTER("iris", "ledger"), bindings: [{ agentId: "ledger", match: { channel: "ademu", accountId: "iris" } }] } as unknown as OpenClawConfig);
+    };
+    w.control.emit({ words: WORDS });
+    await tick();
+    const confirmP = w.call({ action: "confirm", leaseToken }, { agentId: "iris" });
+    await tick(5);
+    w.control.finish("enrolled");
+    const r = await confirmP;
+    expect(r.details).toMatchObject({ ok: false, state: "routing_conflict", accountId: "iris" });
+    expect(w.writes).toHaveLength(0);
+    expect(w.released()).toBe(1);
+  });
+});
+
 describe("ademu_enroll: registration", () => {
   it("registers the tool by name and a service that disposes leases on stop", async () => {
     const w = world();
@@ -249,7 +288,7 @@ describe("ademu_enroll: registration", () => {
     const registry = registerEnrollTool(api, w.deps);
     expect(registered).toEqual([{ name: TOOL_NAME }]);
     expect(services[0]?.id).toBe("ademu-enroll-leases");
-    const t = createEnrollTool({ senderIsOwner: true, sessionKey: "s" } as OpenClawPluginToolContext, w.deps, registry)!;
+    const t = createEnrollTool({ senderIsOwner: true, sessionKey: "s", agentId: "main" } as OpenClawPluginToolContext, w.deps, registry)!;
     await t.execute("c", { action: "start" }, new AbortController().signal);
     expect(registry.size).toBe(1);
     await services[0]!.stop!({});
@@ -259,6 +298,8 @@ describe("ademu_enroll: registration", () => {
 });
 
 const NO_AXES = { requesterSenderId: undefined, agentId: undefined } as unknown as Partial<OpenClawPluginToolContext>;
+const NO_SENDER = { requesterSenderId: undefined } as unknown as Partial<OpenClawPluginToolContext>;
+const ROSTER = (...ids: string[]) => ({ agents: { entries: Object.fromEntries(ids.map((id) => [id, {}])) } }) as unknown as OpenClawConfig;
 
 describe("ademu_enroll: Codex branch-review folds", () => {
   it("#12 the agentId axis is enforced: same session, sender and token from another agent is refused", async () => {
@@ -412,20 +453,20 @@ describe("ademu_enroll: Codex branch-review folds", () => {
   });
 
   it("R2#8 axes compare exactly (absent → present is a mismatch) and only the same creator tuple may supersede", async () => {
-    const w = world();
-    const start = await w.call({ action: "start", agentName: "Iris" }, NO_AXES);
+    const w = world(ROSTER("main", "other"));
+    const start = await w.call({ action: "start", agentName: "Iris" }, NO_SENDER);
     const leaseToken = start.details.leaseToken as string;
-    const withSender = await w.call({ action: "status", leaseToken }); // default ctx has a sender + agent
+    const withSender = await w.call({ action: "status", leaseToken }); // default ctx has a sender
     expect(withSender.details.ok).toBe(false);
-    const bare = await w.call({ action: "status", leaseToken }, NO_AXES);
+    const bare = await w.call({ action: "status", leaseToken }, NO_SENDER);
     expect(bare.details.ok).toBe(true);
     // another agent on the same session key cannot supersede (dispose) it
-    const other = await w.call({ action: "start", agentName: "Bob" });
+    const other = await w.call({ action: "start", agentName: "Bob" }, { agentId: "other" });
     expect(other.details).toMatchObject({ ok: false, state: "busy" });
     expect(w.registry.size).toBe(1);
     expect(w.released()).toBe(0);
     // the same creator may
-    const again = await w.call({ action: "start", agentName: "Bob" }, NO_AXES);
+    const again = await w.call({ action: "start", agentName: "Bob" }, NO_SENDER);
     expect(again.details.ok).toBe(true);
     expect(w.released()).toBe(1);
   });

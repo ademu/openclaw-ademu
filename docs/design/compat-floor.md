@@ -17,8 +17,12 @@ v2026.8.{1,2}, v2026.9.1. The OpenClaw `extended-stable` line is 2026.6.34 (2026
 ## Derived floor: **2026.8.1**
 
 The floor exceeds `extended-stable` (2026.6.34). Extended-stable users can install once that line
-passes 2026.8.1 (the next extended-stable cut of a month ≥ 2026.8 carries it). Fifteen items pin it
+passes 2026.8.1 (the next extended-stable cut of a month ≥ 2026.8 carries it). Sixteen items pin it
 (bold below); dropping any one does not lower it.
+
+Not a plugin-sdk import, but pinned against the installed host all the same: `src/bindings.ts` mirrors
+the private `applyAgentBindings` (routing bindings written by the chat door);
+`test/gates/binding-shape.test.ts` fails when the host's binding shape or match-key semantics change.
 
 ## Subpath files
 
@@ -39,6 +43,7 @@ passes 2026.8.1 (the next extended-stable cut of a month ≥ 2026.8 carries it).
 | `channel-policy` | f2bd76cd1a4 (2026-03-16) | v2026.3.22 |
 | `channel-secret-basic-runtime` | dfb6c9c9207 (2026-04-07) | v2026.4.7 |
 | `channel-setup` | 07d9f725b61 (2026-03-18) | v2026.3.22 |
+| `config-contracts` | 827b0de0ce7 (2026-05-10) | v2026.5.12 |
 | `core` | a4850b1b8f2 (2026-03-04) | v2026.3.7 |
 | `gateway-runtime` | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
 | `media-runtime` (QR helpers; recorded exception) | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
@@ -57,6 +62,7 @@ passes 2026.8.1 (the next extended-stable cut of a month ≥ 2026.8 carries it).
 | `account-id` → `normalizeOptionalAccountId` | value | 41537e93039 (2026-03-02) | v2026.3.1 |
 | `account-resolution` → `OpenClawConfig` | type | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
 | `account-resolution` → `resolveAccountEntry` | value | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
+| `agent-scope-runtime` → `listAgentIds` | value | da4a656cdba (2026-08-08) | **v2026.8.1** |
 | `agent-scope-runtime` → `resolveAgentConfig` | value | 5ebfbbf8d78 (2026-08-17) | **v2026.8.1** |
 | `agent-scope-runtime` → `tryResolveDefaultAgentId` | value | 5ebfbbf8d78 (2026-08-17) | **v2026.8.1** |
 | `channel-actions` → `jsonResult` | value | f2d7a825b12 (2026-04-03) | v2026.4.5 |
@@ -103,10 +109,12 @@ passes 2026.8.1 (the next extended-stable cut of a month ≥ 2026.8 carries it).
 | `channel-policy` → `resolveChannelGroupRequireMention` | value | f2bd76cd1a4 (2026-03-16) | v2026.3.22 |
 | `channel-secret-basic-runtime` → `createSimpleChannelSecretContract` | value | 10e60fa0ce6 (2026-08-07) | **v2026.8.1** |
 | `channel-setup` → `ChannelSetupWizard` | type | 07d9f725b61 (2026-03-18) | v2026.3.22 |
+| `config-contracts` → `resolveGatewayPublicOrigin` | value | 508dd471b0c (2026-08-12) | **v2026.8.1** |
 | `core` → `ChannelMessagingAdapter` | type | 826c592debf (2026-03-18) | v2026.3.22 |
 | `core` → `OpenClawPluginApi` | type | a4850b1b8f2 (2026-03-04) | v2026.3.7 |
 | `core` → `OpenClawPluginToolContext` | type | aa78a0c00e5 (2026-03-20) | v2026.3.22 |
 | `core` → `PluginRuntime` | type | a4850b1b8f2 (2026-03-04) | v2026.3.7 |
+| `core` → `resolveGatewayPort` | value | ac7ca520908 (2026-03-12) | v2026.3.24 |
 | `gateway-runtime` → `channelBlockedPatch` | value | f9d9d1225a1 (2026-08-03) | **v2026.8.1** |
 | `gateway-runtime` → `channelReadyPatch` | value | f9d9d1225a1 (2026-08-03) | **v2026.8.1** |
 | `media-runtime` → `renderQrPngDataUrl` | value | dde90a345a6 (2026-07-16) | **v2026.8.1** |

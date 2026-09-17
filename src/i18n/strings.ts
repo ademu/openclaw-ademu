@@ -84,12 +84,53 @@ export const strings = {
     toolLeaseMismatch: "That enrollment belongs to another conversation or its lease token is missing.",
     toolNoActive: "No enrollment is in progress. Use action \"start\" first.",
     toolAccountExists: (id: string, ids: string[]) => `An Ademú account named "${id}" already exists (${ids.join(", ")}). Choose another accountId.`,
-    toolStart: (payload: string, dataUrl: string) =>
-      `Scan this with the Ademú app (phone → profile → Agents → Add):\n\n![ademu-enroll](${dataUrl})\n\nOr open on the phone: ${payload}\n\nThen call ademu_enroll with action \"wait\".`,
+    toolStart: (payload: string, dataUrl: string, pageUrl: string, opened: boolean) =>
+      `Scan this with the Ademú app (phone → profile → Agents → Add):\n\n![ademu-enroll](${dataUrl})\n\nOr open on the phone: ${payload}\n\n${
+        opened
+          ? "The enrollment page has just OPENED in the user's browser on this machine — tell them to look for it."
+          : "If no QR is visible here, the user can open the enrollment page in a browser on the gateway machine."
+      } Paste this exact URL into your reply on its own line (it is a pointer to the page, not the enrollment link — never retype the QR contents):\n${pageUrl}\nThe page shows the QR, then the four safety words and a Yes button. If the user confirms there, action \"status\" reports done and no \"confirm\" call is needed.\n\nThen call ademu_enroll with action \"wait\".`,
+    // ----- the browser enrollment page (src/enrollment-page-html.ts) -----
+    pageTitle: "Enroll on Ademú",
+    pageLoading: "Connecting to the enrollment…",
+    pageScanHeading: "Scan with the Ademú app",
+    pageQrAlt: "Ademú enrollment QR code",
+    pageCannotScan: "Can't scan?",
+    pageCannotScanHint: "Open this exact link on the phone that runs the Ademú app:",
+    pageCopy: "Copy link",
+    pageCopied: "Copied",
+    pageWordsHeading: "Compare the safety words",
+    pageWordsHint: "Your phone has scanned the code and shows four safety words. This side derived:",
+    pageYes: "Yes — the words match",
+    pageConfirming: "Confirming…",
+    pageConfirmedWait: "Confirmed — finishing enrollment…",
+    pageMismatchWarn: "If they do NOT match, do not confirm: close this page and tell the agent the words differ.",
+    pageConfirmingHeading: "Finishing enrollment…",
+    pageConfirmingHint: "The words were confirmed; the device token is being issued and the account written.",
+    pageEnrolledHeading: "Enrolled",
+    pageEnrolled: "The agent is on Ademú now. Message it from your phone. You can close this page.",
+    pageFailedHeading: "Enrollment did not finish",
+    pageFailedReason: (state: string) => `The enrollment ended (${state}). Ask the agent to connect to Ademú again.`,
+    pageTokenExists: "A token for this account already exists on the device. Finish in chat: the agent will ask whether to replace it.",
+    pageCancelled: "This enrollment was cancelled or has expired. Nothing was written. Ask the agent to connect to Ademú again.",
+    pageNotReady: "The phone has not scanned the code yet.",
+    pageExpiredHeading: "This page is no longer live",
+    pageExpired: "Ask the agent to connect to Ademú again.",
+    pageNoScript: "This page needs JavaScript. Ask the agent for the four safety words in chat instead.",
+    pageUnreachable: "Cannot reach the gateway — retrying…",
+    pageConfirmFailed: "Confirmation failed — try again.",
     toolWaiting: "Still waiting for the phone to scan. Call \"wait\" again in a moment.",
     toolWords: (w: readonly [string, string, string, string]) =>
       `The phone now shows four safety words. Read them to the user and ask whether they match:\n\n${w.join("   ")}\n\nIf they match, call ademu_enroll with action \"confirm\". If they do not, call \"cancel\".`,
     toolConfirmed: (name: string) => `Enrolled — ${name} is on Ademú now. The user can message you from their phone.`,
+    toolAlreadyDone: (name: string) =>
+      `This enrollment already finished — ${name} is on Ademú now (the user confirmed the words on the enrollment page). No further action is needed; the user can message you from their phone.`,
+    toolRouted: (agentId: string, accountId: string) =>
+      `Messages to this Ademú account are routed to OpenClaw agent "${agentId}" (binding ademu:${accountId}).`,
+    toolAgentUnknown:
+      "Enrollment refused: this conversation is not attributed to a configured OpenClaw agent, so the new account could not be routed to one. Enroll from that agent's own chat, or run `openclaw channels add --channel ademu` in a terminal. Nothing was written.",
+    toolRoutingConflict: (accountId: string, existingAgentId: string) =>
+      `Enrollment refused: ademu:${accountId} is already routed to OpenClaw agent "${existingAgentId}" and was left as is. Start again with another accountId, or first run: openclaw agents unbind --agent ${existingAgentId} --bind ademu:${accountId}. Nothing was written.`,
     toolLabelExists: "A token for this account already exists on the device. Ask the user whether to replace it (the old one stops working); if yes, call action \"replace_token\".",
     toolReplaceNotAllowed: "\"replace_token\" is only valid right after \"confirm\" reported that a token for this account already exists and the user agreed to replace it.",
     toolUnavailable: (remedy: string) => `Enrollment cannot start right now. ${remedy}`,

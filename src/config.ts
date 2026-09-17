@@ -21,6 +21,7 @@ import {
 } from "openclaw/plugin-sdk/secret-input";
 import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
 import { z } from "zod";
+import { pruneRouteBindings } from "./bindings.js";
 
 export const CHANNEL_ID = "ademu";
 
@@ -59,6 +60,16 @@ export const AdemuAccountSchema = z
   })
   .strict();
 
+/** The browser enrollment page (served on the gateway; see `src/enrollment-page.ts`). */
+const EnrollmentPageSchema = z
+  .object({
+    /** Open the page in the gateway host's browser when its URL is loopback (default true). */
+    autoOpen: z.boolean().optional(),
+    /** Browser-facing origin when the gateway is reached remotely (enables non-loopback access). */
+    baseUrl: z.string().url().optional(),
+  })
+  .strict();
+
 /** Root: inheritance base + channel-wide settings. No token/identity at the root. */
 const AdemuBaseSchema = z
   .object({
@@ -66,6 +77,7 @@ const AdemuBaseSchema = z
     dataDir: z.string().optional(),
     socketPath: z.string().optional(),
     server: ServerSchema.optional(),
+    enrollmentPage: EnrollmentPageSchema.optional(),
     groups: z.record(z.string(), buildGroupEntrySchema()).optional(),
   })
   .strict();
@@ -97,6 +109,8 @@ export const ADEMU_UI_HINTS = {
   socketPath: { label: "Device host control socket", advanced: true },
   "server.restBaseUrl": { label: "Ademú REST base URL", advanced: true },
   "server.wsUrl": { label: "Ademú WebSocket URL", advanced: true },
+  "enrollmentPage.autoOpen": { label: "Open the enrollment page in the browser (gateway machine only)", advanced: true },
+  "enrollmentPage.baseUrl": { label: "Enrollment page base URL (browser-facing origin, enables remote access)", advanced: true },
 } as const;
 
 /** The code-level channel config schema (`ChannelPlugin.configSchema`). */
@@ -207,8 +221,15 @@ function getChannelConfig(cfg: OpenClawConfig): AdemuChannelConfig | undefined {
 
 const helpers = createAccountListHelpers<Record<string, unknown> & AdemuChannelConfig>(CHANNEL_ID, {
   fallbackAccountIdWhenEmpty: false,
-  omitKeys: ["defaultAccount", "groups", "server"],
+  omitKeys: ["defaultAccount", "groups", "server", "enrollmentPage"],
 });
+
+/** The enrollment page settings with defaults applied (`autoOpen` defaults to true). */
+export function resolveEnrollmentPage(cfg: OpenClawConfig): { autoOpen: boolean; baseUrl: string | undefined } {
+  const page = getChannelConfig(cfg)?.enrollmentPage;
+  const baseUrl = page?.baseUrl?.trim();
+  return { autoOpen: page?.autoOpen !== false, baseUrl: baseUrl ? baseUrl : undefined };
+}
 
 export const listAdemuAccountIds = helpers.listAccountIds;
 export const resolveDefaultAdemuAccountId = helpers.resolveDefaultAccountId;
@@ -407,6 +428,8 @@ export const ademuConfigAdapter: AdemuConfigAdapter = {
     const id = normalizeAccountId(accountId);
     const owner = inspectAdemuAccount(cfg, id).ownerUserId;
     const next = baseAdapter.deleteAccount!({ cfg, accountId: id });
-    return pruneOwnerAllowFrom(next, owner, listAdemuAccountIds(next));
+    // Rider B, extended: the account's own route binding goes with it (wildcard/peer-scoped rows and
+    // other channels stay). Logout keeps the account block and therefore keeps the binding.
+    return pruneRouteBindings(pruneOwnerAllowFrom(next, owner, listAdemuAccountIds(next)), { channel: CHANNEL_ID, accountId: id });
   },
 };

@@ -13,18 +13,34 @@ The `ademu_enroll` tool exists only when the person asking is an OpenClaw owner;
 your tool list, say that enrollment must be started by the owner (from the web UI or with
 `openclaw channels add --channel ademu` in a terminal).
 
+
+The user's only actions are: asking you to connect, scanning the QR with the Ademú app, and saying
+whether the four words match. Never ask them to run a command, install anything, copy a link by hand,
+open a file, or change a setting to get enrolled; if the tool cannot show the QR where the user is,
+say so and stop rather than inventing extra steps.
 ## The four steps
 
 1. **start** — call `ademu_enroll` with `action: "start"` (optional `agentName`, `accountId`).
    Show the returned QR image and the `ademu://` link to the user. Tell them: open Ademú on the
    phone → profile → Agents → Add → scan. Keep the returned `leaseToken`; every later call needs it.
+   The result also carries the **enrollment page** URL (`pageUrl`): paste it into your reply on its
+   own line, exactly as returned. On the gateway machine the page has usually just opened in the
+   user's browser (the result says so) — it shows the QR, then the words, then a Yes button, so a
+   user on a terminal client needs nothing else from you. Never retype the QR contents.
+   `start` can refuse before anything is created: when this conversation is not attributed to a
+   configured OpenClaw agent (enroll from that agent's own chat, or use the terminal wizard), or when
+   the account id is already routed to another agent (pick another `accountId`). Read the tool's
+   text to the user as is; nothing was written.
 2. **wait** — call `action: "wait"` (with the `leaseToken`). When the phone has scanned, the tool
    returns four safety words. Read them to the user exactly as returned and ask: "Do these match
    what your phone shows?" Never invent, reorder, or "correct" words.
 3. **confirm** — only after the user clearly says the words match, call `action: "confirm"`.
    The tool confirms with the daemon's own words (you cannot supply them), waits for the phone
-   to finish, issues the device token, and writes the account into the OpenClaw config. If the
+   to finish, issues the device token, and writes the account into the OpenClaw config together
+   with a routing binding, so messages to the new account reach you (this agent). If the
    user says the words do NOT match, call `action: "cancel"` and explain that nothing was enrolled.
+   If the user confirmed on the enrollment page instead, `wait` and `status` report the enrollment as
+   done — do not call `confirm` then; just tell the user.
 4. **done** — tell the user the agent is on Ademú now and they can message it from the phone.
    The channel starts automatically; if not, `openclaw gateway restart` picks it up.
 

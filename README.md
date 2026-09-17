@@ -35,6 +35,14 @@ does not try to install anything itself; you can point it at a running `adc` dae
 
 ## Enroll an agent
 
+**The requirement both doors must meet (non-negotiable):** to enroll an OpenClaw agent on Ademú the
+user does exactly three things — ask the agent to connect to Ademú (or run the wizard command), scan
+the QR shown by the agent device with the Ademú app, and confirm that the four safety words match.
+Nothing else: no commands to type, no links to copy, no files to open, no extra steps. Where a
+surface cannot show the QR itself (OpenClaw's TUI renders no images), the plugin puts the QR and the
+words in front of the user on its own: the **enrollment page**, served by the plugin on the gateway and
+opened in the browser (see door two).
+
 ### Door one — the wizard (terminal)
 
 ```sh
@@ -59,6 +67,17 @@ The agent uses the `ademu_enroll` tool: it shows the QR, waits for your scan, re
 words, and — only after you say they match — finishes enrollment and writes the config. The tool is
 invisible to non-owners.
 
+On a terminal client (OpenClaw's TUI renders no images) the tool also opens the **enrollment page**
+in the browser of the machine that runs the gateway: a page served by the plugin on the gateway itself
+(`/plugins/ademu/enroll/<token>`) that shows the QR, then the four safety words, then a **Yes — the
+words match** button. Clicking it finishes the enrollment exactly as saying yes in chat would (the
+daemon's words, never typed by anyone), so scan and click are all a TUI user does. The page is
+reachable from that machine only; the agent also pastes its URL. To use it from another device's
+browser, set `channels.ademu.enrollmentPage.baseUrl` to the gateway's browser-facing origin (put the
+gateway behind TLS first) or configure `gateway.publicOrigin`; the page URL is then a bearer link —
+the four-word comparison against your phone remains the real check. `channels.ademu.enrollmentPage.autoOpen: false`
+keeps the browser closed.
+
 ### Reconnecting an already-enrolled agent
 
 If you reinstalled the plugin, rotated the token, or lost the config, the device is still enrolled on
@@ -77,8 +96,13 @@ Ademú; this is it.)
   live under `channels.ademu.groups.<conversationId>` (`requireMention`, `toolsBySender`, …).
 - **Sending proactively:** the `message` tool with `channel: "ademu"` and a conversation id
   (`ademu:<uuid>` or the bare UUID). Reactions: `action: "react"`.
-- **Multiple agents:** one account per agent under `channels.ademu.accounts`; route each to an
-  OpenClaw agent with the usual `bindings` (`channel: "ademu"`, `accountId`).
+- **Multiple agents:** one account per agent under `channels.ademu.accounts`, each routed to an
+  OpenClaw agent by a `bindings` entry (`channel: "ademu"`, `accountId`). The wizard asks which agent
+  to route to; enrolling from chat routes the account to the agent you are talking to, and refuses
+  (writing nothing) when that conversation names no configured agent or the account id is already
+  routed to another agent. `openclaw channels remove` deletes the account's binding with the account.
+  Without a binding, a multi-agent install refuses the account's messages (`agents.ownership: "explicit"`)
+  or sends them to the default agent.
 
 ## Configuration
 
@@ -91,6 +115,9 @@ Ademú; this is it.)
       "dataDir": "~/.openclaw/ademu/adc",
       // Ademú servers (defaults = production)
       "server": { "restBaseUrl": "https://api.ademu.com", "wsUrl": "wss://gateway.ademu.com/v1/ws" },
+      // the browser enrollment page (door two): open it on the gateway machine automatically (default true);
+      // baseUrl = browser-facing origin when the gateway is remote (also allows non-loopback access)
+      "enrollmentPage": { "autoOpen": true, "baseUrl": "https://gw.example.com" },
       "accounts": {
         "iris": {
           "agentName": "Iris",
