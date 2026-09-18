@@ -34,6 +34,7 @@ export function renderEnrollmentPageHtml(opts: { cspNonce: string; expired?: boo
   pre.link { white-space: pre-wrap; word-break: break-all; user-select: all; -webkit-user-select: all; background: color-mix(in srgb, CanvasText 8%, Canvas); padding: 0.75rem; border-radius: 0.5rem; font-size: 0.8rem; }
   button { font: inherit; padding: 0.6rem 1.2rem; border-radius: 0.5rem; border: 1px solid color-mix(in srgb, CanvasText 30%, Canvas); background: color-mix(in srgb, CanvasText 6%, Canvas); color: inherit; cursor: pointer; }
   button.primary { background: #2563eb; border-color: #2563eb; color: #fff; font-weight: 600; width: 100%; padding: 0.9rem; font-size: 1rem; }
+  button.secondary { width: 100%; padding: 0.8rem; font-size: 0.95rem; margin-top: 0.6rem; color: #b45309; border-color: #b45309; }
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { opacity: 0.75; font-size: 0.9rem; }
   .warn { color: #b45309; font-size: 0.9rem; }
@@ -65,12 +66,15 @@ export function renderEnrollmentPageHtml(opts: { cspNonce: string; expired?: boo
     <p>${esc(p.pageWordsHint)}</p>
     <p id="words" class="words"></p>
     <button id="confirm" class="primary" type="button">${esc(p.pageYes)}</button>
+    <button id="cancel" class="secondary" type="button">${esc(p.pageNo)}</button>
     <p class="warn">${esc(p.pageMismatchWarn)}</p>
   </div>
 
   <div id="confirming" class="screen"><h1>${esc(p.pageConfirmingHeading)}</h1><p class="muted">${esc(p.pageConfirmingHint)}</p></div>
 
   <div id="enrolled" class="screen"><h1>${esc(p.pageEnrolledHeading)}</h1><p>${esc(p.pageEnrolled)}</p></div>
+
+  <div id="cancelled" class="screen"><h1>${esc(p.pageCancelledHeading)}</h1><p>${esc(p.pageCancelledBody)}</p></div>
 
   <div id="failed" class="screen"><h1>${esc(p.pageFailedHeading)}</h1><p id="failed-message"></p></div>
 
@@ -84,11 +88,12 @@ export function renderEnrollmentPageHtml(opts: { cspNonce: string; expired?: boo
   'use strict';
   if (${opts.expired ? "true" : "false"}) { return; }
   var base = location.pathname.replace(/\\/+$/, '');
-  var screens = ['loading', 'awaiting-scan', 'awaiting-yes', 'confirming', 'enrolled', 'failed', 'expired'];
+  var screens = ['loading', 'awaiting-scan', 'awaiting-yes', 'confirming', 'enrolled', 'cancelled', 'failed', 'expired'];
   var pollMs = 2000, backoffMs = 2000, stopped = false, confirming = false;
   var copy = {
     yes: ${JSON.stringify(p.pageYes)}, confirming: ${JSON.stringify(p.pageConfirming)}, confirmedWait: ${JSON.stringify(p.pageConfirmedWait)},
-    copied: ${JSON.stringify(p.pageCopied)}, unreachable: ${JSON.stringify(p.pageUnreachable)}, confirmFailed: ${JSON.stringify(p.pageConfirmFailed)}
+    copied: ${JSON.stringify(p.pageCopied)}, unreachable: ${JSON.stringify(p.pageUnreachable)}, confirmFailed: ${JSON.stringify(p.pageConfirmFailed)},
+    no: ${JSON.stringify(p.pageNo)}, cancelling: ${JSON.stringify(p.pageCancelling)}
   };
 
   function el(id) { return document.getElementById(id); }
@@ -110,6 +115,8 @@ export function renderEnrollmentPageHtml(opts: { cspNonce: string; expired?: boo
       show('confirming');
     } else if (state.phase === 'enrolled') {
       stop('enrolled');
+    } else if (state.phase === 'cancelled') {
+      stop('cancelled');
     } else if (state.phase === 'failed') {
       el('failed-message').textContent = state.message || '';
       stop('failed');
@@ -150,11 +157,38 @@ export function renderEnrollmentPageHtml(opts: { cspNonce: string; expired?: boo
     el('copy').textContent = copy.copied;
   });
 
+  el('cancel').addEventListener('click', function () {
+    if (confirming) { return; }
+    confirming = true;
+    var no = el('cancel');
+    no.disabled = true;
+    el('confirm').disabled = true;
+    no.textContent = copy.cancelling;
+    fetch(base + '/cancel', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      .then(function (res) { return res.json(); })
+      .then(function (out) {
+        if (out && out.ok) { stop('cancelled'); return; }
+        confirming = false;
+        no.disabled = false;
+        el('confirm').disabled = false;
+        no.textContent = copy.no;
+        banner((out && out.message) || copy.confirmFailed);
+      })
+      .catch(function () {
+        confirming = false;
+        no.disabled = false;
+        el('confirm').disabled = false;
+        no.textContent = copy.no;
+        banner(copy.unreachable);
+      });
+  });
+
   el('confirm').addEventListener('click', function () {
     if (confirming) { return; }
     confirming = true;
     var btn = el('confirm');
     btn.disabled = true;
+    el('cancel').disabled = true;
     btn.textContent = copy.confirming;
     // Polling continues in parallel: whichever of this POST or the next poll reports the outcome
     // first flips the terminal screen.
@@ -167,6 +201,7 @@ export function renderEnrollmentPageHtml(opts: { cspNonce: string; expired?: boo
         } else {
           confirming = false;
           btn.disabled = false;
+          el('cancel').disabled = false;
           btn.textContent = copy.yes;
           banner((out && out.message) || copy.confirmFailed);
         }
@@ -174,6 +209,7 @@ export function renderEnrollmentPageHtml(opts: { cspNonce: string; expired?: boo
       .catch(function () {
         confirming = false;
         btn.disabled = false;
+        el('cancel').disabled = false;
         btn.textContent = copy.yes;
         banner(copy.unreachable);
       });

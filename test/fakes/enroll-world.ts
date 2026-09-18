@@ -5,11 +5,14 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import type { EnrollmentLeaseDeps } from "../../src/ceremony.js";
 import { DaemonAbortedError, type DaemonManager, type Lease } from "../../src/monitor/daemon.js";
+import type { EnrollmentChannel } from "../../src/enrollment-channel.js";
 import { createEnrollTool, EnrollmentRegistry, type EnrollToolDeps } from "../../src/tools/enroll.js";
 import { FakeAdcClient, OWNER } from "./adc.js";
 import { FakeControl, NEW_AGENT, NEW_DEVICE } from "./control.js";
 
 export const tick = (ms = 3) => new Promise((r) => setTimeout(r, ms));
+/** Platform id the fake channel assigns to the pushed words message (what a quoted reply points at). */
+export const WORDS_MESSAGE_ID = "m-words-1";
 
 export function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?: unknown, acquireGate?: Promise<void>) {
   const control = new FakeControl();
@@ -57,6 +60,23 @@ export function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?:
   const client = new FakeAdcClient({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER });
   const writes: OpenClawConfig[] = [];
   const opens: string[] = [];
+  /** Every host-side push the ceremony made into the conversation (media-channel lane). */
+  const pushes: Array<Record<string, unknown> & { kind: "qr" | "words" | "text" }> = [];
+  const pushOk = { value: true };
+  const channel: EnrollmentChannel = {
+    pushQr: async (p) => {
+      pushes.push({ kind: "qr", route: p.route, agentName: p.agentName, dataUrl: p.dataUrl, link: p.link, pageUrl: p.pageUrl });
+      return pushOk.value;
+    },
+    pushWords: async (p) => {
+      pushes.push({ kind: "words", route: p.route, words: p.words, nonce: p.nonce, buttons: p.buttons, reply: p.reply, pageUrl: p.pageUrl });
+      return { ok: pushOk.value, messageId: pushOk.value ? WORDS_MESSAGE_ID : undefined };
+    },
+    pushText: async (p) => {
+      pushes.push({ kind: "text", route: p.route, text: p.text });
+      return pushOk.value;
+    },
+  };
   let current = cfg;
   const deps: EnrollToolDeps = {
     lease,
@@ -70,6 +90,7 @@ export function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?:
       opens.push(url);
       return true;
     },
+    channel,
   };
   const registry = new EnrollmentRegistry();
   const ctx = (over: Partial<OpenClawPluginToolContext> = {}): OpenClawPluginToolContext => ({
@@ -84,5 +105,5 @@ export function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?:
   const signal = new AbortController().signal;
   const call = async (args: Record<string, unknown>, over: Partial<OpenClawPluginToolContext> = {}, sig: AbortSignal | undefined = signal) =>
     tool(over).execute("call-1", args, sig);
-  return { control, deps, registry, tool, call, writes, opens, acquires, promotions, released: () => released, timers, current: () => current };
+  return { control, deps, registry, tool, call, writes, opens, pushes, pushOk, acquires, promotions, released: () => released, timers, current: () => current };
 }

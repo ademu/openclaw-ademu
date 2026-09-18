@@ -29,6 +29,8 @@ function fakeApi(mode: string, stateDir: string) {
       registerService: (s: { id: string }) => calls.push(["registerService", s.id]),
       registerHttpRoute: (r: { path: string; auth: string; match?: string; replaceExisting?: boolean }) =>
         calls.push(["registerHttpRoute", { path: r.path, auth: r.auth, match: r.match, replaceExisting: r.replaceExisting }]),
+      registerInteractiveHandler: (r: { channel: string; namespace: string }) => calls.push(["registerInteractiveHandler", `${r.channel}:${r.namespace}`]),
+      on: (name: string, _h: unknown, opts: unknown) => calls.push(["on", { name, opts }]),
     } as never,
   };
 }
@@ -68,6 +70,10 @@ describe("entries", () => {
       expect(calls.filter((c) => c[0] === "registerHttpRoute").map((c) => c[1])).toEqual([
         { path: "/plugins/ademu", auth: "plugin", match: "prefix", replaceExisting: true },
       ]);
+      // Yes/No button clicks are routed to the plugin on exactly the channels OpenClaw dispatches them for.
+      expect(calls.filter((c) => c[0] === "registerInteractiveHandler").map((c) => c[1])).toEqual(["telegram:ademu", "slack:ademu", "discord:ademu"]);
+      // The quoted-reply decision hook registers in both passes (inert in tool-discovery; visible to `plugins inspect --runtime`).
+      expect(calls.filter((c) => c[0] === "on").map((c) => c[1])).toEqual([{ name: "before_dispatch", opts: { priority: 100 } }]);
       if (mode === "full") expect(calls.some((c) => c[0] === "registerChannel" && c[1] === "ademu")).toBe(true);
     }
     // No SQLite database and no daemon dir were created by registering.

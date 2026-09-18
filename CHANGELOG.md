@@ -6,16 +6,36 @@ Each release pins the exact `@ademu/adc-bin` (Ademú device daemon) version it w
 
 ## [Unreleased]
 
+### Changed
+
+- **The model never confirms or cancels an enrollment.** `ademu_enroll` now has exactly two actions,
+  `start` and `status`. Removed: `wait` (the safety words never enter the model's context), `confirm`,
+  `replace_token`, `cancel`, and the lease token the model had to carry (follow-up calls are bound by
+  conversation, sender and agent). The human's yes / no come from the enrollment page or from buttons
+  in the chat; a duplicate token label on the freshly created device is replaced silently (it can only be
+  this ceremony's own earlier attempt).
+
 ### Added
 
-- The **enrollment page**: `ademu_enroll` now serves a browser page on the gateway itself
-  (`/plugins/ademu/enroll/<token>`) that shows the QR, then the four safety words, then a "Yes — the
-  words match" button that finishes the enrollment through the tool's own confirm path. On the gateway
-  machine the tool opens it in the browser automatically when its URL is loopback, so a TUI user (no
-  image rendering there) still only asks, scans, and confirms. Settings: `channels.ademu.enrollmentPage.autoOpen`
-  (default true) and `channels.ademu.enrollmentPage.baseUrl` (browser-facing origin for remote gateways;
-  also enables non-loopback access, otherwise the route answers 404 off-host). A confirm made on the
-  page is reported to the chat as done.
+- The **enrollment page**: a browser page served on the gateway itself (`/plugins/ademu/enroll/<token>`)
+  that shows the QR, then the four safety words with **Yes — the words match** and **No — they differ**.
+  On the gateway machine the tool opens it in the browser automatically when its URL is loopback, so a
+  TUI user (no image rendering there) still only asks, scans, and clicks. Settings:
+  `channels.ademu.enrollmentPage.autoOpen` (default true) and `channels.ademu.enrollmentPage.baseUrl`
+  (browser-facing origin for remote gateways; also enables non-loopback access, otherwise the route
+  answers 404 off-host).
+- **Reply-to-confirm.** On WhatsApp, Signal, Matrix, Mattermost and Google Chat (and the button channels
+  too) the user decides by **replying to the plugin's words message** with `yes` or `no`. Only a quoted
+  reply from the person who started the enrollment counts; an unquoted "yes" stays an ordinary message for
+  the agent. Implemented as a typed `before_dispatch` hook that runs before the model. Channels whose
+  inbound quoted-message id is unverified (iMessage, IRC, Nextcloud Talk, Feishu, Buzz, Tlon, ClickClack,
+  MS Teams) and channels without quoting (LINE, SMS, Nostr, Synology Chat, Twitch, Zalo, A2A, Raft) keep
+  needing `enrollmentPage.baseUrl`; otherwise `start` refuses before creating a device.
+- **Channel buttons.** From Telegram, Slack or Discord the plugin itself sends the QR image + exact link
+  into the conversation, then the four words with Yes / No buttons, then the outcome; only the person
+  who started the enrollment can press them. On other channels the words carry the enrollment-page link
+  when `enrollmentPage.baseUrl` makes the page reachable; otherwise `start` refuses before creating a
+  device and names the terminal wizard.
 
 ### Fixed
 

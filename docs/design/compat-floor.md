@@ -109,11 +109,13 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `channel-policy` → `resolveChannelGroupRequireMention` | value | f2bd76cd1a4 (2026-03-16) | v2026.3.22 |
 | `channel-secret-basic-runtime` → `createSimpleChannelSecretContract` | value | 10e60fa0ce6 (2026-08-07) | **v2026.8.1** |
 | `channel-setup` → `ChannelSetupWizard` | type | 07d9f725b61 (2026-03-18) | v2026.3.22 |
+| `channel-outbound` → `sendDurableMessageBatch` | value | 1507a9701b8 (2026-05-27) | v2026.5.27 |
 | `config-contracts` → `resolveGatewayPublicOrigin` | value | 508dd471b0c (2026-08-12) | **v2026.8.1** |
 | `core` → `ChannelMessagingAdapter` | type | 826c592debf (2026-03-18) | v2026.3.22 |
 | `core` → `OpenClawPluginApi` | type | a4850b1b8f2 (2026-03-04) | v2026.3.7 |
 | `core` → `OpenClawPluginToolContext` | type | aa78a0c00e5 (2026-03-20) | v2026.3.22 |
 | `core` → `PluginRuntime` | type | a4850b1b8f2 (2026-03-04) | v2026.3.7 |
+| `core` → `ReplyPayload` | type | e4b5027c5e2 (2026-04-04) | v2026.4.5 |
 | `core` → `resolveGatewayPort` | value | ac7ca520908 (2026-03-12) | v2026.3.24 |
 | `gateway-runtime` → `channelBlockedPatch` | value | f9d9d1225a1 (2026-08-03) | **v2026.8.1** |
 | `gateway-runtime` → `channelReadyPatch` | value | f9d9d1225a1 (2026-08-03) | **v2026.8.1** |
@@ -140,6 +142,9 @@ dde90a345a6 (2026-07-16) → v2026.8.1; the barrel is what we import, so the bar
 | `api.runtime.channel.inbound.dispatch` | 8ee945b9070 (2026-08-09) | **v2026.8.1** |
 | `api.runtime.channel.routing.resolveAgentRoute` / `commands.*` | 1507a9701b8 (2026-05-27) | v2026.5.27 |
 | `api.runtime.config.mutateConfigFile` | 7f3f108521f (2026-04-27) | v2026.4.26 |
+| `api.on("before_dispatch", handler, { priority })` (typed hook; `api.on` + `priority` ebfeb7a6bf5 2026-01-18 v2026.1.20; hook name a10d587b415 2026-03-24) | a10d587b415 (2026-03-24) | v2026.3.24 |
+| `api.registerInteractiveHandler` | 90b6665dedd (2026-04-28) | v2026.4.27 |
+| `api.registerHttpRoute` (`replaceExisting` 7a7eee920a1 2026-03-02) | c96ffa7186a (2026-01-29) | v2026.3.2 |
 | `api.runtime.logging.getChildLogger` | a4850b1b8f2 (2026-03-04) | v2026.3.7 |
 | `ChannelPlugin.reload.configPrefixes` | bcbfb357bec (2026-01-14) | v2026.1.15 |
 | `ChannelMessageReceiveAckPolicy` (`after_agent_dispatch`) | 8bfabd6bb13 (2026-05-06) | v2026.5.12 |

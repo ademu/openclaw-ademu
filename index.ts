@@ -2,13 +2,15 @@
 // manifest config and adds the owner-gated `ademu_enroll` tool (T13).
 import { connect as connectSessionReal } from "@ademu/adc-client";
 import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
+import { sendDurableMessageBatch } from "openclaw/plugin-sdk/channel-outbound";
 import { ademuPlugin, realEnrollmentLeaseDeps } from "./src/channel.js";
 import { ademuConfigSchema, CHANNEL_ID } from "./src/config.js";
+import { createEnrollmentChannel, type SendBatch } from "./src/enrollment-channel.js";
 import { openInBrowser, registerEnrollmentPage } from "./src/enrollment-page.js";
 import { strings } from "./src/i18n/strings.js";
 import { createQr } from "./src/qr.js";
 import { applyPluginSettings, setAdemuRuntime } from "./src/runtime.js";
-import { confirmFromPage, type EnrollToolDeps, registerEnrollTool } from "./src/tools/enroll.js";
+import { cancelByHuman, confirmByHuman, type EnrollToolDeps, registerEnrollTool } from "./src/tools/enroll.js";
 
 export default defineChannelPluginEntry({
   id: CHANNEL_ID,
@@ -25,6 +27,8 @@ export default defineChannelPluginEntry({
       connectSession: connectSessionReal,
       qr,
       openUrl: openInBrowser,
+      // Host-side pushes into the user's conversation (media channels): the canonical outbound pipeline.
+      channel: createEnrollmentChannel(sendDurableMessageBatch as unknown as SendBatch),
       writeConfig: async (mutate) => {
         await api.runtime.config.mutateConfigFile({
           base: "runtime",
@@ -40,11 +44,12 @@ export default defineChannelPluginEntry({
       },
     };
     const registry = registerEnrollTool(api, deps);
-    // The browser enrollment page (QR → words → Yes) shares the tool's registry and confirm path.
+    // The browser enrollment page (QR → words → Yes / No) shares the tool's registry and decision paths.
     registerEnrollmentPage(api, {
       registry,
       qr,
-      confirm: (active) => confirmFromPage(active, deps, registry),
+      confirm: (active) => confirmByHuman(active, deps, registry),
+      cancel: (active) => cancelByHuman(active, registry),
       cfg: () => api.runtime.config.current() as never,
     });
   },

@@ -79,6 +79,58 @@ stops; it never downloads or installs anything on its own.
 exceeds OpenClaw's `extended-stable` line (2026.6.34); extended-stable users can install once that line
 passes 2026.8.1. The README states the minimum host plainly.
 
+**Reshaped the same day (owner decisions, 2026-09-17 later): the model never confirms or cancels.**
+The four-word check only defends the ceremony if a human — and only a human — presses yes; a model
+relaying consent can be talked into it, and the lease token it had to carry was lost the same day
+(OpenClaw shows the model only a tool result's `content`, never `details`). So `ademu_enroll` now has
+exactly two actions, **`start`** and **`status`**: no `wait` (the words never enter the model context),
+no `confirm`, no `replace_token`, no `cancel`, and no lease token (follow-ups are bound by session key +
+sender + agent, all read-only). The human's yes / no arrive through **`confirmByHuman` /
+`cancelByHuman`** from two surfaces: the enrollment page (Yes + a new **No — they differ** button,
+`/cancel`) and, on media channels, **Yes / No buttons pushed into the conversation** by the plugin
+(`src/enrollment-channel.ts`: `sendDurableMessageBatch` from the public `channel-outbound` subpath
+sends the QR image + exact link at `start`, the words + buttons when the daemon reports them, and one
+outcome line; `registerInteractiveHandler` under the `ademu` namespace receives the click — only from
+the requester, only when the host vouches for the sender — on **telegram, slack, discord**, the only
+channels that dispatch plugin interactive handlers in 2026.9.1). The lane is decided BEFORE any device
+exists: gateway surfaces → page; button channels → push with buttons; other channels → push with the
+page link only if the page is remotely reachable (`enrollmentPage.baseUrl` / `gateway.publicOrigin`),
+otherwise `start` refuses with the wizard and the setting as the way out, and nothing is created. A
+duplicate token label on the device this ceremony created can only be our own earlier attempt (labels
+are unique per device and `start` always creates a fresh device), so it is replaced without asking; the
+wizard's reconnect path keeps its explicit question. Known gaps, recorded in the README's table: a TUI
+over SSH or a remote web UI without `enrollmentPage.baseUrl` cannot reach the page; a phone-only user
+must tap the `ademu://` link, which Telegram does not linkify (an https universal link on the Ademú side
+is the follow-up); group chats on button channels show the words to the group. The Round 3–5 hardening
+notes below that mention a chat `cancel` / `confirm` describe the removed actions; their invariants
+(a NO landing during a YES wins, `committing` refuses the NO, duplicate decisions are serialized) now hold
+for the human surfaces and are pinned by `test/enroll-tool.test.ts` and `test/enrollment-channel.test.ts`.
+
+**Reply-to-confirm (owner decision, 2026-09-18).** On channels without plugin buttons the human's
+yes / no is a **quoted reply to the plugin's own words message** (`src/enrollment-reply.ts`). A bare
+"yes" in the conversation was rejected as a decision surface: for three minutes it would change the
+meaning of ordinary conversation. Mechanism: the typed hook `api.on("before_dispatch", handler,
+{ priority: 100 })` (the legacy `api.registerHook` never fires for typed hook names) runs on every
+inbound agent-bound message after admission and command handling and before the model; the first
+handler returning `{ handled: true }` wins and its `text` is delivered through the normal final-reply
+path. The handler claims a message only when ALL hold: the text is exactly one of `yes`/`y`/`no`/`n`
+(trailing `.`/`!` tolerated); it quotes the words message — matched by the platform id the batch sender
+returned when the words were pushed (`receipt.primaryPlatformMessageId`, else the first
+`results[].messageId`, stored as `wordsMessageId`), or, where a channel's inbound and outbound ids
+differ, by a quoted body carrying all four words of a live words-phase enrollment of the same session;
+the session matches; the sender is the starter (`requesterSenderId`). Anything else — including an
+unquoted yes — returns `handled: false` and flows to the model untouched; a quoted reply from someone
+else or after the outcome is answered ("only the person who started…" / the status), never acted on.
+`REPLY_CAPABLE_CHANNELS` (fail closed, verified against 2026.9.1 extension sources): whatsapp, signal,
+telegram, slack, discord, matrix, mattermost, googlechat. Unverified (quoted id seen on the outbound side
+only) and therefore refused at `start` unless the page is reachable: imessage, irc, nextcloud-talk,
+feishu, buzz, tlon, clickclack, msteams (quoted id for channel posts only). No quoting at all: line, sms,
+nostr, synology-chat, twitch, zalo, zalouser, a2a, raft. The refusal travels in the tool result and the
+model relays it (no host push for the refusal). The hook registers in every registration pass: the
+per-tool-execution tool-discovery registry is separate and inert, and registering there keeps
+`openclaw plugins inspect --runtime` (which loads plugins in that mode) reporting `hookCount: 1` —
+verified on the owner's OpenClaw 2026.8.2 host on 2026-09-18. Pinned by `test/enrollment-reply.test.ts`.
+
 ## 3. The ingress design — Option B (owner decision, 2026-09-04)
 
 **What we found.** OpenClaw ships a durable channel-ingress queue/monitor, but its factories
@@ -296,7 +348,7 @@ bait-tree self-test).
 SDK durable ingress queue (trust-gated; Tier C note); Control UI QR parity (`loginWithQrStart/Wait`
 has no words step); `auth.login`; `accountScopedRestart`; ambient `room_event` injection; a proper
 icon (the shipped one is generated); npm/ClawHub publishing (launch calendar); Windows; media, threads,
-edit/unsend; residual R10 (at-most-once for callback-free zero-output completions). Using the enrollment page from the wizard's hosted (Control UI) path; a `/ademu` re-display command.
+edit/unsend; residual R10 (at-most-once for callback-free zero-output completions). Using the enrollment page from the wizard's hosted (Control UI) path; an https universal link for the enrollment payload (Ademú side) so phone-only users on Telegram can tap it; nothing typed by the user beyond that.
 
 ## 11. Versioning
 

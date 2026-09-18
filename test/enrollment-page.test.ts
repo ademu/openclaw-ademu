@@ -14,7 +14,7 @@ import {
   registerEnrollmentPage,
   shouldAutoOpenEnrollmentPage,
 } from "../src/enrollment-page.js";
-import { confirmFromPage } from "../src/tools/enroll.js";
+import { cancelByHuman, confirmByHuman } from "../src/tools/enroll.js";
 import { NEW_DEVICE, QR, WORDS } from "./fakes/control.js";
 import { tick, world } from "./fakes/enroll-world.js";
 
@@ -32,7 +32,8 @@ async function serve(w: World, cfg: OpenClawConfig = {} as OpenClawConfig, over:
   registerEnrollmentPage(api as never, {
     registry: w.registry,
     qr: w.deps.qr,
-    confirm: (active) => confirmFromPage(active, w.deps, w.registry),
+    confirm: (active) => confirmByHuman(active, w.deps, w.registry),
+    cancel: (active) => cancelByHuman(active, w.registry),
     cfg: () => cfg,
     ...over,
   });
@@ -48,7 +49,7 @@ async function serve(w: World, cfg: OpenClawConfig = {} as OpenClawConfig, over:
 async function started(w: World) {
   const start = await w.call({ action: "start", agentName: "Iris" });
   const pageUrl = start.details.pageUrl as string;
-  return { start, pageUrl, token: pageUrl.slice(pageUrl.lastIndexOf("/") + 1), leaseToken: start.details.leaseToken as string };
+  return { start, pageUrl, token: pageUrl.slice(pageUrl.lastIndexOf("/") + 1) };
 }
 
 const confirmPost = (url: string, headers: Record<string, string> = { "content-type": "application/json" }) =>
@@ -140,6 +141,7 @@ describe("enrollment page: the route", () => {
     expect(html).toContain(`<script nonce="${nonce}">`);
     expect(html).toContain(`<style nonce="${nonce}">`);
     expect(html).toContain("Enroll on Ademú");
+    expect(html).toContain("No — they differ");
     expect(html).not.toMatch(/\bpair/i);
     expect(html).not.toContain(QR);
     expect(html).not.toContain(token);
@@ -174,6 +176,9 @@ describe("enrollment page: the route", () => {
     const r2 = await fetch(page(token, "/state"), { method: "POST" });
     expect(r2.status).toBe(405);
     expect(r2.headers.get("allow")).toBe("GET, HEAD");
+    const r3 = await fetch(page(token, "/cancel"));
+    expect(r3.status).toBe(405);
+    expect(r3.headers.get("allow")).toBe("POST");
   });
 
   it("non-loopback clients get 404 unless a browser-facing base URL or publicOrigin is configured", async () => {
@@ -220,7 +225,7 @@ describe("enrollment page: the route", () => {
 describe("enrollment page: the ceremony (scan → words → Yes → enrolled)", () => {
   it("state follows the tool's entry, confirm before the scan is refused, the Yes runs the tool's confirm path exactly once", async () => {
     const w = world();
-    const { token, leaseToken } = await started(w);
+    const { token } = await started(w);
     const { page } = await serve(w);
 
     // awaiting the scan: the QR travels as a data URL plus the exact payload for the "can't scan" fallback
@@ -259,11 +264,9 @@ describe("enrollment page: the ceremony (scan → words → Yes → enrolled)", 
     expect(w.registry.size).toBe(0);
 
     // and the chat door learns the outcome instead of "nothing in progress"
-    const status = await w.call({ action: "status", leaseToken });
+    const status = await w.call({ action: "status" });
     expect(status.details).toMatchObject({ ok: true, state: "done" });
-    expect(status.content[0]!.text).toContain("already finished");
-    const wait = await w.call({ action: "wait", leaseToken });
-    expect(wait.details).toMatchObject({ ok: true, state: "done" });
+    expect(status.content[0]!.text).toContain("Enrolled");
   });
 
   it("a mismatch reported by the daemon fails the page's confirm and ends the enrollment", async () => {
@@ -283,47 +286,78 @@ describe("enrollment page: the ceremony (scan → words → Yes → enrolled)", 
     expect(st.message).toContain("did not match");
   });
 
-  it("a cancel from chat shows the page an 'expired' outcome and refuses a late Yes", async () => {
+  it("the No button: refused before the scan, cancels once after the words, idempotent, and the chat sees cancelled", async () => {
     const w = world();
-    const { token, leaseToken } = await started(w);
+    const { token } = await started(w);
     const { page } = await serve(w);
-    w.control.emit({ state: "paired", words: WORDS });
-    await w.call({ action: "cancel", leaseToken });
-    expect(await (await fetch(page(token, "/state"))).json()).toMatchObject({ phase: "expired" });
-    const late = await confirmPost(page(token, "/confirm"));
-    expect(await late.json()).toMatchObject({ ok: false, code: "not-live" });
+    const early = await confirmPost(page(token, "/cancel"));
+    expect(early.status).toBe(200); // a "no" before any words is still the user's decision to stop
+    expect(await early.json()).toMatchObject({ ok: true, state: "cancelled" });
+    expect(w.control.calls.some((c) => c.op === "cancel_pairing")).toBe(true);
+    expect(await (await fetch(page(token, "/state"))).json()).toEqual({ phase: "cancelled" });
+    expect(await (await confirmPost(page(token, "/cancel"))).json()).toMatchObject({ ok: true, alreadyCancelled: true });
+    const lateYes = await confirmPost(page(token, "/confirm"));
+    expect(await lateYes.json()).toMatchObject({ ok: false, code: "not-live" });
     expect(w.control.calls.some((c) => c.op === "confirm_words")).toBe(false);
+    expect(w.writes).toHaveLength(0);
+    expect((await w.call({ action: "status" })).details).toMatchObject({ ok: true, state: "cancelled" });
   });
 
-  it("a confirm from chat is visible to the page as confirming → enrolled", async () => {
+  it("a No while the yes is committing is refused (409) and the enrollment completes", async () => {
     const w = world();
-    const { token, leaseToken } = await started(w);
+    let releaseWrite!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseWrite = r;
+    });
+    const origWrite = w.deps.writeConfig;
+    w.deps.writeConfig = async (mutate) => {
+      await gate;
+      await origWrite(mutate);
+    };
+    const { token } = await started(w);
     const { page } = await serve(w);
     w.control.emit({ state: "paired", words: WORDS });
-    const chat = w.call({ action: "confirm", leaseToken });
+    const yesP = confirmPost(page(token, "/confirm"));
+    await tick(5);
+    w.control.finish("enrolled");
+    await tick(10);
+    const noRes = await confirmPost(page(token, "/cancel"));
+    expect(noRes.status).toBe(409);
+    expect(await noRes.json()).toMatchObject({ ok: false, state: "committing" });
+    releaseWrite();
+    expect(await (await yesP).json()).toEqual({ ok: true, state: "done" });
+    expect(w.writes).toHaveLength(1);
+  });
+
+  it("a yes from a channel button is visible to the page as confirming → enrolled", async () => {
+    const w = world();
+    const { token } = await started(w);
+    const { page } = await serve(w);
+    w.control.emit({ state: "paired", words: WORDS });
+    const button = confirmByHuman(w.registry.get(NEW_DEVICE)!, w.deps, w.registry);
     await tick(10);
     expect(await (await fetch(page(token, "/state"))).json()).toEqual({ phase: "confirming" });
     expect(await (await confirmPost(page(token, "/confirm"))).json()).toMatchObject({ ok: true, alreadyConfirmed: true });
     w.control.finish("enrolled");
-    await chat;
+    await button;
     expect(await (await fetch(page(token, "/state"))).json()).toEqual({ phase: "enrolled" });
   });
 
-  it("a token that already exists on the device is reported as an outcome the page cannot resolve", async () => {
+  it("a duplicate token label on the device this ceremony created is replaced silently; the page reports enrolled", async () => {
     const w = world();
     const { token } = await started(w);
     const { page } = await serve(w);
     w.control.emit({ state: "paired", words: WORDS });
     const { ControlError } = await import("@ademu/adc-control");
-    w.control.tokenMintImpl = async () => {
-      throw new ControlError("label_exists", "exists");
+    w.control.tokenMintImpl = async (p) => {
+      if (!p.replace) throw new ControlError("label_exists", "exists");
+      return { token_id: "tid", label: p.label, token: "adc1_rotated", created_at_ms: 1 };
     };
     const confirmP = confirmPost(page(token, "/confirm"));
     await tick(10);
     w.control.finish("enrolled");
-    expect(await (await confirmP).json()).toMatchObject({ ok: false, state: "label_exists" });
-    const st = (await (await fetch(page(token, "/state"))).json()) as { phase: string; message: string };
-    expect(st.phase).toBe("failed");
-    expect(st.message).toContain("already exists");
+    expect(await (await confirmP).json()).toEqual({ ok: true, state: "done" });
+    expect(await (await fetch(page(token, "/state"))).json()).toEqual({ phase: "enrolled" });
+    expect(w.writes).toHaveLength(1);
   });
 });

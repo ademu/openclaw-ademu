@@ -6,6 +6,7 @@
 //   GET  /plugins/ademu/enroll/<pageToken>          the HTML shell (zero ceremony data baked in)
 //   GET  /plugins/ademu/enroll/<pageToken>/state    polled state JSON (QR data URL → words → outcome)
 //   POST /plugins/ademu/enroll/<pageToken>/confirm  the host-captured yes
+//   POST /plugins/ademu/enroll/<pageToken>/cancel   the host-captured no ("the words differ")
 //
 // The page token is a ceremony-scoped bearer capability (160 bits, in memory only): holding it
 // authorizes viewing the ceremony's public data and submitting the yes. The anti-substitution
@@ -24,7 +25,7 @@ import { resolveEnrollmentPage } from "./config.js";
 import { renderEnrollmentPageHtml } from "./enrollment-page-html.js";
 import { strings } from "./i18n/strings.js";
 import type { Qr } from "./qr.js";
-import type { ActiveEnrollment, EnrollmentRegistry } from "./tools/enroll.js";
+import type { ActiveEnrollment, EnrollmentRegistry, HumanDecision } from "./tools/enroll.js";
 
 export const ENROLLMENT_ROUTE_PREFIX = "/plugins/ademu";
 const SEGMENT = "enroll";
@@ -50,6 +51,11 @@ export function enrollmentPageBaseUrl(cfg: OpenClawConfig, env: NodeJS.ProcessEn
 
 export function enrollmentPageUrl(cfg: OpenClawConfig, pageToken: string, env: NodeJS.ProcessEnv = process.env): string {
   return `${enrollmentPageBaseUrl(cfg, env)}${ENROLLMENT_ROUTE_PREFIX}/${SEGMENT}/${pageToken}`;
+}
+
+/** Reachable from a browser that is NOT on the gateway machine: an explicit base URL or a public origin. */
+export function isEnrollmentPageRemotelyReachable(cfg: OpenClawConfig): boolean {
+  return resolveEnrollmentPage(cfg).baseUrl !== undefined || resolveGatewayPublicOrigin(cfg) !== undefined;
 }
 
 // --- auto-open (the zero-action display on the gateway host) -------------------------------------
@@ -117,13 +123,14 @@ export class FixedWindowLimiter {
   }
 }
 
-export type PageConfirmResult = { ok: boolean; state: string; message: string };
+export type PageConfirmResult = HumanDecision;
 
 export type EnrollmentPageDeps = {
   registry: EnrollmentRegistry;
   qr: Qr;
-  /** The tool's confirm path (`confirmFromPage`), injected so this module stays decoupled from it. */
-  confirm: (active: ActiveEnrollment) => Promise<PageConfirmResult>;
+  /** The tool's yes / no paths (`confirmByHuman` / `cancelByHuman`), injected so this module stays decoupled. */
+  confirm: (active: ActiveEnrollment) => Promise<HumanDecision>;
+  cancel: (active: ActiveEnrollment) => Promise<HumanDecision>;
   /** The live host config (exposure gate, base URL). */
   cfg: () => OpenClawConfig;
   /** Test seams. Proxy headers are deliberately never consulted. */
@@ -131,7 +138,7 @@ export type EnrollmentPageDeps = {
   limiters?: { poll: FixedWindowLimiter; confirm: FixedWindowLimiter; unknownToken: FixedWindowLimiter };
 };
 
-type Endpoint = "page" | "state" | "confirm";
+type Endpoint = "page" | "state" | "confirm" | "cancel";
 
 function isLoopbackAddress(addr: string | undefined): boolean {
   if (!addr) return false;
@@ -158,7 +165,7 @@ function parsePath(pathname: string): { token: string; endpoint: Endpoint } | un
   const s = pathname.split("/").filter(Boolean);
   const [last, secondLast, thirdLast] = [s[s.length - 1], s[s.length - 2], s[s.length - 3]];
   if (secondLast === SEGMENT && last !== undefined) return { token: last, endpoint: "page" };
-  if (thirdLast === SEGMENT && secondLast !== undefined && (last === "state" || last === "confirm")) return { token: secondLast, endpoint: last };
+  if (thirdLast === SEGMENT && secondLast !== undefined && (last === "state" || last === "confirm" || last === "cancel")) return { token: secondLast, endpoint: last };
   return undefined;
 }
 
@@ -179,6 +186,7 @@ export type PageState =
   | { phase: "awaiting-yes"; words: readonly string[] }
   | { phase: "confirming" }
   | { phase: "enrolled" }
+  | { phase: "cancelled" }
   | { phase: "failed"; message: string }
   | { phase: "expired"; message: string };
 
@@ -189,8 +197,8 @@ export async function pageStateFor(active: ActiveEnrollment, qr: Qr): Promise<Pa
     case "failed":
       if (active.failure === "words_mismatch") return { phase: "failed", message: strings.enroll.wordsMismatch };
       return { phase: "failed", message: strings.enroll.pageFailedReason(active.terminalState ?? active.failure ?? "ended") };
-    case "minting_blocked":
-      return { phase: "failed", message: strings.enroll.pageTokenExists };
+    case "cancelled":
+      return { phase: "cancelled" };
     default:
       break;
   }
@@ -218,8 +226,9 @@ export function registerEnrollmentPage(api: OpenClawPluginApi, deps: EnrollmentP
     const { token, endpoint } = parsed;
 
     const method = (req.method ?? "GET").toUpperCase();
-    if (endpoint === "confirm" ? method !== "POST" : method !== "GET" && method !== "HEAD") {
-      send(res, 405, "text/plain; charset=utf-8", "Method not allowed", { Allow: endpoint === "confirm" ? "POST" : "GET, HEAD" });
+    const isPost = endpoint === "confirm" || endpoint === "cancel";
+    if (isPost ? method !== "POST" : method !== "GET" && method !== "HEAD") {
+      send(res, 405, "text/plain; charset=utf-8", "Method not allowed", { Allow: isPost ? "POST" : "GET, HEAD" });
       return true;
     }
 
@@ -232,7 +241,7 @@ export function registerEnrollmentPage(api: OpenClawPluginApi, deps: EnrollmentP
       return true;
     }
     const key = addr ?? "unknown";
-    if ((endpoint === "confirm" ? limiters.confirm : limiters.poll).isRateLimited(key)) {
+    if ((isPost ? limiters.confirm : limiters.poll).isRateLimited(key)) {
       sendJson(res, 429, { error: "rate-limited" });
       return true;
     }
@@ -260,7 +269,7 @@ export function registerEnrollmentPage(api: OpenClawPluginApi, deps: EnrollmentP
       return true;
     }
 
-    // confirm — JSON only; the body carries nothing (the token in the path is the whole request).
+    // confirm / cancel — JSON only; the body carries nothing (the token in the path is the whole request).
     const contentType = String(req.headers["content-type"] ?? "").toLowerCase();
     if (!contentType.startsWith("application/json")) {
       sendJson(res, 415, { ok: false, code: "unsupported-media-type" });
@@ -270,11 +279,24 @@ export function registerEnrollmentPage(api: OpenClawPluginApi, deps: EnrollmentP
       sendJson(res, 413, { ok: false, code: "payload-too-large" });
       return true;
     }
+    if (endpoint === "cancel") {
+      if (active.state === "cancelled") {
+        sendJson(res, 200, { ok: true, alreadyCancelled: true, phase: "cancelled" });
+        return true;
+      }
+      if (active.state === "done" || active.state === "failed" || active.lease.disposed) {
+        sendJson(res, 200, { ok: false, code: "not-live", message: strings.enroll.pageCancelled });
+        return true;
+      }
+      const result = await deps.cancel(active);
+      sendJson(res, result.ok ? 200 : 409, { ok: result.ok, state: result.state, message: result.ok ? undefined : result.message });
+      return true;
+    }
     if (active.state === "done") {
       sendJson(res, 200, { ok: true, alreadyConfirmed: true, phase: "enrolled" });
       return true;
     }
-    if (active.lease.disposed || active.state === "failed") {
+    if (active.lease.disposed || active.state === "failed" || active.state === "cancelled") {
       sendJson(res, 200, { ok: false, code: "not-live", message: strings.enroll.pageCancelled });
       return true;
     }
@@ -283,7 +305,7 @@ export function registerEnrollmentPage(api: OpenClawPluginApi, deps: EnrollmentP
       return true;
     }
     if (active.state !== "words") {
-      // confirmed/enrolled/committing (a confirm is already in flight, from chat or from this page).
+      // confirmed/enrolled/committing: a yes is already in flight (from this page or a channel button).
       sendJson(res, 200, { ok: true, alreadyConfirmed: true, phase: "confirming" });
       return true;
     }
