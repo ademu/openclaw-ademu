@@ -131,6 +131,35 @@ per-tool-execution tool-discovery registry is separate and inert, and registerin
 `openclaw plugins inspect --runtime` (which loads plugins in that mode) reporting `hookCount: 1` —
 verified on the owner's OpenClaw 2026.8.2 host on 2026-09-18. Pinned by `test/enrollment-reply.test.ts`.
 
+**Live finding, Telegram (owner's OpenClaw 2026.8.2, 2026-09-18): outbound media refuses `data:` URLs.**
+The first two chat-door attempts from Telegram ended in the plugin's own "could not deliver the QR"
+refusal (nothing created). Reproduced with the host's `openclaw message send`: text delivers; a
+`data:image/png;base64,…` media URL is rejected by the host with "data: URLs are not supported for
+media. Use buffer instead." (`src/agents/sandbox-paths.ts`). Fix: `pushQr` writes the PNG to a private
+file (`<state dir>/ademu/enrollment-qr/enroll-<random>.png`, dir 0700, file 0600), sends it as a local
+`mediaUrl` with a `mediaAccess.localRoots` grant for that directory (the earlier harness plugin's
+lane), and the registry removes the file when the ceremony leaves the live set (`#remember`, and
+`disposeAll` on plugin stop). If the image is refused anyway, the caption with the exact link is sent
+alone and the tool result says so (`qrImageSent: false`). The push failure reason (host status / stage /
+error class, never payload text) now travels in the tool result so the model can relay it to the user —
+the silent `false` cost a debugging round-trip. Also found on the way: the tool was invisible from
+Telegram until `commands.ownerAllowFrom` gained `telegram:<user id>` — the owner gate is the host's, and
+the README should say so (follow-up).
+
+**Live finding, Telegram (2026-09-18, second attempt): the ceremony died with the tool call's turn.**
+Daemon log: device created 15:21:56, `get_pairing_display` polled once a second until 15:22:01 and then
+never again; the phone scanned at 15:23:16 ("owner certificate verified, confirmation words ready");
+the 3-minute TTL cancelled the device at 15:24:56. The plugin had reported "scanning" throughout. Cause:
+`createEnrollmentLease` forwarded the tool call's AbortSignal into the lease's own controller for the
+lease's whole life, and OpenClaw 2026.8.2 aborts that signal when the `start` turn returns (the web UI
+did not, which is why the page flow worked earlier the same day; the 2026-09-16 field note had already
+recorded this class of failure as "lease dies at turn end"). The poll rejection handler then correctly
+treated an aborted signal as "our own dispose" and left the entry untouched — so nothing was written,
+nothing announced, and the scan was lost. Fix: the caller's signal governs only the daemon acquisition
+(a cancelled call must not leave a daemon spawning); it is detached once the lease exists, and from
+then on only dispose (any path, TTL included) aborts `lease.signal`. Pinned by the tool test "the tool
+call's signal aborting AFTER start … leaves the ceremony alive".
+
 ## 3. The ingress design — Option B (owner decision, 2026-09-04)
 
 **What we found.** OpenClaw ships a durable channel-ingress queue/monitor, but its factories

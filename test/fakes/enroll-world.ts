@@ -66,11 +66,11 @@ export function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?:
   const channel: EnrollmentChannel = {
     pushQr: async (p) => {
       pushes.push({ kind: "qr", route: p.route, agentName: p.agentName, dataUrl: p.dataUrl, link: p.link, pageUrl: p.pageUrl });
-      return pushOk.value;
+      return { ok: pushOk.value, messageId: pushOk.value ? "m-qr-1" : undefined, reason: pushOk.value ? undefined : "status=failed; stage=platform_send; Error: fake refusal", imageSent: pushOk.value, filePath: pushOk.value ? "/tmp/fake-qr.png" : undefined };
     },
     pushWords: async (p) => {
       pushes.push({ kind: "words", route: p.route, words: p.words, nonce: p.nonce, buttons: p.buttons, reply: p.reply, pageUrl: p.pageUrl });
-      return { ok: pushOk.value, messageId: pushOk.value ? WORDS_MESSAGE_ID : undefined };
+      return { ok: pushOk.value, messageId: pushOk.value ? WORDS_MESSAGE_ID : undefined, reason: pushOk.value ? undefined : "status=failed" };
     },
     pushText: async (p) => {
       pushes.push({ kind: "text", route: p.route, text: p.text });

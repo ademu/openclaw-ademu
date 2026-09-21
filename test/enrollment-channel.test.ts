@@ -2,13 +2,18 @@
 // the Yes/No button clicks arriving through the plugin interactive handler.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
-import { describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   BUTTON_CAPABLE_CHANNELS,
   CHANNEL_DATA_KEY,
   REPLY_CAPABLE_CHANNELS,
   createEnrollmentChannel,
   handleEnrollmentClick,
+  pngBytesFromDataUrl,
+  removeQrFile,
   INTERACTIVE_NAMESPACE,
   laneFor,
   registerEnrollmentButtons,
@@ -60,29 +65,88 @@ describe("enrollment channel: lane selection", () => {
   });
 });
 
+const dirs: string[] = [];
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+function artifactDir() {
+  const d = mkdtempSync(join(tmpdir(), "ademu-qr-"));
+  dirs.push(d);
+  return d;
+}
+const readdirLength = (d: string) => readdirSync(d).length;
+// a real 1x1 PNG, so the file written is a PNG and not a placeholder
+const PNG_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
 describe("enrollment channel: pushes", () => {
-  function sender(status = "sent", extra: { results?: Array<{ messageId?: string }>; receipt?: { primaryPlatformMessageId?: string } } = {}) {
+  function sender(status = "sent", extra: { results?: Array<{ messageId?: string }>; receipt?: { primaryPlatformMessageId?: string } } = {}, dir = artifactDir()) {
     const sent: Array<Parameters<SendBatch>[0]> = [];
     const sendBatch: SendBatch = async (p) => {
       sent.push(p);
       return { status, ...extra };
     };
-    return { sent, channel: createEnrollmentChannel(sendBatch) };
+    return { sent, dir, channel: createEnrollmentChannel(sendBatch, { artifactDir: dir }) };
   }
 
-  it("the QR goes out as a data-URL image with the exact link in the caption, on the conversation's route, marked as ours", async () => {
-    const { sent, channel } = sender();
-    const ok = await channel.pushQr({ cfg, route, agentName: "Iris", dataUrl: "data:image/png;base64,QUJD", link: "ademu://agent-enroll?x=1", pageUrl: undefined });
-    expect(ok).toBe(true);
+  it("the QR goes out as a private PNG FILE under the artifact dir (hosts refuse data: URLs), with a localRoots grant, the exact link in the caption, marked as ours", async () => {
+    const { sent, dir, channel } = sender();
+    const out = await channel.pushQr({ cfg, route, agentName: "Iris", dataUrl: PNG_DATA_URL, link: "ademu://agent-enroll?x=1", pageUrl: undefined });
+    expect(out).toMatchObject({ ok: true, imageSent: true, reason: undefined });
+    expect(out.filePath).toMatch(new RegExp(`^${dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/enroll-[a-f0-9]{16}\.png$`));
+    expect(existsSync(out.filePath!)).toBe(true);
+    expect(readFileSync(out.filePath!).subarray(0, 4)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47])); // PNG magic
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ cfg, channel: "telegram", to: "chat-1", accountId: "bot", threadId: 7 });
+    expect(sent[0]).toMatchObject({ cfg, channel: "telegram", to: "chat-1", accountId: "bot", threadId: 7, mediaAccess: { localRoots: [dir] } });
     const payload = sent[0]!.payloads[0]!;
-    expect(payload.mediaUrl).toBe("data:image/png;base64,QUJD");
+    expect(payload.mediaUrl).toBe(out.filePath);
     expect(payload.text).toContain("Iris");
     expect(payload.text).toContain("ademu://agent-enroll?x=1");
     expect(payload.text).not.toContain("http");
+    expect(payload.text).not.toContain("could not be attached");
     expect(payload.channelData).toEqual({ [CHANNEL_DATA_KEY]: true });
     expect(payload.presentation).toBeUndefined();
+    // the ceremony's end removes the file; a second removal is harmless
+    await removeQrFile(out.filePath);
+    expect(existsSync(out.filePath!)).toBe(false);
+    await removeQrFile(out.filePath);
+    await removeQrFile(undefined);
+  });
+
+  it("when the image is refused, the caption with the link is sent alone, the file is removed, and the refusal is the reason", async () => {
+    const dir = artifactDir();
+    const sent: Array<Parameters<SendBatch>[0]> = [];
+    const sendBatch: SendBatch = async (p) => {
+      sent.push(p);
+      return p.mediaAccess ? { status: "failed", stage: "platform_send", error: new Error("data: URLs are not supported for media") } : { status: "sent", results: [{ messageId: "t-1" }] };
+    };
+    const channel = createEnrollmentChannel(sendBatch, { artifactDir: dir });
+    const out = await channel.pushQr({ cfg, route, agentName: "Iris", dataUrl: PNG_DATA_URL, link: "ademu://agent-enroll?x=1" });
+    expect(out).toMatchObject({ ok: true, imageSent: false, filePath: undefined, messageId: "t-1" });
+    expect(out.reason).toContain("data: URLs are not supported");
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.payloads[0]!.mediaUrl).toBeUndefined();
+    expect(sent[1]!.payloads[0]!.text).toContain("ademu://agent-enroll?x=1");
+    expect(sent[1]!.payloads[0]!.text).toContain("could not be attached");
+    expect(existsSync(join(dir))).toBe(true);
+    expect(readdirLength(dir)).toBe(0); // the refused image file was removed
+  });
+
+  it("when even the text-only caption fails, the push fails with both reasons", async () => {
+    const { channel } = sender("failed", { error: new Error("no such chat") } as never);
+    const out = await channel.pushQr({ cfg, route, agentName: "Iris", dataUrl: PNG_DATA_URL, link: "l" });
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("no such chat");
+    expect(out.reason).toContain("image:");
+  });
+
+  it("an unusable data URL means no file: the caption still goes out and says the image is missing", async () => {
+    const { sent, channel } = sender("sent");
+    const out = await channel.pushQr({ cfg, route, agentName: "Iris", dataUrl: "data:text/plain;base64,QUJD", link: "l" });
+    expect(out).toMatchObject({ ok: true, imageSent: false, filePath: undefined });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.mediaAccess).toBeUndefined();
+    expect(pngBytesFromDataUrl("data:text/plain;base64,QUJD")).toBeUndefined();
+    expect(pngBytesFromDataUrl(PNG_DATA_URL)!.subarray(1, 4).toString()).toBe("PNG");
   });
 
   it("the words carry Yes/No buttons with namespaced callbacks on button channels, a reply invitation on quoting channels, and the page link elsewhere", async () => {
@@ -126,15 +190,33 @@ describe("enrollment channel: pushes", () => {
     const none = sender("sent");
     expect(await none.channel.pushWords({ cfg, route, words: WORDS, nonce: NONCE, buttons: false, reply: true })).toEqual({ ok: true, messageId: undefined });
     const failed = sender("failed", { receipt: { primaryPlatformMessageId: "p-1" } });
-    expect(await failed.channel.pushWords({ cfg, route, words: WORDS, nonce: NONCE, buttons: false, reply: true })).toEqual({ ok: false, messageId: undefined });
+    expect(await failed.channel.pushWords({ cfg, route, words: WORDS, nonce: NONCE, buttons: false, reply: true })).toEqual({ ok: false, messageId: undefined, reason: "status=failed" });
+  });
+
+  it("a failed push carries a payload-free reason: the host's status/stage/error, or the thrown error's class", async () => {
+    const staged = sender("failed", { stage: "platform_send", error: new TypeError("channel telegram has no outbound adapter") } as never);
+    expect((await staged.channel.pushText({ cfg, route, text: "x" })).valueOf()).toBe(false);
+    expect((await staged.channel.pushWords({ cfg, route, words: WORDS, nonce: NONCE, buttons: false, reply: true })).reason).toBe("status=failed; stage=platform_send; TypeError: channel telegram has no outbound adapter");
+    const throwing = createEnrollmentChannel(
+      async () => {
+        throw new RangeError("bad params");
+      },
+      { artifactDir: artifactDir() },
+    );
+    expect((await throwing.pushWords({ cfg, route, words: WORDS, nonce: NONCE, buttons: false, reply: true })).reason).toBe("status=threw; RangeError: bad params");
+    const suppressed = sender("suppressed", { reason: "quiet_hours" } as never);
+    expect((await suppressed.channel.pushWords({ cfg, route, words: WORDS, nonce: NONCE, buttons: false, reply: true })).reason).toBe("status=suppressed; reason=quiet_hours");
   });
 
   it("a non-sent batch status or a throwing sender is reported as not delivered, never thrown", async () => {
     expect(await sender("failed").channel.pushText({ cfg, route, text: "x" })).toBe(false);
     expect(await sender("partial_failed").channel.pushText({ cfg, route, text: "x" })).toBe(false);
-    const throwing = createEnrollmentChannel(async () => {
-      throw new Error("no such channel");
-    });
+    const throwing = createEnrollmentChannel(
+      async () => {
+        throw new Error("no such channel");
+      },
+      { artifactDir: artifactDir() },
+    );
     expect(await throwing.pushText({ cfg, route, text: "x" })).toBe(false);
   });
 });

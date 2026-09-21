@@ -296,20 +296,32 @@ export async function createEnrollmentLease(params: {
   const { deps } = params;
   if (params.signal?.aborted) throw new DaemonAbortedError();
   const abort = new AbortController();
-  params.signal?.addEventListener("abort", () => abort.abort(), { once: true });
-  const daemonLease = await deps.daemons.acquire({
-    identity: params.identity,
-    server: params.server,
-    role: "setup",
-    signal: abort.signal,
-    beforeEffect: params.beforeEffect,
-  });
+  // The caller's signal (a tool call's execution signal) governs ONLY the acquisition: a cancelled
+  // call must not leave a daemon spawning for nothing. It is detached the moment the lease exists.
+  // The ceremony then outlives the call by design — the phone scans minutes later — and OpenClaw
+  // aborts a tool call's signal when the turn returns (verified 2026-09-18 on 2026.8.2 from Telegram:
+  // the pairing poll stopped five seconds after `start`, the scan landed unseen, TTL retired the
+  // device). From here on only dispose (any path, TTL included) aborts `lease.signal`.
+  const forwardAbort = () => abort.abort();
+  params.signal?.addEventListener("abort", forwardAbort, { once: true });
+  let daemonLease: Lease;
   let control: ControlLike;
   try {
-    control = await deps.connectControl(daemonLease.info.controlSocketPath);
-  } catch (err) {
-    await daemonLease.release().catch(() => {});
-    throw err;
+    daemonLease = await deps.daemons.acquire({
+      identity: params.identity,
+      server: params.server,
+      role: "setup",
+      signal: abort.signal,
+      beforeEffect: params.beforeEffect,
+    });
+    try {
+      control = await deps.connectControl(daemonLease.info.controlSocketPath);
+    } catch (err) {
+      await daemonLease.release().catch(() => {});
+      throw err;
+    }
+  } finally {
+    params.signal?.removeEventListener("abort", forwardAbort);
   }
   const ttl = params.ttlMs ?? ENROLLMENT_TTL_MS;
   const lease: EnrollmentLease = {

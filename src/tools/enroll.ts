@@ -20,7 +20,7 @@ import { applyRouteBinding, findRouteBinding, RouteBindingConflictError } from "
 import { createEnrollmentLease, EnrollmentError, mintAccountToken, probeIdentity, tokenLabelFor, type EnrollmentLease, type EnrollmentLeaseDeps } from "../ceremony.js";
 import { CHANNEL_ID, inspectAdemuAccount, listAdemuAccountIds } from "../config.js";
 import { accountExists, applyEnrollment } from "../enroll-config.js";
-import { type EnrollmentChannel, type EnrollmentRoute, type Lane, laneFor, registerEnrollmentButtons, routeFromContext } from "../enrollment-channel.js";
+import { type EnrollmentChannel, type EnrollmentRoute, type Lane, laneFor, registerEnrollmentButtons, removeQrFile, routeFromContext } from "../enrollment-channel.js";
 import { registerEnrollmentReplyHook } from "../enrollment-reply.js";
 import { enrollmentPageUrl, shouldAutoOpenEnrollmentPage } from "../enrollment-page.js";
 import { strings } from "../i18n/strings.js";
@@ -48,6 +48,8 @@ export type ActiveEnrollment = {
   nonce: string;
   /** Platform id of the words message pushed into the channel; a quoted yes/no reply points at it. */
   wordsMessageId: string | undefined;
+  /** The QR image file pushed into the channel (push lane); removed when the ceremony ends. */
+  qrFilePath: string | undefined;
   sessionKey: string;
   requesterSenderId: string | undefined;
   agentId: string | undefined;
@@ -96,9 +98,12 @@ export class EnrollingAgentUnknownError extends Error {
   }
 }
 
-/** The host refused to deliver the QR into the conversation (push lane). */
+/** The host refused to deliver the QR into the conversation (push lane); `reason` is payload-free host detail. */
 class PushFailedError extends Error {
-  constructor(readonly channel: string) {
+  constructor(
+    readonly channel: string,
+    readonly reason: string | undefined,
+  ) {
     super("the enrollment code could not be delivered into the conversation");
     this.name = "PushFailedError";
   }
@@ -162,6 +167,11 @@ export class EnrollmentRegistry {
    */
   readonly #recent = new Map<string, ActiveEnrollment>();
   #remember(entry: ActiveEnrollment): void {
+    // The ceremony is over one way or another: the QR image file (if any) has served its purpose.
+    if (entry.qrFilePath) {
+      void removeQrFile(entry.qrFilePath);
+      entry.qrFilePath = undefined;
+    }
     this.#recent.delete(entry.deviceId);
     this.#recent.set(entry.deviceId, entry);
     while (this.#recent.size > 16) this.#recent.delete(this.#recent.keys().next().value as string);
@@ -254,7 +264,7 @@ export class EnrollmentRegistry {
   async disposeAll(reason: string): Promise<void> {
     const all = [...this.#active.values()];
     this.#active.clear();
-    await Promise.all([...all.map((e) => e.lease.dispose(reason)), ...this.#pending]);
+    await Promise.all([...all.map((e) => e.lease.dispose(reason)), ...all.map((e) => removeQrFile(e.qrFilePath)), ...this.#pending]);
   }
   get size(): number {
     this.#prune();
@@ -422,7 +432,7 @@ async function admitAndStart(p: {
   } catch (err) {
     if (lease.deviceId) p.registry.delete(lease.deviceId);
     await lease.dispose("start-failed");
-    if (err instanceof PushFailedError) return text(strings.enroll.toolPushFailed(err.channel), { ok: false, state: "push_failed" });
+    if (err instanceof PushFailedError) return text(strings.enroll.toolPushFailed(err.channel, err.reason), { ok: false, state: "push_failed", reason: err.reason });
     const remedy = remedyFor(err);
     if (remedy) return text(strings.enroll.toolUnavailable(remedy), { ok: false, state: "unavailable" });
     throw err;
@@ -457,6 +467,7 @@ async function startWithLease(p: {
     pageToken,
     nonce: newNonce(),
     wordsMessageId: undefined,
+    qrFilePath: undefined,
     sessionKey: p.sessionKey,
     requesterSenderId: p.ctx.requesterSenderId,
     agentId: p.ctx.agentId,
@@ -533,11 +544,16 @@ async function startWithLease(p: {
 
   const dataUrl = await p.deps.qr.pngDataUrl(created.qr_payload);
   let opened = false;
+  let imageSent = true;
+  let imageReason: string | undefined;
   if (route) {
     // Push lane: the plugin itself puts the code and the exact link into the conversation. A refused
     // delivery ends the ceremony before the user ever saw it (admitAndStart disposes the lease).
     const delivered = await p.deps.channel.pushQr({ cfg: p.cfg, route, agentName, dataUrl, link: created.qr_payload, pageUrl: pageReachable ? pageUrl : undefined });
-    if (!delivered) throw new PushFailedError(route.channel);
+    if (!delivered.ok) throw new PushFailedError(route.channel, delivered.reason);
+    entry.qrFilePath = delivered.filePath;
+    imageSent = delivered.imageSent;
+    imageReason = delivered.imageSent ? undefined : delivered.reason;
   } else if (shouldAutoOpenEnrollmentPage(p.cfg, pageUrl)) {
     // Page lane: auto-opened only when its URL is loopback (the user is then on this machine);
     // best-effort, never fatal — the URL in the result is the fallback.
@@ -548,7 +564,7 @@ async function startWithLease(p: {
     }
   }
   return text(
-    strings.enroll.toolStart({ payload: created.qr_payload, dataUrl, pageUrl, opened, lane: route ? "push" : "page", buttons, reply, pageReachable, channel: route?.channel }),
+    strings.enroll.toolStart({ payload: created.qr_payload, dataUrl, pageUrl, opened, lane: route ? "push" : "page", buttons, reply, pageReachable, channel: route?.channel, imageSent }),
     {
       ok: true,
       state: "scanning",
@@ -558,6 +574,8 @@ async function startWithLease(p: {
       channel: route?.channel,
       pageUrl,
       pageOpened: opened,
+      qrImageSent: imageSent,
+      ...(imageReason ? { qrImageReason: imageReason } : {}),
     },
   );
 }

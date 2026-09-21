@@ -184,6 +184,27 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     expect((await w.call({ action: "status" })).details.state).toBe("failed");
   });
 
+  it("the tool call's signal aborting AFTER start (the host does this when the turn returns) leaves the ceremony alive: the scan is seen, the words are pushed, the yes completes", async () => {
+    const w = world();
+    const ac = new AbortController();
+    const start = await w.call({ action: "start", agentName: "Iris" }, TELEGRAM, ac.signal);
+    expect(start.details.ok).toBe(true);
+    ac.abort(); // the turn ended
+    const entry = live(w);
+    expect(entry.lease.signal.aborted).toBe(false);
+    expect(entry.lease.disposed).toBe(false);
+    expect(w.control.polling).toBe(true); // the daemon poll is still running
+    w.control.emit({ state: "paired", words: WORDS });
+    await tick();
+    expect((await w.call({ action: "status" })).details.state).toBe("words_shown");
+    expect(w.pushes.map((p) => p.kind)).toEqual(["qr", "words"]);
+    const yesP = yes(w, entry);
+    await tick(5);
+    w.control.finish("enrolled");
+    expect(await yesP).toMatchObject({ ok: true, state: "done" });
+    expect(w.writes).toHaveLength(1);
+  });
+
   it("the TTL timer disposes the lease (3 minutes) and a second start supersedes the first", async () => {
     const w = world();
     await w.call({ action: "start", agentName: "Iris" });
@@ -213,6 +234,8 @@ describe("ademu_enroll: the channel lane (media channels)", () => {
     expect(w.pushes).toHaveLength(1);
     expect(w.pushes[0]).toMatchObject({ kind: "qr", agentName: "Iris", dataUrl: "data:image/png;base64,QUJD", link: QR, route: { channel: "telegram", to: "chat-1", accountId: "bot" } });
     expect(w.pushes[0]!.pageUrl).toBeUndefined(); // loopback page: not reachable from the phone
+    expect(start.details).toMatchObject({ qrImageSent: true });
+    expect(live(w).qrFilePath).toBe("/tmp/fake-qr.png");
 
     w.control.emit({ state: "paired", words: WORDS });
     await tick();
@@ -271,7 +294,9 @@ describe("ademu_enroll: the channel lane (media channels)", () => {
     const w = world();
     w.pushOk.value = false;
     const r = await w.call({ action: "start", agentName: "Iris" }, TELEGRAM);
-    expect(r.details).toMatchObject({ ok: false, state: "push_failed" });
+    expect(r.details).toMatchObject({ ok: false, state: "push_failed", reason: "status=failed; stage=platform_send; Error: fake refusal" });
+    expect(r.content[0]!.text).toContain("Host detail");
+    expect(r.content[0]!.text).toContain("stage=platform_send");
     expect(w.registry.size).toBe(0);
     expect(w.released()).toBe(1);
     expect(w.control.calls.some((c) => c.op === "cancel_pairing")).toBe(true);

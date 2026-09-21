@@ -1,6 +1,7 @@
 // Full runtime entry of the Ademú channel plugin (plan T10). `registerFull` reads the plugin's
 // manifest config and adds the owner-gated `ademu_enroll` tool (T13).
 import { connect as connectSessionReal } from "@ademu/adc-client";
+import { join } from "node:path";
 import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
 import { sendDurableMessageBatch } from "openclaw/plugin-sdk/channel-outbound";
 import { ademuPlugin, realEnrollmentLeaseDeps } from "./src/channel.js";
@@ -9,6 +10,7 @@ import { createEnrollmentChannel, type SendBatch } from "./src/enrollment-channe
 import { openInBrowser, registerEnrollmentPage } from "./src/enrollment-page.js";
 import { strings } from "./src/i18n/strings.js";
 import { createQr } from "./src/qr.js";
+import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
 import { applyPluginSettings, setAdemuRuntime } from "./src/runtime.js";
 import { cancelByHuman, confirmByHuman, type EnrollToolDeps, registerEnrollTool } from "./src/tools/enroll.js";
 
@@ -28,7 +30,7 @@ export default defineChannelPluginEntry({
       qr,
       openUrl: openInBrowser,
       // Host-side pushes into the user's conversation (media channels): the canonical outbound pipeline.
-      channel: createEnrollmentChannel(sendDurableMessageBatch as unknown as SendBatch),
+      channel: createEnrollmentChannel(sendDurableMessageBatch as unknown as SendBatch, { artifactDir: join(resolveStateDir(), "ademu", "enrollment-qr") }),
       writeConfig: async (mutate) => {
         await api.runtime.config.mutateConfigFile({
           base: "runtime",

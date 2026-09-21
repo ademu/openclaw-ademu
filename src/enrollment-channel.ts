@@ -12,6 +12,9 @@
 // carries a link to the enrollment page instead, which requires the page to be reachable from the
 // user's browser (`channels.ademu.enrollmentPage.baseUrl` or `gateway.publicOrigin`). A channel with
 // neither cannot complete an enrollment; `start` refuses before creating anything.
+import { randomBytes } from "node:crypto";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import type { OpenClawPluginApi, OpenClawPluginToolContext, ReplyPayload } from "openclaw/plugin-sdk/core";
 import { isEnrollmentPageRemotelyReachable } from "./enrollment-page.js";
@@ -72,11 +75,39 @@ export type SendBatch = (params: {
   accountId?: string | undefined;
   threadId?: string | number | undefined;
   payloads: ReplyPayload[];
-}) => Promise<{ status: string; results?: Array<{ messageId?: string }>; receipt?: { primaryPlatformMessageId?: string } }>;
+  /** Grants the host read access to local media paths under these directories. */
+  mediaAccess?: { localRoots: string[] };
+}) => Promise<{ status: string; stage?: string; error?: unknown; reason?: unknown; results?: Array<{ messageId?: string }>; receipt?: { primaryPlatformMessageId?: string } }>;
+
+/** Best-effort removal of a QR file written by `pushQr` (the ceremony ended). */
+export async function removeQrFile(filePath: string | undefined): Promise<void> {
+  if (!filePath) return;
+  try {
+    await rm(filePath, { force: true });
+  } catch {
+    /* best effort */
+  }
+}
+
+/** Decodes a `data:image/png;base64,…` URL into bytes; undefined for anything else. */
+export function pngBytesFromDataUrl(dataUrl: string): Buffer | undefined {
+  const m = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl.trim());
+  return m ? Buffer.from(m[1]!, "base64") : undefined;
+}
+
+/** Why a push was not delivered: the host's status/stage or the error's class — never payload text. */
+export type PushOutcome = { ok: boolean; messageId: string | undefined; reason: string | undefined };
+/** The QR push: `imageSent` false means the image was refused and only the caption with the link went out. */
+export type QrPushOutcome = PushOutcome & { imageSent: boolean; filePath: string | undefined };
 
 export type EnrollmentChannel = {
-  /** The QR (data URL) + exact link, sent by the plugin. Resolves whether the host accepted the batch. */
-  pushQr: (p: { cfg: OpenClawConfig; route: EnrollmentRoute; agentName: string; dataUrl: string; link: string; pageUrl?: string | undefined }) => Promise<boolean>;
+  /**
+   * The QR image + exact link, sent by the plugin. The PNG travels as a private file under
+   * `artifactDir` (OpenClaw hosts up to at least 2026.8.x refuse `data:` URLs for outbound media) with a
+   * `mediaAccess.localRoots` grant for that directory; the caller removes the file when the ceremony
+   * ends (`removeQrFile`). If the image is refused, the caption with the link is sent alone.
+   */
+  pushQr: (p: { cfg: OpenClawConfig; route: EnrollmentRoute; agentName: string; dataUrl: string; link: string; pageUrl?: string | undefined }) => Promise<QrPushOutcome>;
   /**
    * The daemon's four words — with Yes/No buttons on button-capable channels, an invitation to reply
    * yes/no to this message on reply-capable ones, and the page link where the page is reachable.
@@ -90,14 +121,27 @@ export type EnrollmentChannel = {
     buttons: boolean;
     reply: boolean;
     pageUrl?: string | undefined;
-  }) => Promise<{ ok: boolean; messageId: string | undefined }>;
+  }) => Promise<PushOutcome>;
   /** One outcome line (enrolled / mismatch / cancelled / ended). */
   pushText: (p: { cfg: OpenClawConfig; route: EnrollmentRoute; text: string }) => Promise<boolean>;
 };
 
-export function createEnrollmentChannel(sendBatch: SendBatch): EnrollmentChannel {
-  /** Sends one payload; resolves whether the host accepted it and the primary platform id it got. */
-  async function pushWithId(cfg: OpenClawConfig, route: EnrollmentRoute, payload: ReplyPayload): Promise<{ ok: boolean; messageId: string | undefined }> {
+/** A short, payload-free description of a failed delivery for the tool result (never logged). */
+function describeFailure(result: { status: string; stage?: string; error?: unknown; reason?: unknown }): string {
+  const err = result.error;
+  const errText = err instanceof Error ? `${err.name}${err.message ? `: ${err.message}` : ""}` : typeof err === "string" ? err : err ? JSON.stringify(err) : "";
+  const parts = [`status=${result.status}`, result.stage ? `stage=${String(result.stage)}` : "", result.reason ? `reason=${String(result.reason)}` : "", errText].filter(Boolean);
+  return parts.join("; ").slice(0, 300);
+}
+
+export type EnrollmentChannelOptions = {
+  /** Private directory for QR image files (created 0700; files 0600); e.g. `<state dir>/ademu/enrollment-qr`. */
+  artifactDir: string;
+};
+
+export function createEnrollmentChannel(sendBatch: SendBatch, options: EnrollmentChannelOptions): EnrollmentChannel {
+  /** Sends one payload; resolves whether the host accepted it, the primary platform id it got, or why not. */
+  async function pushWithId(cfg: OpenClawConfig, route: EnrollmentRoute, payload: ReplyPayload, mediaAccess?: { localRoots: string[] }): Promise<PushOutcome> {
     try {
       const result = await sendBatch({
         cfg,
@@ -106,19 +150,49 @@ export function createEnrollmentChannel(sendBatch: SendBatch): EnrollmentChannel
         accountId: route.accountId,
         threadId: route.threadId,
         payloads: [{ ...payload, channelData: { ...(payload.channelData ?? {}), [CHANNEL_DATA_KEY]: true } }],
+        ...(mediaAccess ? { mediaAccess } : {}),
       });
-      if (result.status !== "sent") return { ok: false, messageId: undefined };
+      if (result.status !== "sent") return { ok: false, messageId: undefined, reason: describeFailure(result) };
       // A channel may split one payload into several platform messages; the primary id is the one a
       // quoted reply points at (the words message is short text: one message in practice).
       const messageId = result.receipt?.primaryPlatformMessageId ?? result.results?.find((r) => typeof r.messageId === "string" && r.messageId)?.messageId;
-      return { ok: true, messageId };
-    } catch {
-      return { ok: false, messageId: undefined };
+      return { ok: true, messageId, reason: undefined };
+    } catch (err) {
+      return { ok: false, messageId: undefined, reason: describeFailure({ status: "threw", error: err }) };
     }
   }
   const push = async (cfg: OpenClawConfig, route: EnrollmentRoute, payload: ReplyPayload): Promise<boolean> => (await pushWithId(cfg, route, payload)).ok;
+  /** Writes the PNG to a fresh private file; undefined when the bytes or the directory are unusable. */
+  async function writeQrFile(dataUrl: string): Promise<string | undefined> {
+    const bytes = pngBytesFromDataUrl(dataUrl);
+    if (!bytes) return undefined;
+    try {
+      await mkdir(options.artifactDir, { recursive: true, mode: 0o700 });
+      const filePath = join(options.artifactDir, `enroll-${randomBytes(8).toString("hex")}.png`);
+      await writeFile(filePath, bytes, { mode: 0o600 });
+      await chmod(filePath, 0o600).catch(() => {});
+      return filePath;
+    } catch {
+      return undefined;
+    }
+  }
   return {
-    pushQr: (p) => push(p.cfg, p.route, { text: strings.enroll.pushQrCaption({ agentName: p.agentName, link: p.link, pageUrl: p.pageUrl }), mediaUrl: p.dataUrl }),
+    pushQr: async (p) => {
+      const caption = strings.enroll.pushQrCaption({ agentName: p.agentName, link: p.link, pageUrl: p.pageUrl });
+      const filePath = await writeQrFile(p.dataUrl);
+      let imageReason: string | undefined;
+      if (filePath) {
+        const withImage = await pushWithId(p.cfg, p.route, { text: caption, mediaUrl: filePath }, { localRoots: [options.artifactDir] });
+        if (withImage.ok) return { ...withImage, imageSent: true, filePath };
+        imageReason = withImage.reason;
+        await removeQrFile(filePath);
+      } else {
+        imageReason = "qr image file could not be written";
+      }
+      // The image was refused: the caption with the exact link still lets the phone tap its way in.
+      const textOnly = await pushWithId(p.cfg, p.route, { text: `${caption}\n\n${strings.enroll.pushQrImageMissing}` });
+      return { ...textOnly, reason: textOnly.ok ? imageReason : `${textOnly.reason ?? "text push failed"} (image: ${imageReason ?? "n/a"})`, imageSent: false, filePath: undefined };
+    },
     pushWords: (p) =>
       pushWithId(p.cfg, p.route, {
         text: strings.enroll.pushWords(p.words, { buttons: p.buttons, reply: p.reply, pageUrl: p.pageUrl }),
