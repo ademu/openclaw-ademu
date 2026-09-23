@@ -16,17 +16,19 @@ owner, or with `openclaw channels add --channel ademu` in a terminal on the gate
 ## Your two actions
 
 1. **start** — call `ademu_enroll` with `action: "start"` (optional `agentName`, `accountId`).
-   Read the result text: it says whether the **enrollment page** opened in the user's browser on the
-   gateway machine, and gives its URL (paste it on its own line, exactly as returned — it is a pointer
-   to the page, not the enrollment link). Tell the user in one or two sentences what to do: scan the
-   code on the page with the Ademú app (or open the link on the phone), then compare the four safety
-   words the phone shows with the ones on the page, and click **Yes** or **No** there.
+   The result says that the **enrollment page** opened in a browser tab on the gateway machine. You are
+   given no address, no code and no words — there is nothing to paste. Tell the user in one or two
+   sentences what to do: look for the new tab, scan the code on it with the Ademú app (or open the link
+   shown there on the phone), then compare the four safety words the phone shows with the ones on the
+   page, and click **Yes** or **No** there.
    `start` can refuse before anything is created (the account id already exists, this conversation
-   names no configured OpenClaw agent, or the account is routed to another agent). Read the tool's text
+   names no configured OpenClaw agent, the account is routed to another agent, the gateway is not bound
+   to a loopback address, or no browser could be opened on the gateway machine). Read the tool's text
    to the user as is; nothing was written.
-2. **status** — call `action: "status"` when the user asks how it is going or says they clicked.
-   It answers a phase: `scanning`, `words_shown`, `confirming`, `done`, `failed`, `cancelled`,
-   `expired`. Relay it in a sentence.
+2. **status** — call `action: "status"` when the user asks how it is going, says they clicked, or says
+   no page appeared. It answers a phase: `scanning`, `words_shown`, `confirming`, `done`, `failed`,
+   `cancelled`, `expired`. If no browser had shown the page yet, the plugin opens it again and the text
+   says so. Relay it in a sentence.
 
 ## What you must never do
 
@@ -40,8 +42,8 @@ owner, or with `openclaw channels add --channel ademu` in a terminal on the gate
 
 ## Where the user acts
 
-- Always on the **enrollment page**, which opens in a browser on the gateway machine (or the user opens
-  the URL you pasted there). The QR image also shows inline where the chat client renders images.
+- Always on the **enrollment page**, which the plugin opens in a browser on the gateway machine. You
+  never see its address; if the user cannot find the tab, call `status` and the plugin opens it again.
 - If the user is not at the gateway machine, they cannot reach the page: tell them to run
   `openclaw channels add --channel ademu` in a terminal on that machine instead.
 - A "yes" or "no" typed in the chat is NOT a decision — it reaches you like any message. Never treat such

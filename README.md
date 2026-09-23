@@ -70,7 +70,9 @@ the ceremony happens in one place:
 
 - The **enrollment page** opens in your browser on the gateway machine (a page served by the plugin on
   the gateway itself, `/plugins/ademu/enroll/<token>`). It shows the QR, then the four words with
-  **Yes — the words match** and **No — they differ**. The web UI also renders the QR inline.
+  **Yes — the words match** and **No — they differ**. The agent is told only that the page opened: it
+  never receives the page's address, the QR or the words, so nothing it says can stand in for them. If
+  no tab appeared, ask the agent how it is going — the plugin opens the page again.
 
 Your actions are the same three as door one: ask, scan (or open the link on the phone that runs
 Ademú), and click Yes after comparing the words. Nothing is written unless you did; a No, or three
@@ -83,17 +85,16 @@ a model cannot say yes for you.
 |---|---|---|---|---|
 | TUI, web UI, Control UI on the gateway machine | page (auto-opens) + inline in the web UI | page | page buttons | yes |
 | A chat channel (Telegram, WhatsApp, …) while sitting at the gateway machine | page (auto-opens on the gateway machine) | page | page buttons | yes |
-| TUI over SSH, a remote web UI, or a chat channel away from the gateway machine | page URL printed, but unreachable from your browser | — | — | **no** — run `openclaw channels add --channel ademu` on the gateway machine |
+| TUI over SSH, a remote web UI, or a chat channel away from the gateway machine | the page opens on the gateway machine, where you are not | — | — | **no** — run `openclaw channels add --channel ademu` on the gateway machine |
+| A gateway bound to a non-loopback address, or a headless gateway with no browser | — | — | — | **no** — `start` refuses before creating anything and names the wizard |
 | Phone only | the QR cannot be scanned from the same phone — open the `ademu://` link from the page | | | scan from a second device, or use the page's copy-link on the phone |
 
 Pushing the QR, the words and Yes / No buttons into the chat itself (Telegram, Slack, Discord buttons;
 quoted-reply decisions elsewhere) is not part of this release; that lane lives on a separate branch.
 
-Settings: `channels.ademu.enrollmentPage.autoOpen` (default true) opens the page in the gateway
-machine's browser when its URL is loopback; `channels.ademu.enrollmentPage.baseUrl` is the
-browser-facing origin of the gateway (put it behind TLS first) and also allows non-loopback access to
-the page. The page URL is then a bearer link; the four-word comparison against your phone remains the
-real check.
+There are no settings for the page. Its URL is a bearer link that only the browser the plugin opens
+ever receives; the route answers loopback clients only, and the four-word comparison against your phone
+remains the real check.
 
 ### Reconnecting an already-enrolled agent
 
@@ -132,9 +133,6 @@ Ademú; this is it.)
       "dataDir": "~/.openclaw/ademu/adc",
       // Ademú servers (defaults = production)
       "server": { "restBaseUrl": "https://api.ademu.com", "wsUrl": "wss://gateway.ademu.com/v1/ws" },
-      // the browser enrollment page (door two): open it on the gateway machine automatically (default true);
-      // baseUrl = browser-facing origin when the gateway is remote (also allows non-loopback access)
-      "enrollmentPage": { "autoOpen": true, "baseUrl": "https://gw.example.com" },
       "accounts": {
         "iris": {
           "agentName": "Iris",

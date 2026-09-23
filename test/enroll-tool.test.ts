@@ -63,13 +63,16 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
   it("start → scan → human yes writes the account, grants the owner, disposes the lease exactly once; status follows", async () => {
     const w = world();
     const start = await w.call({ action: "start", agentName: "Iris" });
-    expect(start.details).toMatchObject({ ok: true, state: "scanning", deviceId: NEW_DEVICE, accountId: "iris" });
+    expect(start.details).toMatchObject({ ok: true, state: "scanning", deviceId: NEW_DEVICE, accountId: "iris", pageOpened: true });
     expect(start.details).not.toHaveProperty("lane");
-    expect(w.opens).toEqual([start.details.pageUrl]);
+    expect(start.details).not.toHaveProperty("pageUrl");
+    expect(w.opens).toHaveLength(1);
+    expect(w.opens[0]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/plugins\/ademu\/enroll\/[a-f0-9]{40}$/);
     const txt = start.content[0]!.text;
-    expect(txt).toContain("![ademu-enroll](data:image/png;base64,QUJD)");
-    expect(txt).toContain(QR);
-    expect(txt).toContain(start.details.pageUrl as string);
+    expect(txt).toContain("OPENED");
+    expect(txt).not.toMatch(/https?:\/\//); // the page URL is a bearer credential: browser only
+    expect(txt).not.toContain(QR);
+    expect(txt).not.toContain("data:image");
     expect(txt).toContain("cannot confirm or cancel");
     expect(txt).not.toMatch(/lease ?token/i);
     expect((w.acquires[0] as { role: string }).role).toBe("setup");
@@ -353,15 +356,13 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect((await w.call({ action: "status" })).details.ok).toBe(true);
   });
 
-  it("#14 a failure after the lease exists (QR render) disposes the lease exactly once and leaves no registry entry", async () => {
+  it("#14 a failure after the lease exists (the browser launcher) disposes the lease exactly once and leaves no registry entry", async () => {
     const w = world();
-    w.deps.qr = {
-      terminal: async () => "",
-      pngDataUrl: async () => {
-        throw new Error("qr renderer unavailable");
-      },
+    w.deps.openUrl = async () => {
+      throw new Error("no opener");
     };
-    await expect(w.call({ action: "start", agentName: "Iris" })).rejects.toThrow(/qr renderer/);
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(r.details).toMatchObject({ ok: false, state: "page_open_failed" });
     expect(w.registry.size).toBe(0);
     expect(w.released()).toBe(1);
     expect(w.control.closed).toBe(1);

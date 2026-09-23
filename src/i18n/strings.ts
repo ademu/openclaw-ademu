@@ -78,18 +78,19 @@ export const strings = {
       "The Ademú device host binary is not available for this platform. Install the plugin from npm with optional dependencies enabled, or set channels.ademu.socketPath to a running adc daemon.",
     authorityExpired: "Ademú enrollment authority is no longer active.",
     toolDescription:
-      "Enroll this agent on Ademú (end-to-end encrypted messaging). Use when the user wants to talk to you on Ademú or asks to enroll or connect the agent to the Ademú app. Actions: start (the plugin opens the enrollment page in the user's browser on this machine; it shows a QR code and, later, the four safety words with Yes/No), status (where the enrollment stands). You can neither confirm nor cancel an enrollment: only the user does, on the page.",
+      "Enroll this agent on Ademú (end-to-end encrypted messaging). Use when the user wants to talk to you on Ademú or asks to enroll or connect the agent to the Ademú app. Actions: start (the plugin opens the enrollment page in a browser on the gateway machine; it shows a QR code and, later, the four safety words with Yes/No), status (where the enrollment stands; re-opens the page if no browser showed it). You are never given the page's address, the QR or the words, and you can neither confirm nor cancel an enrollment: only the user does, on the page.",
     toolLabel: "Enroll on Ademú",
     toolNeedsSession: "Enrollment needs a conversation session; ask again from a chat.",
     toolLeaseMismatch: "That enrollment belongs to another conversation (or to another sender or agent in this one); it cannot be inspected from here.",
     toolNoActive: "No enrollment is in progress. Use action \"start\" first.",
     toolAccountExists: (id: string, ids: string[]) => `An Ademú account named "${id}" already exists (${ids.join(", ")}). Choose another accountId.`,
-    toolStart: (p: { payload: string; dataUrl: string; pageUrl: string; opened: boolean }) =>
-      `Scan this with the Ademú app (phone → profile → Agents → Add):\n\n![ademu-enroll](${p.dataUrl})\n\nOr open on the phone: ${p.payload}\n\n${
-        p.opened
-          ? "The enrollment page has just OPENED in the user's browser on this machine — tell them to look for it."
-          : "The user can open the enrollment page in a browser on the gateway machine."
-      } Paste this exact URL into your reply on its own line (it is a pointer to the page, not the enrollment link — never retype the QR contents):\n${p.pageUrl}\nThe page shows the QR, then the four safety words next to a Yes and a No button. The user compares the words with their phone and clicks there. You cannot confirm or cancel anything: never ask the user to say yes to you, and never claim the enrollment finished. Call action "status" when the user asks how it is going or says they clicked.`,
+    toolStart:
+      "The enrollment page has just OPENED in a browser tab on this machine (the gateway machine) — tell the user to look for it. The page shows a QR code to scan with the Ademú app (phone → profile → Agents → Add), then the four safety words next to a Yes and a No button; the user compares the words with their phone and clicks there. You were given no link, no code and no words, and there is nothing for you to paste or repeat. You cannot confirm or cancel anything: never ask the user to say yes to you, and never claim the enrollment finished. Call action \"status\" when the user asks how it is going, says they clicked, or says no page appeared.",
+    toolStatusReopened: "No browser had shown the page yet, so the plugin has opened it again just now — tell the user to look for the new tab.",
+    toolPageUnreachable:
+      "Enrollment cannot start from here: the enrollment page can only be shown in a browser on the gateway machine, and this gateway is not bound to a loopback address, so no such page exists. Nothing was created. Tell the user to run `openclaw channels add --channel ademu` in a terminal on the gateway machine.",
+    toolPageOpenFailed:
+      "Enrollment was cancelled before anything was written: the enrollment page could not be opened in a browser on the gateway machine (no desktop session or no browser opener there). Tell the user to run `openclaw channels add --channel ademu` in a terminal on the gateway machine.",
     // ----- the browser enrollment page (src/enrollment-page-html.ts) -----
     pageTitle: "Enroll on Ademú",
     pageLoading: "Connecting to the enrollment…",
@@ -133,7 +134,7 @@ export const strings = {
     toolCancelled: "Enrollment cancelled; nothing was written.",
     toolStatus: (phase: string, agentName: string) =>
       ({
-        scanning: "Enrollment state: waiting for the phone to scan the code. Nothing for you to do; the user acts on the page or the phone.",
+        scanning: "Enrollment state: waiting for the phone to scan the code shown on the enrollment page. Nothing for you to do; the user acts on the page or the phone.",
         words_shown: "Enrollment state: the phone has scanned; the user is comparing the four safety words and will click Yes or No on the page. Do NOT ask the user to tell you the words or to say yes to you.",
         confirming: "Enrollment state: the user confirmed the words; the plugin is issuing the device credential and writing the account. Check again in a moment.",
         done: `Enrolled — ${agentName} is on Ademú now. The user confirmed the words themselves. The user can message you from their phone.`,

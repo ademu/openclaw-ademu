@@ -20,16 +20,23 @@ Each release pins the exact `@ademu/adc-bin` (Ademú device daemon) version it w
   Yes / No buttons, quoted-reply `yes` / `no` on WhatsApp, Signal, Matrix, Mattermost and Google Chat, the
   `before_dispatch` hook and the `registerInteractiveHandler` registrations — was moved to a separate
   branch (`feature/outbound-mirror`) and is not part of this release.
+- **The model never holds the page's address.** The enrollment page URL carries the token that
+  authorises `/state`, `/confirm` and `/cancel`, so it now reaches exactly one place: the browser the
+  plugin opens. `start` no longer returns the URL, the QR image or the `ademu://` link — its result says
+  the page opened and nothing else. If no browser ever fetched the page, `status` opens it again itself
+  (after a 5 s grace) instead of handing the model a link to relay. A gateway bound to a non-loopback
+  address has no page to show: `start` refuses before creating a device and names the wizard. A browser
+  launcher that cannot spawn is a failed start: the lease is disposed, nothing is written, and the
+  wizard is named. Removed with this: `channels.ademu.enrollmentPage.autoOpen` and
+  `channels.ademu.enrollmentPage.baseUrl`, the `gateway.publicOrigin` fallback, and the remote-client
+  exception in the route — loopback clients only, with no setting that widens it.
 
 ### Added
 
 - The **enrollment page**: a browser page served on the gateway itself (`/plugins/ademu/enroll/<token>`)
   that shows the QR, then the four safety words with **Yes — the words match** and **No — they differ**.
-  On the gateway machine the tool opens it in the browser automatically when its URL is loopback, so a
-  TUI user (no image rendering there) still only asks, scans, and clicks. Settings:
-  `channels.ademu.enrollmentPage.autoOpen` (default true) and `channels.ademu.enrollmentPage.baseUrl`
-  (browser-facing origin for remote gateways; also enables non-loopback access, otherwise the route
-  answers 404 off-host).
+  The tool opens it in the gateway machine's browser, so a TUI user (no image rendering there) still
+  only asks, scans, and clicks. The route answers loopback clients only.
 
 ### Fixed
 

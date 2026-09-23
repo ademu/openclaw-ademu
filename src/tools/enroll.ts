@@ -21,7 +21,7 @@ import { applyRouteBinding, findRouteBinding, RouteBindingConflictError } from "
 import { createEnrollmentLease, EnrollmentError, mintAccountToken, probeIdentity, tokenLabelFor, type EnrollmentLease, type EnrollmentLeaseDeps } from "../ceremony.js";
 import { CHANNEL_ID, inspectAdemuAccount, listAdemuAccountIds } from "../config.js";
 import { accountExists, applyEnrollment } from "../enroll-config.js";
-import { enrollmentPageUrl, shouldAutoOpenEnrollmentPage } from "../enrollment-page.js";
+import { enrollmentPageBaseUrl, enrollmentPageUrl, isLoopbackEnrollmentPageUrl } from "../enrollment-page.js";
 import { strings } from "../i18n/strings.js";
 import type { Qr } from "../qr.js";
 import { DaemonAbortedError } from "../monitor/daemon.js";
@@ -41,8 +41,15 @@ export type EnrollmentPhase = "scanning" | "words_shown" | "confirming" | "done"
 /** One in-progress enrollment, bound to its creator. */
 export type ActiveEnrollment = {
   lease: EnrollmentLease;
-  /** Bearer capability of the enrollment page (browser surface); ceremony-scoped, in memory only. */
+  /**
+   * Bearer capability of the enrollment page; ceremony-scoped, in memory only. It reaches exactly one
+   * place: the browser the plugin opens (`pageUrl`). It is never part of a tool result.
+   */
   pageToken: string;
+  /** A browser fetched the page shell at least once (set by the route); until then `status` may re-open it. */
+  pageServed: boolean;
+  /** When the launcher was last asked to open the page (`deps.lease.now()` clock), for the re-open grace. */
+  lastOpenedAt: number;
   sessionKey: string;
   requesterSenderId: string | undefined;
   agentId: string | undefined;
@@ -83,6 +90,17 @@ export class EnrollingAgentUnknownError extends Error {
     this.name = "EnrollingAgentUnknownError";
   }
 }
+
+/** The gateway host's browser could not be launched: the ceremony has no display, so it must not run. */
+class PageOpenFailedError extends Error {
+  constructor() {
+    super("the enrollment page could not be opened in a browser on the gateway machine");
+    this.name = "PageOpenFailedError";
+  }
+}
+
+/** `status` re-opens a never-served page no sooner than this after the last launch (the browser may still be starting). */
+export const PAGE_REOPEN_GRACE_MS = 5_000;
 
 /**
  * The enrolling agent: `ctx.agentId` must be present and name a configured agent (`listAgentIds` and
@@ -284,7 +302,23 @@ export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToo
       }
       const phase = phaseOf(active);
       if (phase === "expired") registry.delete(active.deviceId);
-      return text(strings.enroll.toolStatus(phase, active.agentName), { ok: true, state: phase, deviceId: active.deviceId });
+      // The launcher said it spawned but no browser ever fetched the page: open it again — the plugin's
+      // own fallback, so the URL still never travels through the model.
+      let reopened = false;
+      if (phase === "scanning" && !active.pageServed && deps.lease.now() - active.lastOpenedAt >= PAGE_REOPEN_GRACE_MS) {
+        active.lastOpenedAt = deps.lease.now();
+        try {
+          reopened = await deps.openUrl(active.pageUrl);
+        } catch {
+          reopened = false;
+        }
+      }
+      return text(`${strings.enroll.toolStatus(phase, active.agentName)}${reopened ? ` ${strings.enroll.toolStatusReopened}` : ""}`, {
+        ok: true,
+        state: phase,
+        deviceId: active.deviceId,
+        ...(reopened ? { pageReopened: true } : {}),
+      });
     },
   };
 }
@@ -316,6 +350,11 @@ async function startEnrollment(p: {
   const routed = findRouteBinding(cfg, { channel: CHANNEL_ID, accountId });
   if (routed && routed.agentId !== p.ctx.agentId) {
     return text(strings.enroll.toolRoutingConflict(accountId, routed.agentId), { ok: false, state: "routing_conflict", accountId });
+  }
+  // The display is decided BEFORE any device exists too: the page is shown in a browser on this machine
+  // or not at all. A gateway bound to a non-loopback host has no such page → refused, nothing created.
+  if (!isLoopbackEnrollmentPageUrl(enrollmentPageBaseUrl(cfg))) {
+    return text(strings.enroll.toolPageUnreachable, { ok: false, state: "page_unreachable" });
   }
   // SYNCHRONOUS reservation of the conversation before the first await (two concurrent starts cannot
   // both pass the checks below), then authority (an expired call must not even dispose the previous
@@ -376,6 +415,7 @@ async function admitAndStart(p: {
   } catch (err) {
     if (lease.deviceId) p.registry.delete(lease.deviceId);
     await lease.dispose("start-failed");
+    if (err instanceof PageOpenFailedError) return text(strings.enroll.toolPageOpenFailed, { ok: false, state: "page_open_failed" });
     const remedy = remedyFor(err);
     if (remedy) return text(strings.enroll.toolUnavailable(remedy), { ok: false, state: "unavailable" });
     throw err;
@@ -403,6 +443,8 @@ async function startWithLease(p: {
   const entry: ActiveEnrollment = {
     lease,
     pageToken,
+    pageServed: false,
+    lastOpenedAt: p.deps.lease.now(),
     sessionKey: p.sessionKey,
     requesterSenderId: p.ctx.requesterSenderId,
     agentId: p.ctx.agentId,
@@ -453,24 +495,23 @@ async function startWithLease(p: {
   entry.terminal.catch(() => {});
   p.registry.set(entry);
 
-  const dataUrl = await p.deps.qr.pngDataUrl(created.qr_payload);
+  // The display: the page opens in a browser on this machine (the URL is loopback — checked before the
+  // device was created). A launcher that cannot spawn leaves the ceremony without a display, so start
+  // fails and admitAndStart disposes the lease; the URL is never offered as a fallback.
   let opened = false;
-  if (shouldAutoOpenEnrollmentPage(p.cfg, pageUrl)) {
-    // Auto-opened only when its URL is loopback (the user is then on this machine); best-effort,
-    // never fatal — the URL in the result is the fallback.
-    try {
-      opened = await p.deps.openUrl(pageUrl);
-    } catch {
-      opened = false;
-    }
+  try {
+    opened = await p.deps.openUrl(pageUrl);
+  } catch {
+    opened = false;
   }
-  return text(strings.enroll.toolStart({ payload: created.qr_payload, dataUrl, pageUrl, opened }), {
+  if (!opened) throw new PageOpenFailedError();
+  // The result names no URL, no QR and no words: the model is told where the user should look.
+  return text(strings.enroll.toolStart, {
     ok: true,
     state: "scanning",
     deviceId: created.device_id,
     accountId,
-    pageUrl,
-    pageOpened: opened,
+    pageOpened: true,
   });
 }
 

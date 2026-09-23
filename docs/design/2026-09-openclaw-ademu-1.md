@@ -147,6 +147,33 @@ paragraphs above remain accurate for that branch. On this branch the ceremony ha
 page, and the tool result no longer reports a `lane`. Pinned by `test/enroll-tool.test.ts` (registration
 test: no interactive handlers, no hooks) and `test/entries.test.ts`.
 
+**The page token never reaches the model (Codex 2026-09-23 High #1, owner decision the same day).** The
+page URL's token is the bearer credential for `/state`, `/confirm` and `/cancel`; the tool result used to
+print it (with an instruction to paste it) and carry it in `details`, so an agent with any HTTP tool could
+read the words and post the yes — "you cannot confirm" was an instruction, not an enforcement. Since
+the product assumption is that the user sits at the gateway machine, the model is a courier nobody needs.
+Now: (1) `start` checks BEFORE creating a device that the gateway's own origin is loopback
+(`isLoopbackEnrollmentPageUrl(enrollmentPageBaseUrl(cfg))`); otherwise `page_unreachable`, nothing created,
+wizard named. (2) After the device exists the launcher is called; `false` or a throw is
+`PageOpenFailedError` → `admitAndStart` disposes the lease (pairing cancelled) → `page_open_failed`, wizard
+named — the URL is never offered as a fallback. (3) The `start` result is a fixed string ("the page has
+OPENED … you were given no link, no code and no words") with `details` `{ok, state, deviceId, accountId,
+pageOpened: true}`; the QR data URL and the `ademu://` payload left the result with the URL (they are on
+the page). (4) The route sets `active.pageServed` on a `GET` of the shell (not `HEAD`); `status` in
+`scanning` with `pageServed === false` and ≥ `PAGE_REOPEN_GRACE_MS` (5 s, `deps.lease.now()` clock) since
+the last launch calls the launcher again and appends a "opened it again" sentence, `details.pageReopened:
+true` — the plugin's own fallback for a launcher that spawned but showed nothing. (5) Removed:
+`channels.ademu.enrollmentPage.{autoOpen,baseUrl}` (zod schema, manifest, uiHints, `resolveEnrollmentPage`),
+the `gateway.publicOrigin` fallback and the `config-contracts` import, `shouldAutoOpenEnrollmentPage`, the
+`remoteAllowed` exception in the route (loopback clients only, unconditionally) and `EnrollmentPageDeps.cfg`.
+Accepted residue: the loopback route still answers any local process holding the token, so a model with a
+local HTTP tool AND the token could act — but the token now exists only in the registry and the launcher's
+argv; the earlier README sentence "the page URL is then a bearer link" described the remote setting and
+went with it. Pinned by `test/enrollment-page.test.ts` ("the tool's start result": no URL / token / QR in
+text or details; non-loopback bind refuses before the device; launcher failure disposes; re-open after
+grace, not after a served GET, not after HEAD) and `test/enroll-tool.test.ts` (#14 retargeted at the
+launcher).
+
 **Live finding, Telegram (owner's OpenClaw 2026.8.2, 2026-09-18): outbound media refuses `data:` URLs.**
 The first two chat-door attempts from Telegram ended in the plugin's own "could not deliver the QR"
 refusal (nothing created). Reproduced with the host's `openclaw message send`: text delivers; a

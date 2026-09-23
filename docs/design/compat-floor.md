@@ -43,7 +43,6 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `channel-policy` | f2bd76cd1a4 (2026-03-16) | v2026.3.22 |
 | `channel-secret-basic-runtime` | dfb6c9c9207 (2026-04-07) | v2026.4.7 |
 | `channel-setup` | 07d9f725b61 (2026-03-18) | v2026.3.22 |
-| `config-contracts` | 827b0de0ce7 (2026-05-10) | v2026.5.12 |
 | `core` | a4850b1b8f2 (2026-03-04) | v2026.3.7 |
 | `gateway-runtime` | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
 | `media-runtime` (QR helpers; recorded exception) | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
@@ -109,7 +108,6 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `channel-policy` → `resolveChannelGroupRequireMention` | value | f2bd76cd1a4 (2026-03-16) | v2026.3.22 |
 | `channel-secret-basic-runtime` → `createSimpleChannelSecretContract` | value | 10e60fa0ce6 (2026-08-07) | **v2026.8.1** |
 | `channel-setup` → `ChannelSetupWizard` | type | 07d9f725b61 (2026-03-18) | v2026.3.22 |
-| `config-contracts` → `resolveGatewayPublicOrigin` | value | 508dd471b0c (2026-08-12) | **v2026.8.1** |
 | `core` → `ChannelMessagingAdapter` | type | 826c592debf (2026-03-18) | v2026.3.22 |
 | `core` → `OpenClawPluginApi` | type | a4850b1b8f2 (2026-03-04) | v2026.3.7 |
 | `core` → `OpenClawPluginToolContext` | type | aa78a0c00e5 (2026-03-20) | v2026.3.22 |

@@ -11,8 +11,8 @@ import {
   enrollmentPageUrl,
   type EnrollmentPageDeps,
   FixedWindowLimiter,
+  isLoopbackEnrollmentPageUrl,
   registerEnrollmentPage,
-  shouldAutoOpenEnrollmentPage,
 } from "../src/enrollment-page.js";
 import { cancelByHuman, confirmByHuman } from "../src/tools/enroll.js";
 import { NEW_DEVICE, QR, WORDS } from "./fakes/control.js";
@@ -26,7 +26,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
 });
 
-async function serve(w: World, cfg: OpenClawConfig = {} as OpenClawConfig, over: Partial<EnrollmentPageDeps> = {}) {
+async function serve(w: World, over: Partial<EnrollmentPageDeps> = {}) {
   let route: Route | undefined;
   const api = { registerHttpRoute: (r: Route) => void (route = r) };
   registerEnrollmentPage(api as never, {
@@ -34,7 +34,6 @@ async function serve(w: World, cfg: OpenClawConfig = {} as OpenClawConfig, over:
     qr: w.deps.qr,
     confirm: (active) => confirmByHuman(active, w.deps, w.registry),
     cancel: (active) => cancelByHuman(active, w.registry),
-    cfg: () => cfg,
     ...over,
   });
   const server = http.createServer((req, res) => void route!.handler(req, res));
@@ -45,10 +44,14 @@ async function serve(w: World, cfg: OpenClawConfig = {} as OpenClawConfig, over:
   return { route: route!, base, page: (token: string, sub = "") => `${base}/${token}${sub}` };
 }
 
-/** Starts an enrollment through the real tool and returns its page token (from the result's URL). */
+/**
+ * Starts an enrollment through the real tool and returns its page token. The ONLY place the URL surfaces
+ * is the browser launcher (`w.opens`): the tool result carries neither the URL nor the token.
+ */
 async function started(w: World) {
+  const before = w.opens.length;
   const start = await w.call({ action: "start", agentName: "Iris" });
-  const pageUrl = start.details.pageUrl as string;
+  const pageUrl = w.opens[before]!;
   return { start, pageUrl, token: pageUrl.slice(pageUrl.lastIndexOf("/") + 1) };
 }
 
@@ -58,63 +61,111 @@ const confirmPost = (url: string, headers: Record<string, string> = { "content-t
 const UNKNOWN = "0".repeat(40);
 
 describe("enrollment page: the tool's start result", () => {
-  it("carries a loopback page URL with a 40-hex token and auto-opens it exactly once", async () => {
+  it("opens a loopback page URL with a 40-hex token exactly once, and the result names neither the URL, the token, the QR nor the words", async () => {
     const w = world();
-    const { start, pageUrl } = await started(w);
+    const { start, pageUrl, token } = await started(w);
     expect(pageUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/plugins\/ademu\/enroll\/[a-f0-9]{40}$/);
-    expect(start.details).toMatchObject({ pageOpened: true });
     expect(w.opens).toEqual([pageUrl]);
-    expect(start.content[0]!.text).toContain(pageUrl);
-    expect(start.content[0]!.text).toContain("OPENED");
-    // the markdown QR for clients that render images is still there
-    expect(start.content[0]!.text).toContain("![ademu-enroll](data:image/png;base64,QUJD)");
+    expect(start.details).toMatchObject({ ok: true, state: "scanning", pageOpened: true });
+    expect(start.details).not.toHaveProperty("pageUrl");
+    const txt = start.content[0]!.text;
+    expect(txt).toContain("OPENED");
+    expect(txt).not.toMatch(/https?:\/\//);
+    expect(txt).not.toContain(token);
+    expect(txt).not.toContain("data:image");
+    expect(txt).not.toContain(QR);
   });
 
-  it("autoOpen: false → not opened, the text tells the model the user can open the page", async () => {
-    const w = world({ channels: { ademu: { enrollmentPage: { autoOpen: false } } } } as unknown as OpenClawConfig);
-    const { start } = await started(w);
+  it("a gateway bound to a non-loopback host has no page to show: start refuses BEFORE any device or lease exists", async () => {
+    const w = world({ gateway: { port: 4321, bind: "custom", customBindHost: "10.0.0.5" } } as unknown as OpenClawConfig);
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(r.details).toMatchObject({ ok: false, state: "page_unreachable" });
+    expect(r.content[0]!.text).toContain("openclaw channels add --channel ademu");
+    expect(r.content[0]!.text).not.toMatch(/https?:\/\//);
+    expect(w.control.calls).toEqual([]);
+    expect(w.acquires).toEqual([]);
     expect(w.opens).toEqual([]);
-    expect(start.details).toMatchObject({ pageOpened: false });
-    expect(start.content[0]!.text).toContain("can open the enrollment page");
   });
 
-  it("a remote base URL is used for the page URL and is never auto-opened", async () => {
-    const w = world({ channels: { ademu: { enrollmentPage: { baseUrl: "https://gw.example.com/" } } } } as unknown as OpenClawConfig);
-    const { pageUrl } = await started(w);
-    expect(pageUrl).toMatch(/^https:\/\/gw\.example\.com\/plugins\/ademu\/enroll\/[a-f0-9]{40}$/);
-    expect(w.opens).toEqual([]);
+  it("a browser launcher that throws or returns false FAILS the start: lease disposed once, pairing cancelled, nothing written, no URL offered", async () => {
+    for (const launcher of [async () => false, async () => Promise.reject(new Error("no opener"))]) {
+      const w = world();
+      w.deps.openUrl = launcher as typeof w.deps.openUrl;
+      const r = await w.call({ action: "start", agentName: "Iris" });
+      expect(r.details).toMatchObject({ ok: false, state: "page_open_failed" });
+      expect(r.content[0]!.text).toContain("openclaw channels add --channel ademu");
+      expect(r.content[0]!.text).not.toMatch(/https?:\/\//);
+      expect(w.registry.size).toBe(0);
+      expect(w.released()).toBe(1);
+      expect(w.control.closed).toBe(1);
+      expect(w.control.calls.some((c) => c.op === "cancel_pairing")).toBe(true);
+      expect(w.writes).toEqual([]);
+    }
   });
 
-  it("a failing browser launcher is not fatal", async () => {
+  it("status re-opens a page no browser ever fetched — after a grace, through the launcher, never through the model — and stops once the shell was served", async () => {
     const w = world();
-    w.deps.openUrl = async () => {
-      throw new Error("no opener");
-    };
-    const { start } = await started(w);
-    expect(start.details).toMatchObject({ ok: true, pageOpened: false });
+    let now = 0;
+    w.deps.lease.now = () => now;
+    const { pageUrl, token } = await started(w);
+    // Inside the grace: the browser may still be starting.
+    let s = await w.call({ action: "status" });
+    expect(w.opens).toHaveLength(1);
+    expect(s.details).not.toHaveProperty("pageReopened");
+    // Past the grace, still no fetch of the shell: opened again, with the same URL, and the result says so without naming it.
+    now = 6_000;
+    s = await w.call({ action: "status" });
+    expect(w.opens).toEqual([pageUrl, pageUrl]);
+    expect(s.details).toMatchObject({ ok: true, state: "scanning", pageReopened: true });
+    expect(s.content[0]!.text).toContain("opened it again");
+    expect(s.content[0]!.text).not.toMatch(/https?:\/\//);
+    expect(s.content[0]!.text).not.toContain(token);
+    // A browser fetched the shell → no more re-opens, however long it takes.
+    const { page } = await serve(w);
+    expect((await fetch(page(token))).status).toBe(200);
+    now = 60_000;
+    s = await w.call({ action: "status" });
+    expect(w.opens).toHaveLength(2);
+    expect(s.details).not.toHaveProperty("pageReopened");
+    // Nor once the phone has scanned (a served page is implied; the phase guard is belt and braces).
+    w.control.emit({ state: "paired", words: WORDS });
+    now = 120_000;
+    s = await w.call({ action: "status" });
+    expect(w.opens).toHaveLength(2);
+    expect(s.details.state).toBe("words_shown");
+  });
+
+  it("a HEAD of the shell does not count as served (the browser renders GET)", async () => {
+    const w = world();
+    let now = 0;
+    w.deps.lease.now = () => now;
+    const { token } = await started(w);
+    const { page } = await serve(w);
+    expect((await fetch(page(token), { method: "HEAD" })).status).toBe(200);
+    now = 6_000;
+    await w.call({ action: "status" });
+    expect(w.opens).toHaveLength(2);
   });
 });
 
 describe("enrollment page: URL derivation", () => {
-  it("explicit base URL → gateway publicOrigin → the gateway's own bind (port never hardcoded)", () => {
-    const explicit = { channels: { ademu: { enrollmentPage: { baseUrl: "https://a.example/" } } }, gateway: { publicOrigin: "https://b.example" } } as unknown as OpenClawConfig;
-    expect(enrollmentPageBaseUrl(explicit)).toBe("https://a.example");
-    expect(enrollmentPageBaseUrl({ gateway: { publicOrigin: "https://b.example/" } } as unknown as OpenClawConfig)).toBe("https://b.example");
+  it("the gateway's own bind decides the origin (port never hardcoded); nothing else does", () => {
     expect(enrollmentPageBaseUrl({ gateway: { port: 4321 } } as unknown as OpenClawConfig, {})).toBe("http://127.0.0.1:4321");
     expect(enrollmentPageBaseUrl({ gateway: { port: 4321, tls: { enabled: true }, bind: "custom", customBindHost: "10.0.0.5" } } as unknown as OpenClawConfig, {})).toBe(
       "https://10.0.0.5:4321",
     );
+    // Former remote-exposure settings are ignored (and rejected by the config schema).
+    expect(enrollmentPageBaseUrl({ gateway: { port: 4321, publicOrigin: "https://b.example" } } as unknown as OpenClawConfig, {})).toBe("http://127.0.0.1:4321");
     expect(enrollmentPageUrl({ gateway: { port: 1 } } as unknown as OpenClawConfig, "t", {})).toBe("http://127.0.0.1:1/plugins/ademu/enroll/t");
   });
 
-  it("auto-open only for loopback URLs, and never when disabled", () => {
-    const cfg = {} as OpenClawConfig;
-    expect(shouldAutoOpenEnrollmentPage(cfg, "http://127.0.0.1:1/x")).toBe(true);
-    expect(shouldAutoOpenEnrollmentPage(cfg, "http://localhost:1/x")).toBe(true);
-    expect(shouldAutoOpenEnrollmentPage(cfg, "http://[::1]:1/x")).toBe(true);
-    expect(shouldAutoOpenEnrollmentPage(cfg, "https://gw.example.com/x")).toBe(false);
-    expect(shouldAutoOpenEnrollmentPage(cfg, "not a url")).toBe(false);
-    expect(shouldAutoOpenEnrollmentPage({ channels: { ademu: { enrollmentPage: { autoOpen: false } } } } as unknown as OpenClawConfig, "http://127.0.0.1:1/x")).toBe(false);
+  it("only loopback URLs can be shown", () => {
+    expect(isLoopbackEnrollmentPageUrl("http://127.0.0.1:1/x")).toBe(true);
+    expect(isLoopbackEnrollmentPageUrl("http://localhost:1/x")).toBe(true);
+    expect(isLoopbackEnrollmentPageUrl("http://[::1]:1/x")).toBe(true);
+    expect(isLoopbackEnrollmentPageUrl("https://10.0.0.5:1/x")).toBe(false);
+    expect(isLoopbackEnrollmentPageUrl("https://gw.example.com/x")).toBe(false);
+    expect(isLoopbackEnrollmentPageUrl("not a url")).toBe(false);
   });
 });
 
@@ -181,19 +232,17 @@ describe("enrollment page: the route", () => {
     expect(r3.headers.get("allow")).toBe("POST");
   });
 
-  it("non-loopback clients get 404 unless a browser-facing base URL or publicOrigin is configured", async () => {
+  it("non-loopback clients always get 404 — every endpoint, no setting widens it", async () => {
     const w = world();
     const { token } = await started(w);
     const remote = { clientAddr: () => "203.0.113.9" };
-    const closed = await serve(w, {} as OpenClawConfig, remote);
+    const closed = await serve(w, remote);
     expect((await fetch(closed.page(token))).status).toBe(404);
     expect((await fetch(closed.page(token, "/state"))).status).toBe(404);
-    const viaBase = await serve(w, { channels: { ademu: { enrollmentPage: { baseUrl: "https://gw.example.com" } } } } as unknown as OpenClawConfig, remote);
-    expect((await fetch(viaBase.page(token))).status).toBe(200);
-    const viaOrigin = await serve(w, { gateway: { publicOrigin: "https://gw.example.com" } } as unknown as OpenClawConfig, remote);
-    expect((await fetch(viaOrigin.page(token, "/state"))).status).toBe(200);
+    expect((await confirmPost(closed.page(token, "/confirm"))).status).toBe(404);
+    expect((await confirmPost(closed.page(token, "/cancel"))).status).toBe(404);
     // IPv4-mapped loopback counts as loopback
-    const mapped = await serve(w, {} as OpenClawConfig, { clientAddr: () => "::ffff:127.0.0.1" });
+    const mapped = await serve(w, { clientAddr: () => "::ffff:127.0.0.1" });
     expect((await fetch(mapped.page(token))).status).toBe(200);
   });
 
@@ -202,11 +251,11 @@ describe("enrollment page: the route", () => {
     const { token } = await started(w);
     const limited = new FixedWindowLimiter(60_000, 0);
     const open = new FixedWindowLimiter(60_000, 1000);
-    const a = await serve(w, {} as OpenClawConfig, { limiters: { poll: limited, confirm: open, unknownToken: open } });
+    const a = await serve(w, { limiters: { poll: limited, confirm: open, unknownToken: open } });
     expect((await fetch(a.page(token, "/state"))).status).toBe(429);
-    const b = await serve(w, {} as OpenClawConfig, { limiters: { poll: open, confirm: limited, unknownToken: open } });
+    const b = await serve(w, { limiters: { poll: open, confirm: limited, unknownToken: open } });
     expect((await confirmPost(b.page(token, "/confirm"))).status).toBe(429);
-    const c = await serve(w, {} as OpenClawConfig, { limiters: { poll: open, confirm: open, unknownToken: limited } });
+    const c = await serve(w, { limiters: { poll: open, confirm: open, unknownToken: limited } });
     expect((await fetch(c.page(UNKNOWN, "/state"))).status).toBe(429);
   });
 

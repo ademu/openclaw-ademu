@@ -46,7 +46,6 @@ export default defineChannelPluginEntry({
       qr,
       confirm: (active) => confirmByHuman(active, deps, registry),
       cancel: (active) => cancelByHuman(active, registry),
-      cfg: () => api.runtime.config.current() as never,
     });
   },
 });

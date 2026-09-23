@@ -13,15 +13,15 @@
 // property still rests entirely on the human comparing the words with the phone — the page adds a
 // yes SURFACE, not a yes authority (`confirmFromPage` is the tool's own confirm path).
 //
-// Exposure: loopback clients only, unless a browser-facing base URL (`channels.ademu.enrollmentPage.
-// baseUrl`) or `gateway.publicOrigin` is configured; everything else answers 404, indistinguishable
-// from "no such route". Nothing here logs: the URL, the token, the payload and the words are secrets.
+// The token therefore goes ONLY to the browser the plugin opens: the tool never puts the URL into a
+// tool result (the model is a courier nobody needs — the user is at the gateway machine), and the
+// route answers loopback clients only; everything else gets 404, indistinguishable from "no such
+// route". There is no setting that widens either. Nothing here logs: the URL, the token, the payload
+// and the words are secrets.
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
-import { resolveGatewayPublicOrigin } from "openclaw/plugin-sdk/config-contracts";
 import { type OpenClawPluginApi, resolveGatewayPort } from "openclaw/plugin-sdk/core";
-import { resolveEnrollmentPage } from "./config.js";
 import { renderEnrollmentPageHtml } from "./enrollment-page-html.js";
 import { strings } from "./i18n/strings.js";
 import type { Qr } from "./qr.js";
@@ -35,14 +35,11 @@ export const ENROLLMENT_PAGE_TOKEN_RE = /^[a-f0-9]{40}$/;
 // --- URL building --------------------------------------------------------------------------------
 
 /**
- * The browser-facing origin: explicit channel setting → gateway publicOrigin → the gateway's own
- * bind (loopback default). The port is never hardcoded: profiles hash it.
+ * The origin the gateway's own bind gives the page (loopback by default). The port is never
+ * hardcoded: profiles hash it. A gateway bound to a non-loopback host yields a non-loopback URL, which
+ * `start` refuses (`isLoopbackEnrollmentPageUrl`): the page is shown on this machine or not at all.
  */
 export function enrollmentPageBaseUrl(cfg: OpenClawConfig, env: NodeJS.ProcessEnv = process.env): string {
-  const explicit = resolveEnrollmentPage(cfg).baseUrl;
-  if (explicit) return explicit.replace(/\/+$/, "");
-  const publicOrigin = resolveGatewayPublicOrigin(cfg);
-  if (publicOrigin) return publicOrigin.replace(/\/+$/, "");
   const gateway = (cfg as { gateway?: { tls?: { enabled?: boolean }; bind?: string; customBindHost?: string } }).gateway;
   const scheme = gateway?.tls?.enabled ? "https" : "http";
   const host = gateway?.bind === "custom" && gateway.customBindHost?.trim() ? gateway.customBindHost.trim() : "127.0.0.1";
@@ -53,7 +50,7 @@ export function enrollmentPageUrl(cfg: OpenClawConfig, pageToken: string, env: N
   return `${enrollmentPageBaseUrl(cfg, env)}${ENROLLMENT_ROUTE_PREFIX}/${SEGMENT}/${pageToken}`;
 }
 
-// --- auto-open (the zero-action display on the gateway host) -------------------------------------
+// --- the display: a loopback page opened on the gateway host --------------------------------------
 
 function isLoopbackHostname(hostname: string): boolean {
   const h = hostname.replace(/^\[|\]$/g, "");
@@ -61,12 +58,11 @@ function isLoopbackHostname(hostname: string): boolean {
 }
 
 /**
- * Open only when the page URL is loopback — such a page is reachable from this machine alone, so
- * the user must be here (TUI/webchat on the same box) and opening it IS the display. Remote/exposed
- * setups never auto-open (the browser is elsewhere). Opt out: `channels.ademu.enrollmentPage.autoOpen: false`.
+ * The page can be shown only when its URL is loopback: such a page is reachable from this machine
+ * alone, so opening it here IS the display. Anything else means the browser would be elsewhere, and
+ * `start` refuses before creating a device (the way out is the terminal wizard on the gateway machine).
  */
-export function shouldAutoOpenEnrollmentPage(cfg: OpenClawConfig, url: string): boolean {
-  if (resolveEnrollmentPage(cfg).autoOpen === false) return false;
+export function isLoopbackEnrollmentPageUrl(url: string): boolean {
   try {
     return isLoopbackHostname(new URL(url).hostname);
   } catch {
@@ -126,8 +122,6 @@ export type EnrollmentPageDeps = {
   /** The tool's yes / no paths (`confirmByHuman` / `cancelByHuman`), injected so this module stays decoupled. */
   confirm: (active: ActiveEnrollment) => Promise<HumanDecision>;
   cancel: (active: ActiveEnrollment) => Promise<HumanDecision>;
-  /** The live host config (exposure gate, base URL). */
-  cfg: () => OpenClawConfig;
   /** Test seams. Proxy headers are deliberately never consulted. */
   clientAddr?: (req: IncomingMessage) => string | undefined;
   limiters?: { poll: FixedWindowLimiter; confirm: FixedWindowLimiter; unknownToken: FixedWindowLimiter };
@@ -227,11 +221,9 @@ export function registerEnrollmentPage(api: OpenClawPluginApi, deps: EnrollmentP
       return true;
     }
 
-    // Exposure gate: loopback only unless remote exposure was deliberately configured.
-    const cfg = deps.cfg();
+    // Exposure gate: loopback clients only; no configuration widens it.
     const addr = clientAddr(req);
-    const remoteAllowed = resolveEnrollmentPage(cfg).baseUrl !== undefined || resolveGatewayPublicOrigin(cfg) !== undefined;
-    if (!isLoopbackAddress(addr) && !remoteAllowed) {
+    if (!isLoopbackAddress(addr)) {
       send(res, 404, "text/plain; charset=utf-8", "Not found");
       return true;
     }
@@ -253,6 +245,8 @@ export function registerEnrollmentPage(api: OpenClawPluginApi, deps: EnrollmentP
     }
 
     if (endpoint === "page") {
+      // A browser has the shell: `status` will not re-open the page for this ceremony.
+      if (method === "GET") active.pageServed = true;
       const cspNonce = randomBytes(16).toString("base64");
       send(res, 200, "text/html; charset=utf-8", method === "HEAD" ? undefined : renderEnrollmentPageHtml({ cspNonce }), {
         "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${cspNonce}'; style-src 'nonce-${cspNonce}'; img-src data:; connect-src 'self'`,
@@ -300,7 +294,7 @@ export function registerEnrollmentPage(api: OpenClawPluginApi, deps: EnrollmentP
       return true;
     }
     if (active.state !== "words") {
-      // confirmed/enrolled/committing: a yes is already in flight (from this page or a channel button).
+      // confirmed/enrolled/committing: a yes is already in flight from this page.
       sendJson(res, 200, { ok: true, alreadyConfirmed: true, phase: "confirming" });
       return true;
     }
