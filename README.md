@@ -40,8 +40,8 @@ user does exactly three things — ask the agent to connect to Ademú (or run th
 the QR shown by the agent device with the Ademú app, and confirm that the four safety words match.
 Nothing else: no commands to type, no links to copy, no files to open, no extra steps. Where a
 surface cannot show the QR itself (OpenClaw's TUI renders no images), the plugin puts the QR and the
-words in front of the user on its own — the **enrollment page** in a browser, or messages with Yes / No
-buttons pushed into the chat (see door two, and its table of where this works).
+words in front of the user on its own — the **enrollment page** it opens in a browser on the gateway
+machine (see door two). Both doors assume you are at the gateway machine.
 
 ### Door one — the wizard (terminal)
 
@@ -65,43 +65,29 @@ Tell your agent (from any chat where you are the owner):
 
 The agent calls the `ademu_enroll` tool, which has exactly two actions, **start** and **status**. The
 agent can neither confirm nor cancel an enrollment: the plugin puts the QR, the link, the four safety
-words and a **Yes / No** choice in front of you itself, and you decide. What you see depends on where
-you are talking from:
+words and a **Yes / No** choice in front of you itself, and you decide. Whatever chat you asked from,
+the ceremony happens in one place:
 
-- **TUI, web UI or Control UI on the gateway machine:** the **enrollment page** opens in your browser
-  (a page served by the plugin on the gateway itself, `/plugins/ademu/enroll/<token>`). It shows the QR,
-  then the four words with **Yes — the words match** and **No — they differ**. The web UI also renders
-  the QR inline.
-- **Telegram, Slack, Discord:** the plugin sends the QR image with the exact `ademu://` link into the
-  conversation, then — once your phone has scanned — the four words with Yes / No buttons. Only the
-  person who started the enrollment can press them. Replying to that message with "yes" or "no" works
-  too.
-- **WhatsApp, Signal, Matrix, Mattermost, Google Chat:** same, without buttons — you **reply to the
-  words message** (quote it) with `yes` or `no`. Only a quoted reply counts: a plain "yes" typed in the
-  chat is an ordinary message for the agent, so nothing else you say during the enrollment changes
-  meaning. Only the person who started the enrollment is heard.
-- **Any other channel:** the plugin sends the QR + link and later the words with a link to the
-  enrollment page — **only if** `channels.ademu.enrollmentPage.baseUrl` (or `gateway.publicOrigin`)
-  makes the page reachable from your phone's browser. Otherwise `start` refuses before creating anything
-  and names the terminal wizard and that setting.
+- The **enrollment page** opens in your browser on the gateway machine (a page served by the plugin on
+  the gateway itself, `/plugins/ademu/enroll/<token>`). It shows the QR, then the four words with
+  **Yes — the words match** and **No — they differ**. The web UI also renders the QR inline.
 
-Either way your actions are the same three: ask, scan (or tap the link on the phone that runs Ademú),
-and say yes after comparing the words — by clicking, tapping, or replying to the words message. Nothing
-is written unless you did; a No, or three minutes of silence, ends the ceremony with nothing written. The
-words never pass through the model, and a model cannot say yes for you.
+Your actions are the same three as door one: ask, scan (or open the link on the phone that runs
+Ademú), and click Yes after comparing the words. Nothing is written unless you did; a No, or three
+minutes of silence, ends the ceremony with nothing written. The words never pass through the model, and
+a model cannot say yes for you.
 
 #### Where it works, and where it does not
 
 | You are on | QR / link | Words | Your Yes / No | Works? |
 |---|---|---|---|---|
 | TUI, web UI, Control UI on the gateway machine | page (auto-opens) + inline in the web UI | page | page buttons | yes |
-| TUI over SSH / remote web UI, no `enrollmentPage.baseUrl` | page URL printed, but unreachable from your browser | — | — | **no** — set `enrollmentPage.baseUrl` (or `gateway.publicOrigin`, or tunnel the gateway port) |
-| Telegram, Slack, Discord | pushed into the chat | pushed | **buttons**, or a quoted reply `yes` / `no` (starter only) | yes |
-| WhatsApp, Signal, Matrix, Mattermost, Google Chat | pushed into the chat | pushed | **quoted reply** `yes` / `no` to the words message (starter only) | yes |
-| iMessage, IRC, Nextcloud Talk, Feishu, Buzz, Tlon, ClickClack, MS Teams | pushed into the chat | pushed + page link | page only | **only with** `enrollmentPage.baseUrl` / `publicOrigin` — their inbound quoted-message id is unverified, so the reply lane stays off until a live check; otherwise `start` refuses |
-| LINE, SMS, Nostr, Synology Chat, Twitch, Zalo, A2A, Raft, any other channel | pushed into the chat | pushed + page link | page only | **only with** `enrollmentPage.baseUrl` / `publicOrigin` (no quoting support); otherwise `start` refuses |
-| Phone only, any channel | the QR cannot be scanned from the same phone — tap the `ademu://` link | | | depends on the channel making a custom-scheme link tappable (Telegram does not); otherwise scan from a second device or use the page link |
-| A group chat on a button channel | pushed to the group | pushed to the group | only the starter's click counts | yes, but everyone in the group sees the words |
+| A chat channel (Telegram, WhatsApp, …) while sitting at the gateway machine | page (auto-opens on the gateway machine) | page | page buttons | yes |
+| TUI over SSH, a remote web UI, or a chat channel away from the gateway machine | page URL printed, but unreachable from your browser | — | — | **no** — run `openclaw channels add --channel ademu` on the gateway machine |
+| Phone only | the QR cannot be scanned from the same phone — open the `ademu://` link from the page | | | scan from a second device, or use the page's copy-link on the phone |
+
+Pushing the QR, the words and Yes / No buttons into the chat itself (Telegram, Slack, Discord buttons;
+quoted-reply decisions elsewhere) is not part of this release; that lane lives on a separate branch.
 
 Settings: `channels.ademu.enrollmentPage.autoOpen` (default true) opens the page in the gateway
 machine's browser when its URL is loopback; `channels.ademu.enrollmentPage.baseUrl` is the

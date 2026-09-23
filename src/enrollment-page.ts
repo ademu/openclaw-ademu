@@ -53,11 +53,6 @@ export function enrollmentPageUrl(cfg: OpenClawConfig, pageToken: string, env: N
   return `${enrollmentPageBaseUrl(cfg, env)}${ENROLLMENT_ROUTE_PREFIX}/${SEGMENT}/${pageToken}`;
 }
 
-/** Reachable from a browser that is NOT on the gateway machine: an explicit base URL or a public origin. */
-export function isEnrollmentPageRemotelyReachable(cfg: OpenClawConfig): boolean {
-  return resolveEnrollmentPage(cfg).baseUrl !== undefined || resolveGatewayPublicOrigin(cfg) !== undefined;
-}
-
 // --- auto-open (the zero-action display on the gateway host) -------------------------------------
 
 function isLoopbackHostname(hostname: string): boolean {

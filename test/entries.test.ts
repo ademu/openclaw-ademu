@@ -70,10 +70,9 @@ describe("entries", () => {
       expect(calls.filter((c) => c[0] === "registerHttpRoute").map((c) => c[1])).toEqual([
         { path: "/plugins/ademu", auth: "plugin", match: "prefix", replaceExisting: true },
       ]);
-      // Yes/No button clicks are routed to the plugin on exactly the channels OpenClaw dispatches them for.
-      expect(calls.filter((c) => c[0] === "registerInteractiveHandler").map((c) => c[1])).toEqual(["telegram:ademu", "slack:ademu", "discord:ademu"]);
-      // The quoted-reply decision hook registers in both passes (inert in tool-discovery; visible to `plugins inspect --runtime`).
-      expect(calls.filter((c) => c[0] === "on").map((c) => c[1])).toEqual([{ name: "before_dispatch", opts: { priority: 100 } }]);
+      // Page-only ceremony: no channel button handlers and no inbound hooks are registered.
+      expect(calls.filter((c) => c[0] === "registerInteractiveHandler")).toEqual([]);
+      expect(calls.filter((c) => c[0] === "on")).toEqual([]);
       if (mode === "full") expect(calls.some((c) => c[0] === "registerChannel" && c[1] === "ademu")).toBe(true);
     }
     // No SQLite database and no daemon dir were created by registering.

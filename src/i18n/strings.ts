@@ -78,26 +78,18 @@ export const strings = {
       "The Ademú device host binary is not available for this platform. Install the plugin from npm with optional dependencies enabled, or set channels.ademu.socketPath to a running adc daemon.",
     authorityExpired: "Ademú enrollment authority is no longer active.",
     toolDescription:
-      "Enroll this agent on Ademú (end-to-end encrypted messaging). Use when the user wants to talk to you on Ademú or asks to enroll or connect the agent to the Ademú app. Actions: start (the plugin shows the user a QR code and, later, the four safety words with Yes/No — on the enrollment page or as buttons in this conversation), status (where the enrollment stands). You can neither confirm nor cancel an enrollment: only the user does, on the page or the buttons.",
+      "Enroll this agent on Ademú (end-to-end encrypted messaging). Use when the user wants to talk to you on Ademú or asks to enroll or connect the agent to the Ademú app. Actions: start (the plugin opens the enrollment page in the user's browser on this machine; it shows a QR code and, later, the four safety words with Yes/No), status (where the enrollment stands). You can neither confirm nor cancel an enrollment: only the user does, on the page.",
     toolLabel: "Enroll on Ademú",
     toolNeedsSession: "Enrollment needs a conversation session; ask again from a chat.",
     toolLeaseMismatch: "That enrollment belongs to another conversation (or to another sender or agent in this one); it cannot be inspected from here.",
     toolNoActive: "No enrollment is in progress. Use action \"start\" first.",
     toolAccountExists: (id: string, ids: string[]) => `An Ademú account named "${id}" already exists (${ids.join(", ")}). Choose another accountId.`,
-    toolStart: (p: { payload: string; dataUrl: string; pageUrl: string; opened: boolean; lane: "page" | "push"; buttons: boolean; reply: boolean; pageReachable: boolean; channel?: string | undefined; imageSent?: boolean | undefined }) =>
-      p.lane === "page"
-        ? `Scan this with the Ademú app (phone → profile → Agents → Add):\n\n![ademu-enroll](${p.dataUrl})\n\nOr open on the phone: ${p.payload}\n\n${
-            p.opened
-              ? "The enrollment page has just OPENED in the user's browser on this machine — tell them to look for it."
-              : "The user can open the enrollment page in a browser on the gateway machine."
-          } Paste this exact URL into your reply on its own line (it is a pointer to the page, not the enrollment link — never retype the QR contents):\n${p.pageUrl}\nThe page shows the QR, then the four safety words next to a Yes and a No button. The user compares the words with their phone and clicks there. You cannot confirm or cancel anything: never ask the user to say yes to you, and never claim the enrollment finished. Call action "status" when the user asks how it is going or says they clicked.`
-        : `The plugin has just sent ${p.imageSent === false ? "the exact enrollment link (the QR image could not be attached on this channel)" : "the QR code and the exact enrollment link"} INTO THIS CONVERSATION (${p.channel ?? "this channel"}) — not through you. Tell the user: tap the link on the phone that runs the Ademú app${p.imageSent === false ? "" : " (or scan the code with it from another device)"}. When the phone has scanned, the plugin sends the four safety words here${
-            p.buttons
-              ? " with a Yes and a No button; the user compares them with the phone and taps one (or replies yes / no to that message)"
-              : p.reply
-                ? "; the user compares them with the phone and REPLIES to that message (quote it) with yes or no — a plain yes typed without quoting is not a decision"
-                : ` together with a link to the enrollment page (${p.pageUrl}) where the user compares them with the phone and clicks Yes or No`
-          }. You cannot confirm or cancel anything: never ask the user to say yes to you, never repeat or describe the link or the words, and never claim the enrollment finished. Call action "status" when the user asks how it is going.`,
+    toolStart: (p: { payload: string; dataUrl: string; pageUrl: string; opened: boolean }) =>
+      `Scan this with the Ademú app (phone → profile → Agents → Add):\n\n![ademu-enroll](${p.dataUrl})\n\nOr open on the phone: ${p.payload}\n\n${
+        p.opened
+          ? "The enrollment page has just OPENED in the user's browser on this machine — tell them to look for it."
+          : "The user can open the enrollment page in a browser on the gateway machine."
+      } Paste this exact URL into your reply on its own line (it is a pointer to the page, not the enrollment link — never retype the QR contents):\n${p.pageUrl}\nThe page shows the QR, then the four safety words next to a Yes and a No button. The user compares the words with their phone and clicks there. You cannot confirm or cancel anything: never ask the user to say yes to you, and never claim the enrollment finished. Call action "status" when the user asks how it is going or says they clicked.`,
     // ----- the browser enrollment page (src/enrollment-page-html.ts) -----
     pageTitle: "Enroll on Ademú",
     pageLoading: "Connecting to the enrollment…",
@@ -139,45 +131,15 @@ export const strings = {
       `Enrollment refused: ademu:${accountId} is already routed to OpenClaw agent "${existingAgentId}" and was left as is. Start again with another accountId, or first run: openclaw agents unbind --agent ${existingAgentId} --bind ademu:${accountId}. Nothing was written.`,
     toolUnavailable: (remedy: string) => `Enrollment cannot start right now. ${remedy}`,
     toolCancelled: "Enrollment cancelled; nothing was written.",
-    // ----- messages the plugin itself pushes into a chat channel (never the model) -----
-    pushQrCaption: (p: { agentName: string; link: string; pageUrl?: string | undefined }) =>
-      `Enroll ${p.agentName} on Ademú.\n\nOpen Ademú on your phone → your profile → Agents → Add, then scan this code. On this phone, tap the link instead:\n${p.link}${
-        p.pageUrl ? `\n\nOr open the enrollment page in a browser: ${p.pageUrl}` : ""
-      }\n\nThe code is valid for three minutes.`,
-    pushWords: (w: readonly [string, string, string, string], how: { buttons: boolean; reply: boolean; pageUrl?: string | undefined }) => {
-      const ways: string[] = [];
-      if (how.buttons) ways.push("tap Yes if they match, No if they differ");
-      if (how.reply) ways.push("reply to this message with yes or no");
-      if (how.pageUrl) ways.push(`open ${how.pageUrl} and click Yes or No`);
-      const action = ways.length === 0 ? "confirm them on the enrollment page" : ways.join(", or ");
-      return `Your phone now shows four safety words. They should be:\n\n${w.join("   ")}\n\nCompare them with your phone, then ${action}.`;
-    },
-    /** The closed set of decision words a quoted reply may carry (lowercase, trimmed). */
-    decisionYes: ["yes", "y"] as readonly string[],
-    decisionNo: ["no", "n"] as readonly string[],
-    pushQrImageMissing: "(The QR image could not be attached here; tap the link above on the phone that runs Ademú instead.)",
-    buttonYes: "Yes — the words match",
-    buttonNo: "No — they differ",
-    buttonStale: "This enrollment is no longer active. Ask the agent to connect to Ademú again.",
-    buttonNotYours: "Only the person who started this enrollment can confirm or cancel it.",
-    pushEnrolled: (agentName: string) => `Enrolled — ${agentName} is on Ademú now. Message it from your phone.`,
-    pushEnded: (state: string) => `The enrollment ended (${state}). Nothing was written. Ask the agent to connect to Ademú again.`,
     toolStatus: (phase: string, agentName: string) =>
       ({
-        scanning: "Enrollment state: waiting for the phone to scan the code. Nothing for you to do; the user acts on the page, the buttons, or the phone.",
-        words_shown: "Enrollment state: the phone has scanned; the user is comparing the four safety words and will click Yes or No on the page or the buttons, or reply yes / no to the plugin's words message. Do NOT ask the user to tell you the words or to say yes to you.",
+        scanning: "Enrollment state: waiting for the phone to scan the code. Nothing for you to do; the user acts on the page or the phone.",
+        words_shown: "Enrollment state: the phone has scanned; the user is comparing the four safety words and will click Yes or No on the page. Do NOT ask the user to tell you the words or to say yes to you.",
         confirming: "Enrollment state: the user confirmed the words; the plugin is issuing the device credential and writing the account. Check again in a moment.",
         done: `Enrolled — ${agentName} is on Ademú now. The user confirmed the words themselves. The user can message you from their phone.`,
         failed: "Enrollment state: it did not finish (the words did not match, or the device was revoked). Nothing was written. The user can ask you to start again.",
         cancelled: "Enrollment state: the user cancelled it. Nothing was written. The user can ask you to start again.",
         expired: "Enrollment state: it expired (three minutes without completing). Nothing was written. The user can ask you to start again.",
       })[phase] ?? `Enrollment state: ${phase}.`,
-    toolChannelUnsupported: (channel: string) =>
-      `Enrollment cannot be completed from ${channel}: this channel offers no buttons and no quoted replies for the user to confirm the safety words, and the enrollment page is not reachable from outside the gateway machine. Nothing was created. Tell the user to either run \`openclaw channels add --channel ademu\` in a terminal on the gateway machine, or set channels.ademu.enrollmentPage.baseUrl to the gateway's browser-facing origin and ask again.`,
-    toolPushFailed: (channel: string, reason?: string) =>
-      `The plugin could not deliver the QR code into this ${channel} conversation, so the enrollment was not started. Nothing was created.${
-        reason ? ` Host detail (relay it verbatim to the user, it helps the administrator): ${reason}.` : ""
-      } Ask the user to try again, or to use the terminal wizard (openclaw channels add --channel ademu).`,
-
   },
 } as const;

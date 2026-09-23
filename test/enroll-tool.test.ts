@@ -1,6 +1,6 @@
 // The `ademu_enroll` chat tool: two actions (start, status). The human's yes / no never come through
 // the model — here they arrive through `confirmByHuman` / `cancelByHuman`, the same functions the
-// enrollment page and the channel buttons call.
+// enrollment page calls.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { describe, expect, it } from "vitest";
@@ -8,15 +8,14 @@ import { DaemonUnreachableError } from "../src/monitor/daemon.js";
 import { cancelByHuman, confirmByHuman, createEnrollTool, registerEnrollTool, TOOL_NAME } from "../src/tools/enroll.js";
 import { FakeAdcClient, OWNER } from "./fakes/adc.js";
 import { NEW_AGENT, NEW_DEVICE, QR, WORDS } from "./fakes/control.js";
-import { tick, WORDS_MESSAGE_ID, world } from "./fakes/enroll-world.js";
+import { tick, world } from "./fakes/enroll-world.js";
 
 type World = ReturnType<typeof world>;
 const SESSION = "agent:main:webchat:owner";
+/** A tool call from a chat channel: the ceremony still runs on the page the plugin opens on the gateway machine. */
 const TELEGRAM = { deliveryContext: { channel: "telegram", to: "chat-1", accountId: "bot" } } as unknown as Partial<OpenClawPluginToolContext>;
-const WHATSAPP = { deliveryContext: { channel: "whatsapp", to: "+3069" } } as unknown as Partial<OpenClawPluginToolContext>;
-const IRC = { deliveryContext: { channel: "irc", to: "#ops" } } as unknown as Partial<OpenClawPluginToolContext>;
 
-/** The live enrollment of the default conversation (what the page / a button would address). */
+/** The live enrollment of the default conversation (what the page would address). */
 const live = (w: World) => w.registry.forSession(SESSION)!;
 const yes = (w: World, entry = live(w)) => confirmByHuman(entry, w.deps, w.registry);
 const no = (w: World, entry = live(w)) => cancelByHuman(entry, w.registry);
@@ -64,7 +63,9 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
   it("start → scan → human yes writes the account, grants the owner, disposes the lease exactly once; status follows", async () => {
     const w = world();
     const start = await w.call({ action: "start", agentName: "Iris" });
-    expect(start.details).toMatchObject({ ok: true, state: "scanning", deviceId: NEW_DEVICE, accountId: "iris", lane: "page" });
+    expect(start.details).toMatchObject({ ok: true, state: "scanning", deviceId: NEW_DEVICE, accountId: "iris" });
+    expect(start.details).not.toHaveProperty("lane");
+    expect(w.opens).toEqual([start.details.pageUrl]);
     const txt = start.content[0]!.text;
     expect(txt).toContain("![ademu-enroll](data:image/png;base64,QUJD)");
     expect(txt).toContain(QR);
@@ -113,7 +114,6 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     const s3 = await w.call({ action: "status" });
     expect(s3.details).toMatchObject({ ok: true, state: "done" });
     expect(s3.content[0]!.text).toContain("Enrolled");
-    expect(w.pushes).toEqual([]); // page lane: nothing is pushed into a channel
   });
 
   it("status from another conversation, sender or agent is refused; the owner's own is answered", async () => {
@@ -184,7 +184,7 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     expect((await w.call({ action: "status" })).details.state).toBe("failed");
   });
 
-  it("the tool call's signal aborting AFTER start (the host does this when the turn returns) leaves the ceremony alive: the scan is seen, the words are pushed, the yes completes", async () => {
+  it("the tool call's signal aborting AFTER start (the host does this when the turn returns) leaves the ceremony alive: the scan is seen, the yes completes", async () => {
     const w = world();
     const ac = new AbortController();
     const start = await w.call({ action: "start", agentName: "Iris" }, TELEGRAM, ac.signal);
@@ -197,7 +197,6 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     w.control.emit({ state: "paired", words: WORDS });
     await tick();
     expect((await w.call({ action: "status" })).details.state).toBe("words_shown");
-    expect(w.pushes.map((p) => p.kind)).toEqual(["qr", "words"]);
     const yesP = yes(w, entry);
     await tick(5);
     w.control.finish("enrolled");
@@ -219,109 +218,6 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     await w.call({ action: "start", agentName: "Bob" });
     expect(w.registry.size).toBe(1);
     expect(w.released()).toBe(2);
-  });
-});
-
-describe("ademu_enroll: the channel lane (media channels)", () => {
-  it("on telegram the plugin pushes the QR + link, then the words with buttons, then the outcome; the model is told it sent nothing", async () => {
-    const w = world();
-    const start = await w.call({ action: "start", agentName: "Iris" }, TELEGRAM);
-    expect(start.details).toMatchObject({ ok: true, lane: "push", channel: "telegram" });
-    expect(start.content[0]!.text).toContain("INTO THIS CONVERSATION");
-    expect(start.content[0]!.text).toContain("Yes and a No button");
-    expect(start.content[0]!.text).not.toContain("![ademu-enroll]"); // nothing for the model to relay
-    expect(w.opens).toEqual([]); // the browser on the gateway box is not the user's
-    expect(w.pushes).toHaveLength(1);
-    expect(w.pushes[0]).toMatchObject({ kind: "qr", agentName: "Iris", dataUrl: "data:image/png;base64,QUJD", link: QR, route: { channel: "telegram", to: "chat-1", accountId: "bot" } });
-    expect(w.pushes[0]!.pageUrl).toBeUndefined(); // loopback page: not reachable from the phone
-    expect(start.details).toMatchObject({ qrImageSent: true });
-    expect(live(w).qrFilePath).toBe("/tmp/fake-qr.png");
-
-    w.control.emit({ state: "paired", words: WORDS });
-    await tick();
-    expect(w.pushes).toHaveLength(2);
-    expect(w.pushes[1]).toMatchObject({ kind: "words", words: WORDS, buttons: true, reply: true });
-    expect(w.pushes[1]!.nonce).toMatch(/^[a-f0-9]{24}$/);
-    expect(w.pushes[1]!.nonce).toBe(live(w).nonce);
-    expect(live(w).wordsMessageId).toBe(WORDS_MESSAGE_ID); // what a quoted yes/no will point at
-
-    const yesP = yes(w);
-    await tick(5);
-    w.control.finish("enrolled");
-    await yesP;
-    await tick();
-    expect(w.pushes).toHaveLength(3);
-    expect(w.pushes[2]).toMatchObject({ kind: "text" });
-    expect(w.pushes[2]!.text as string).toContain("Enrolled");
-    expect(w.writes).toHaveLength(1);
-  });
-
-  it("on whatsapp (no buttons, quoted replies) the words invite a quoted yes/no reply; the model is told a bare yes is not a decision", async () => {
-    const w = world();
-    const start = await w.call({ action: "start", agentName: "Iris" }, WHATSAPP);
-    expect(start.details).toMatchObject({ ok: true, lane: "push", channel: "whatsapp" });
-    expect(start.content[0]!.text).toContain("REPLIES to that message");
-    expect(start.content[0]!.text).toContain("not a decision");
-    expect(w.pushes[0]!.pageUrl).toBeUndefined();
-    w.control.emit({ words: WORDS });
-    await tick();
-    expect(w.pushes[1]).toMatchObject({ kind: "words", buttons: false, reply: true, pageUrl: undefined });
-    expect(live(w).wordsMessageId).toBe(WORDS_MESSAGE_ID);
-  });
-
-  it("with a reachable page, the words also carry the page link", async () => {
-    const w = world({ channels: { ademu: { enrollmentPage: { baseUrl: "https://gw.example.com" } } } } as unknown as OpenClawConfig);
-    const start = await w.call({ action: "start", agentName: "Iris" }, WHATSAPP);
-    expect(start.details).toMatchObject({ ok: true, lane: "push", channel: "whatsapp" });
-    expect(w.pushes[0]!.pageUrl).toMatch(/^https:\/\/gw\.example\.com\/plugins\/ademu\/enroll\/[a-f0-9]{40}$/);
-    w.control.emit({ words: WORDS });
-    await tick();
-    expect(w.pushes[1]).toMatchObject({ kind: "words", buttons: false, reply: true, pageUrl: start.details.pageUrl });
-  });
-
-  it("a channel with no buttons, no quoted replies and no reachable page is refused BEFORE any device or lease exists", async () => {
-    const w = world();
-    const r = await w.call({ action: "start", agentName: "Iris" }, IRC);
-    expect(r.details).toMatchObject({ ok: false, state: "channel_unsupported", channel: "irc" });
-    expect(r.content[0]!.text).toContain("openclaw channels add --channel ademu");
-    expect(r.content[0]!.text).toContain("enrollmentPage.baseUrl");
-    expect(w.acquires).toHaveLength(0);
-    expect(w.control.calls.some((c) => c.op === "create_device")).toBe(false);
-    expect(w.registry.size).toBe(0);
-  });
-
-  it("a refused QR delivery ends the ceremony before the user saw anything", async () => {
-    const w = world();
-    w.pushOk.value = false;
-    const r = await w.call({ action: "start", agentName: "Iris" }, TELEGRAM);
-    expect(r.details).toMatchObject({ ok: false, state: "push_failed", reason: "status=failed; stage=platform_send; Error: fake refusal" });
-    expect(r.content[0]!.text).toContain("Host detail");
-    expect(r.content[0]!.text).toContain("stage=platform_send");
-    expect(w.registry.size).toBe(0);
-    expect(w.released()).toBe(1);
-    expect(w.control.calls.some((c) => c.op === "cancel_pairing")).toBe(true);
-  });
-
-  it("the human's NO on a channel pushes the cancelled notice; a mismatch pushes its own", async () => {
-    const w = world();
-    await w.call({ action: "start", agentName: "Iris" }, TELEGRAM);
-    w.control.emit({ words: WORDS });
-    await tick();
-    await no(w);
-    await tick();
-    expect(w.pushes.map((p) => p.kind)).toEqual(["qr", "words", "text"]);
-    expect(w.pushes[2]!.text as string).toContain("cancelled");
-
-    const w2 = world();
-    w2.control.confirmWordsImpl = async () => {
-      throw new (await import("@ademu/adc-control")).ControlError("words_mismatch", "x");
-    };
-    await w2.call({ action: "start", agentName: "Iris" }, TELEGRAM);
-    w2.control.emit({ words: WORDS });
-    await tick();
-    await yes(w2);
-    await tick();
-    expect(w2.pushes[2]!.text as string).toContain("did not match");
   });
 });
 
@@ -424,23 +320,18 @@ describe("ademu_enroll: routing binding (the account is never written unrouted)"
 });
 
 describe("ademu_enroll: registration", () => {
-  it("registers the tool by name, a service that disposes leases on stop, and the button handlers", async () => {
+  it("registers the tool by name and a service that disposes leases on stop — no button handlers, no hooks", async () => {
     const w = world();
     const registered: Array<{ name?: string }> = [];
     const services: Array<{ id: string; stop?: (ctx: unknown) => unknown }> = [];
-    const interactive: string[] = [];
-    const hooks: string[] = [];
     const api = {
       registerTool: (_factory: unknown, opts?: { name?: string }) => void registered.push(opts ?? {}),
       registerService: (svc: { id: string; stop?: (ctx: unknown) => unknown }) => void services.push(svc),
-      registerInteractiveHandler: (r: { channel: string; namespace: string }) => void interactive.push(`${r.channel}:${r.namespace}`),
-      on: (name: string) => void hooks.push(name),
+      // Deliberately absent: registerInteractiveHandler / on. Registering either would throw here.
     } as unknown as OpenClawPluginApi;
     const registry = registerEnrollTool(api, w.deps);
     expect(registered).toEqual([{ name: TOOL_NAME }]);
     expect(services[0]?.id).toBe("ademu-enroll-leases");
-    expect(interactive).toEqual(["telegram:ademu", "slack:ademu", "discord:ademu"]);
-    expect(hooks).toEqual(["before_dispatch"]);
     const t = createEnrollTool({ senderIsOwner: true, sessionKey: "s", agentId: "main" } as OpenClawPluginToolContext, w.deps, registry)!;
     await t.execute("c", { action: "start" }, new AbortController().signal);
     expect(registry.size).toBe(1);

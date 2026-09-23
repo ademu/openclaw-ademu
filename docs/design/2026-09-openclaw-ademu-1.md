@@ -131,6 +131,22 @@ per-tool-execution tool-discovery registry is separate and inert, and registerin
 `openclaw plugins inspect --runtime` (which loads plugins in that mode) reporting `hookCount: 1` —
 verified on the owner's OpenClaw 2026.8.2 host on 2026-09-18. Pinned by `test/enrollment-reply.test.ts`.
 
+**Push lane withdrawn from this branch (owner decision, 2026-09-23).** The chat-channel lane described
+in the two paragraphs above and the live finding below — `src/enrollment-channel.ts` (QR + words + Yes /
+No buttons pushed through `sendDurableMessageBatch`, `registerInteractiveHandler` on telegram / slack /
+discord), `src/enrollment-reply.ts` (quoted-reply decisions via `before_dispatch`), the lane selection in
+`start`, and their tests — is NOT part of this branch any more. Two reasons. First, the product
+assumption for this release is that the user has direct access to the gateway machine: every `start`,
+from any chat, opens the enrollment page there, and a user on a VPS runs the terminal wizard. Second,
+the Codex review of 2026-09-23 found two High issues that lived only in that lane (a button click
+authorised by any host-vouched sender when the ceremony had no `requesterSenderId`; a quoted "no"
+ignored once the phase left `words_shown`) and one that it made worse (the page token, a bearer
+credential for `/confirm` and `/cancel`, travelling in tool results in both lanes). The code was moved
+verbatim to the `feature/outbound-mirror` branch together with the outbound-mirror work, so the
+paragraphs above remain accurate for that branch. On this branch the ceremony has one surface, the
+page, and the tool result no longer reports a `lane`. Pinned by `test/enroll-tool.test.ts` (registration
+test: no interactive handlers, no hooks) and `test/entries.test.ts`.
+
 **Live finding, Telegram (owner's OpenClaw 2026.8.2, 2026-09-18): outbound media refuses `data:` URLs.**
 The first two chat-door attempts from Telegram ended in the plugin's own "could not deliver the QR"
 refusal (nothing created). Reproduced with the host's `openclaw message send`: text delivers; a
