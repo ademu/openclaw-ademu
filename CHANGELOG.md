@@ -30,6 +30,12 @@ Each release pins the exact `@ademu/adc-bin` (Ademú device daemon) version it w
   wizard is named. Removed with this: `channels.ademu.enrollmentPage.autoOpen` and
   `channels.ademu.enrollmentPage.baseUrl`, the `gateway.publicOrigin` fallback, and the remote-client
   exception in the route — loopback clients only, with no setting that widens it.
+- **`start` never ends a live ceremony.** It used to dispose the conversation's in-progress enrollment
+  and begin a new one, which made it a cancel action in disguise for a model that has none. Now a `start`
+  while one is live creates nothing and answers as `status` does (re-opening the page if no browser
+  showed it); only the human ends a ceremony — **Cancel this enrollment** on the page's scan screen (new),
+  **No — they differ** on the words screen, or the three-minute expiry. A fresh `start` is possible once
+  the previous ceremony is done, failed, cancelled or expired.
 
 ### Added
 

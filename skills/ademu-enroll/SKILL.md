@@ -24,7 +24,9 @@ owner, or with `openclaw channels add --channel ademu` in a terminal on the gate
    `start` can refuse before anything is created (the account id already exists, this conversation
    names no configured OpenClaw agent, the account is routed to another agent, the gateway is not bound
    to a loopback address, or no browser could be opened on the gateway machine). Read the tool's text
-   to the user as is; nothing was written.
+   to the user as is; nothing was written. If an enrollment is already in progress, `start` creates
+   nothing and reports where it stands, exactly like `status`: you cannot restart or end a ceremony —
+   the user does, with **Cancel** (before scanning) or **No** (after) on the page.
 2. **status** — call `action: "status"` when the user asks how it is going, says they clicked, or says
    no page appeared. It answers a phase: `scanning`, `words_shown`, `confirming`, `done`, `failed`,
    `cancelled`, `expired`. If no browser had shown the page yet, the plugin opens it again and the text
@@ -37,8 +39,9 @@ owner, or with `openclaw channels add --channel ademu` in a terminal on the gate
   finished unless `status` says `done`.
 - Never retype or describe the QR contents, the `ademu://` link, or the safety words. The plugin
   delivers them; you only point at them.
-- If the user says the words differ, tell them to click **No** (the enrollment also expires by itself
-  after three minutes). Nothing is written unless the user clicked Yes.
+- If the user says the words differ, tell them to click **No**; if they want to stop before scanning,
+  tell them to click **Cancel this enrollment** on the page (the enrollment also expires by itself after
+  three minutes). Nothing is written unless the user clicked Yes.
 
 ## Where the user acts
 

@@ -78,7 +78,7 @@ export const strings = {
       "The Ademú device host binary is not available for this platform. Install the plugin from npm with optional dependencies enabled, or set channels.ademu.socketPath to a running adc daemon.",
     authorityExpired: "Ademú enrollment authority is no longer active.",
     toolDescription:
-      "Enroll this agent on Ademú (end-to-end encrypted messaging). Use when the user wants to talk to you on Ademú or asks to enroll or connect the agent to the Ademú app. Actions: start (the plugin opens the enrollment page in a browser on the gateway machine; it shows a QR code and, later, the four safety words with Yes/No), status (where the enrollment stands; re-opens the page if no browser showed it). You are never given the page's address, the QR or the words, and you can neither confirm nor cancel an enrollment: only the user does, on the page.",
+      "Enroll this agent on Ademú (end-to-end encrypted messaging). Use when the user wants to talk to you on Ademú or asks to enroll or connect the agent to the Ademú app. Actions: start (the plugin opens the enrollment page in a browser on the gateway machine; it shows a QR code and, later, the four safety words with Yes/No), status (where the enrollment stands; re-opens the page if no browser showed it). While an enrollment is in progress, start creates nothing and reports where it stands: only the user can end it, on the page. You are never given the page's address, the QR or the words, and you can neither confirm nor cancel an enrollment: only the user does, on the page.",
     toolLabel: "Enroll on Ademú",
     toolNeedsSession: "Enrollment needs a conversation session; ask again from a chat.",
     toolLeaseMismatch: "That enrollment belongs to another conversation (or to another sender or agent in this one); it cannot be inspected from here.",
@@ -87,6 +87,8 @@ export const strings = {
     toolStart:
       "The enrollment page has just OPENED in a browser tab on this machine (the gateway machine) — tell the user to look for it. The page shows a QR code to scan with the Ademú app (phone → profile → Agents → Add), then the four safety words next to a Yes and a No button; the user compares the words with their phone and clicks there. You were given no link, no code and no words, and there is nothing for you to paste or repeat. You cannot confirm or cancel anything: never ask the user to say yes to you, and never claim the enrollment finished. Call action \"status\" when the user asks how it is going, says they clicked, or says no page appeared.",
     toolStatusReopened: "No browser had shown the page yet, so the plugin has opened it again just now — tell the user to look for the new tab.",
+    toolStartAlreadyRunning:
+      "An enrollment is already in progress in this conversation, so nothing new was created; the user finishes or cancels it on the enrollment page (Cancel before scanning, No after), or it expires after three minutes.",
     toolPageUnreachable:
       "Enrollment cannot start from here: the enrollment page can only be shown in a browser on the gateway machine, and this gateway is not bound to a loopback address, so no such page exists. Nothing was created. Tell the user to run `openclaw channels add --channel ademu` in a terminal on the gateway machine.",
     toolPageOpenFailed:
@@ -107,8 +109,10 @@ export const strings = {
     pageConfirmedWait: "Confirmed — finishing enrollment…",
     pageMismatchWarn: "If they do NOT match, do not confirm: close this page and tell the agent the words differ.",
     pageNo: "No — they differ",
+    pageCancelScan: "Cancel this enrollment",
+    pageCancelScanHint: "Changed your mind, or did not ask for this? Cancel here; nothing is written.",
     pageCancelledHeading: "Enrollment cancelled",
-    pageCancelledBody: "You said the words differ, so nothing was enrolled and nothing was written. Ask the agent to connect to Ademú again when you are ready.",
+    pageCancelledBody: "Nothing was enrolled and nothing was written. Ask the agent to connect to Ademú again when you are ready.",
     pageCancelling: "Cancelling…",
     pageConfirmingHeading: "Finishing enrollment…",
     pageConfirmingHint: "The words were confirmed; the device token is being issued and the account written.",

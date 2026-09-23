@@ -174,6 +174,22 @@ text or details; non-loopback bind refuses before the device; launcher failure d
 grace, not after a served GET, not after HEAD) and `test/enroll-tool.test.ts` (#14 retargeted at the
 launcher).
 
+**`start` never disposes a live ceremony (Codex 2026-09-23 High #2, owner decision the same day).** The
+supersede-on-start rule ("the same creator tuple may restart") predates the 2026-09-17 removal of the
+model's `cancel`; with no cancel action left, a `start` that disposed the in-progress ceremony was that
+action in disguise — and it is the model that calls `start`. Now `admitAndStart` never disposes: the same
+creator tuple gets `reportStatus(previous, { alreadyRunning: true })` — the phase, `ok: false` (nothing was
+started), `alreadyRunning: true`, the page re-opened if no browser ever fetched it, no URL — and a stranger
+sharing the session key is still refused with `busy` and learns nothing. A new ceremony is admitted only
+once the previous one is terminal (done / failed / cancelled / expired; `forSession` prunes disposed
+leases). Because the page's **No** lives on the words screen, a ceremony in `scanning` would otherwise have
+had no human exit before the TTL, so the scan screen gained **Cancel this enrollment** (`#cancel-scan`,
+same `/cancel` endpoint, same `cancelByHuman`; the cancelled screen's body no longer presumes "the words
+differ"). Tests that pinned supersession flipped: the TTL test, R2#8 (same creator → status, `released()`
+stays 0) and R6#3 (a start during the host mutation reports `confirming`, the yes completes, the write
+happens once). Pinned by `test/enroll-tool.test.ts` ("a `start` while a ceremony is live NEVER disposes it")
+and `test/enrollment-page.test.ts` ("cancel before the scan").
+
 **Live finding, Telegram (owner's OpenClaw 2026.8.2, 2026-09-18): outbound media refuses `data:` URLs.**
 The first two chat-door attempts from Telegram ended in the plugin's own "could not deliver the QR"
 refusal (nothing created). Reproduced with the host's `openclaw message send`: text delivers; a

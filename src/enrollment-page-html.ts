@@ -59,6 +59,8 @@ export function renderEnrollmentPageHtml(opts: { cspNonce: string; expired?: boo
       <pre id="link" class="link"></pre>
       <button id="copy" type="button">${esc(p.pageCopy)}</button>
     </details>
+    <button id="cancel-scan" class="secondary" type="button">${esc(p.pageCancelScan)}</button>
+    <p class="muted">${esc(p.pageCancelScanHint)}</p>
   </div>
 
   <div id="awaiting-yes" class="screen">
@@ -93,7 +95,7 @@ export function renderEnrollmentPageHtml(opts: { cspNonce: string; expired?: boo
   var copy = {
     yes: ${JSON.stringify(p.pageYes)}, confirming: ${JSON.stringify(p.pageConfirming)}, confirmedWait: ${JSON.stringify(p.pageConfirmedWait)},
     copied: ${JSON.stringify(p.pageCopied)}, unreachable: ${JSON.stringify(p.pageUnreachable)}, confirmFailed: ${JSON.stringify(p.pageConfirmFailed)},
-    no: ${JSON.stringify(p.pageNo)}, cancelling: ${JSON.stringify(p.pageCancelling)}
+    no: ${JSON.stringify(p.pageNo)}, cancelling: ${JSON.stringify(p.pageCancelling)}, cancelScan: ${JSON.stringify(p.pageCancelScan)}
   };
 
   function el(id) { return document.getElementById(id); }
@@ -157,10 +159,11 @@ export function renderEnrollmentPageHtml(opts: { cspNonce: string; expired?: boo
     el('copy').textContent = copy.copied;
   });
 
-  el('cancel').addEventListener('click', function () {
+  // The human's NO: "the words differ" on the words screen, or "cancel this enrollment" on the scan
+  // screen (before the phone is involved). Same endpoint, same outcome: nothing written.
+  function cancelFrom(no, idleLabel) {
     if (confirming) { return; }
     confirming = true;
-    var no = el('cancel');
     no.disabled = true;
     el('confirm').disabled = true;
     no.textContent = copy.cancelling;
@@ -171,17 +174,19 @@ export function renderEnrollmentPageHtml(opts: { cspNonce: string; expired?: boo
         confirming = false;
         no.disabled = false;
         el('confirm').disabled = false;
-        no.textContent = copy.no;
+        no.textContent = idleLabel;
         banner((out && out.message) || copy.confirmFailed);
       })
       .catch(function () {
         confirming = false;
         no.disabled = false;
         el('confirm').disabled = false;
-        no.textContent = copy.no;
+        no.textContent = idleLabel;
         banner(copy.unreachable);
       });
-  });
+  }
+  el('cancel').addEventListener('click', function () { cancelFrom(el('cancel'), copy.no); });
+  el('cancel-scan').addEventListener('click', function () { cancelFrom(el('cancel-scan'), copy.cancelScan); });
 
   el('confirm').addEventListener('click', function () {
     if (confirming) { return; }

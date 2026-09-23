@@ -207,7 +207,7 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     expect(w.writes).toHaveLength(1);
   });
 
-  it("the TTL timer disposes the lease (3 minutes) and a second start supersedes the first", async () => {
+  it("the TTL timer disposes the lease (3 minutes); a start after expiry creates a fresh ceremony", async () => {
     const w = world();
     await w.call({ action: "start", agentName: "Iris" });
     expect(w.timers[0]?.ms).toBe(180_000);
@@ -217,10 +217,48 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     expect(w.released()).toBe(1);
     expect((await w.call({ action: "status" })).details.state).toBe("expired");
 
-    await w.call({ action: "start", agentName: "Iris" });
-    await w.call({ action: "start", agentName: "Bob" });
+    const again = await w.call({ action: "start", agentName: "Bob" });
+    expect(again.details).toMatchObject({ ok: true, state: "scanning" });
     expect(w.registry.size).toBe(1);
-    expect(w.released()).toBe(2);
+    expect(live(w).agentName).toBe("Bob");
+  });
+
+  it("a `start` while a ceremony is live NEVER disposes it (the model has no cancel): it reports the status, creates nothing, and re-opens a never-shown page", async () => {
+    const w = world();
+    let now = 0;
+    w.deps.lease.now = () => now;
+    await w.call({ action: "start", agentName: "Iris" });
+    const first = live(w);
+    // Inside the re-open grace: pure status.
+    let again = await w.call({ action: "start", agentName: "Bob" });
+    expect(again.details).toMatchObject({ ok: false, state: "scanning", alreadyRunning: true, deviceId: NEW_DEVICE });
+    expect(again.content[0]!.text).toContain("already in progress");
+    expect(again.content[0]!.text).not.toMatch(/https?:\/\//);
+    expect(live(w)).toBe(first);
+    expect(first.lease.disposed).toBe(false);
+    expect(w.released()).toBe(0);
+    expect(w.control.calls.filter((c) => c.op === "create_device")).toHaveLength(1);
+    expect(w.opens).toHaveLength(1);
+    // Past the grace with no browser having fetched the page: opened again, still nothing disposed.
+    now = 6_000;
+    again = await w.call({ action: "start", agentName: "Bob" });
+    expect(again.details).toMatchObject({ ok: false, alreadyRunning: true, pageReopened: true });
+    expect(w.opens).toHaveLength(2);
+    expect(live(w)).toBe(first);
+    // Words shown: still the human's ceremony.
+    w.control.emit({ state: "paired", words: WORDS });
+    await tick();
+    again = await w.call({ action: "start", agentName: "Bob" });
+    expect(again.details).toMatchObject({ ok: false, state: "words_shown", alreadyRunning: true });
+    for (const word of WORDS) expect(again.content[0]!.text).not.toContain(word);
+    expect(live(w)).toBe(first);
+    expect(w.released()).toBe(0);
+    // The human's NO ends it; only then does a start create a new ceremony.
+    await no(w);
+    const fresh = await w.call({ action: "start", agentName: "Bob" });
+    expect(fresh.details).toMatchObject({ ok: true, state: "scanning" });
+    expect(live(w).agentName).toBe("Bob");
+    expect(w.released()).toBe(1);
   });
 });
 
@@ -484,18 +522,20 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     releaseGate();
   });
 
-  it("R2#8 axes compare exactly (absent → present is a mismatch) and only the same creator tuple may supersede", async () => {
+  it("R2#8 axes compare exactly (absent → present is a mismatch); another creator is refused, the same creator gets the status — nobody disposes", async () => {
     const w = world(ROSTER("main", "other"));
     await w.call({ action: "start", agentName: "Iris" }, NO_SENDER);
     expect((await w.call({ action: "status" })).details.ok).toBe(false); // default ctx has a sender
     expect((await w.call({ action: "status" }, NO_SENDER)).details.ok).toBe(true);
     const other = await w.call({ action: "start", agentName: "Bob" }, { agentId: "other" });
     expect(other.details).toMatchObject({ ok: false, state: "busy" });
+    expect(other.details).not.toHaveProperty("alreadyRunning"); // a stranger learns nothing about the ceremony
     expect(w.registry.size).toBe(1);
     expect(w.released()).toBe(0);
     const again = await w.call({ action: "start", agentName: "Bob" }, NO_SENDER);
-    expect(again.details.ok).toBe(true);
-    expect(w.released()).toBe(1);
+    expect(again.details).toMatchObject({ ok: false, state: "scanning", alreadyRunning: true });
+    expect(w.registry.size).toBe(1);
+    expect(w.released()).toBe(0);
   });
 
   it("R3#1 a NO that lands while the yes is probing wins: nothing is written, the yes reports cancelled", async () => {
@@ -611,7 +651,7 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.writes).toHaveLength(0);
   });
 
-  it("R6#3 a same-creator `start` while the host holds the mutation supersedes the old enrollment: its yes is cancelled, nothing written, the new one is live", async () => {
+  it("R6#3 a same-creator `start` while the host holds the mutation changes nothing: it reports `confirming`, the yes completes, the write happens once", async () => {
     const w = world();
     let releaseWrite!: () => void;
     const gate = new Promise<void>((r) => {
@@ -630,13 +670,17 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     w.control.finish("enrolled");
     await tick(10);
     const again = await w.call({ action: "start", agentName: "Bob" });
-    expect(again.details.ok).toBe(true);
-    expect(w.released()).toBe(1);
+    expect(again.details).toMatchObject({ ok: false, state: "confirming", alreadyRunning: true });
+    expect(w.released()).toBe(0);
     releaseWrite();
     const result = await yesP;
-    expect(result).toMatchObject({ ok: false, state: "cancelled" });
-    expect(w.writes).toHaveLength(0);
-    expect(w.registry.size).toBe(1);
+    expect(result).toMatchObject({ ok: true, state: "done" });
+    expect(w.writes).toHaveLength(1);
+    expect(w.registry.size).toBe(0);
+    expect(w.released()).toBe(1);
+    // Only now does a start create a new ceremony.
+    const fresh = await w.call({ action: "start", agentName: "Bob" });
+    expect(fresh.details).toMatchObject({ ok: true, state: "scanning" });
     expect(w.registry.forSession(SESSION)?.agentName).toBe("Bob");
   });
 

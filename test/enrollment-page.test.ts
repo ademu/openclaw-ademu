@@ -410,3 +410,26 @@ describe("enrollment page: the ceremony (scan → words → Yes → enrolled)", 
     expect(w.writes).toHaveLength(1);
   });
 });
+
+describe("enrollment page: cancel before the scan", () => {
+  it("the scan screen carries a Cancel button on the same /cancel endpoint; a scanning ceremony is cancelled, nothing written", async () => {
+    const w = world();
+    const { token } = await started(w);
+    const { page } = await serve(w);
+    const html = await (await fetch(page(token))).text();
+    expect(html).toContain('id="cancel-scan"');
+    expect(html).toContain("Cancel this enrollment");
+    const r = await confirmPost(page(token, "/cancel"));
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ ok: true, state: "cancelled" });
+    expect(w.registry.size).toBe(0);
+    expect(w.released()).toBe(1);
+    expect(w.control.calls.some((c) => c.op === "cancel_pairing")).toBe(true);
+    expect(w.writes).toEqual([]);
+    const state = await (await fetch(page(token, "/state"))).json();
+    expect(state).toMatchObject({ phase: "cancelled" });
+    // The chat learns the human's decision; a fresh start is possible now.
+    expect((await w.call({ action: "status" })).details.state).toBe("cancelled");
+    expect((await w.call({ action: "start", agentName: "Iris" })).details).toMatchObject({ ok: true, state: "scanning" });
+  });
+});

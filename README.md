@@ -75,9 +75,10 @@ the ceremony happens in one place:
   no tab appeared, ask the agent how it is going — the plugin opens the page again.
 
 Your actions are the same three as door one: ask, scan (or open the link on the phone that runs
-Ademú), and click Yes after comparing the words. Nothing is written unless you did; a No, or three
-minutes of silence, ends the ceremony with nothing written. The words never pass through the model, and
-a model cannot say yes for you.
+Ademú), and click Yes after comparing the words. Nothing is written unless you did; **Cancel** before
+scanning, **No** after, or three minutes of silence end the ceremony with nothing written. The words never
+pass through the model, a model cannot say yes for you, and it cannot end a ceremony either — asking the
+agent to start again while one is running only tells you where it stands.
 
 #### Where it works, and where it does not
 

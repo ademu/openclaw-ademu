@@ -300,27 +300,37 @@ export function createEnrollTool(ctx: OpenClawPluginToolContext, deps: EnrollToo
       if (active.sessionKey !== sessionKey || active.requesterSenderId !== ctx.requesterSenderId || active.agentId !== ctx.agentId) {
         return text(strings.enroll.toolLeaseMismatch, { ok: false });
       }
-      const phase = phaseOf(active);
-      if (phase === "expired") registry.delete(active.deviceId);
-      // The launcher said it spawned but no browser ever fetched the page: open it again — the plugin's
-      // own fallback, so the URL still never travels through the model.
-      let reopened = false;
-      if (phase === "scanning" && !active.pageServed && deps.lease.now() - active.lastOpenedAt >= PAGE_REOPEN_GRACE_MS) {
-        active.lastOpenedAt = deps.lease.now();
-        try {
-          reopened = await deps.openUrl(active.pageUrl);
-        } catch {
-          reopened = false;
-        }
-      }
-      return text(`${strings.enroll.toolStatus(phase, active.agentName)}${reopened ? ` ${strings.enroll.toolStatusReopened}` : ""}`, {
-        ok: true,
-        state: phase,
-        deviceId: active.deviceId,
-        ...(reopened ? { pageReopened: true } : {}),
-      });
+      return reportStatus(active, deps, registry);
     },
   };
+}
+
+/**
+ * The phase report both `status` and a `start` that finds a live ceremony give. If the launcher said it
+ * spawned but no browser ever fetched the page, the page is opened again here — the plugin's own
+ * fallback, so the URL still never travels through the model.
+ */
+async function reportStatus(active: ActiveEnrollment, deps: EnrollToolDeps, registry: EnrollmentRegistry, opts: { alreadyRunning?: boolean } = {}): Promise<ToolResult> {
+  const phase = phaseOf(active);
+  if (phase === "expired") registry.delete(active.deviceId);
+  let reopened = false;
+  if (phase === "scanning" && !active.pageServed && deps.lease.now() - active.lastOpenedAt >= PAGE_REOPEN_GRACE_MS) {
+    active.lastOpenedAt = deps.lease.now();
+    try {
+      reopened = await deps.openUrl(active.pageUrl);
+    } catch {
+      reopened = false;
+    }
+  }
+  const lead = opts.alreadyRunning ? `${strings.enroll.toolStartAlreadyRunning} ` : "";
+  return text(`${lead}${strings.enroll.toolStatus(phase, active.agentName)}${reopened ? ` ${strings.enroll.toolStatusReopened}` : ""}`, {
+    // `ok` answers the action asked for: a `status` succeeded; a `start` that started nothing did not.
+    ok: !opts.alreadyRunning,
+    state: phase,
+    deviceId: active.deviceId,
+    ...(opts.alreadyRunning ? { alreadyRunning: true } : {}),
+    ...(reopened ? { pageReopened: true } : {}),
+  });
 }
 
 async function startEnrollment(p: {
@@ -380,15 +390,16 @@ async function admitAndStart(p: {
   accountId: string;
 }): Promise<ToolResult> {
   const { cfg, agentName, accountId } = p;
-  // One enrollment per conversation at a time. Only the SAME creator tuple (session, sender, agent)
-  // may supersede it; anyone else sharing the session key is refused instead of disposing it.
+  // One enrollment per conversation at a time, and a live one is the HUMAN's to finish or cancel (on
+  // the page). `start` never disposes it — the model has no cancel action, and this must not be one in
+  // disguise. The same creator tuple (session, sender, agent) is answered as `status` would answer,
+  // re-opening the page if no browser ever showed it; anyone else sharing the session key is refused.
   const previous = p.registry.forSession(p.sessionKey);
   if (previous) {
     if (previous.requesterSenderId !== p.ctx.requesterSenderId || previous.agentId !== p.ctx.agentId) {
       return text(strings.enroll.toolLeaseMismatch, { ok: false, state: "busy" });
     }
-    p.registry.delete(previous.deviceId);
-    await previous.lease.dispose("superseded");
+    return reportStatus(previous, p.deps, p.registry, { alreadyRunning: true });
   }
 
   const account = inspectAdemuAccount(cfg, accountId);
