@@ -25,7 +25,7 @@
         "minimum": 500,
         "maximum": 10000,
         "default": 2000,
-        "description": "How often the typing indicator is refreshed while the agent composes (Ademú expires it after ~3 s)."
+        "description": "How often the typing indicator is refreshed while the agent composes. Clamped to 2500 ms at runtime: the daemon relays each refresh as one frame and Ademú expires the indicator ~3 s after the last one."
       },
       "mentionAliases": {
         "type": "array",
