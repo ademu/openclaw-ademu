@@ -16,6 +16,10 @@ describe("runtime", () => {
     expect(applyPluginSettings(undefined)).toEqual(DEFAULT_SETTINGS);
     expect(applyPluginSettings({ typingKeepaliveMs: 100 }).typingKeepaliveMs).toBe(2000);
     expect(applyPluginSettings({ typingKeepaliveMs: 3000, mentionAliases: ["iris", "", 5] }).mentionAliases).toEqual(["iris"]);
-    expect(applyPluginSettings({ typingKeepaliveMs: 3000 }).typingKeepaliveMs).toBe(3000);
+    // Clamped below Ademú's ~3 s receiver TTL (AdemuMLS#621): the schema range stays, the runtime caps it.
+    expect(applyPluginSettings({ typingKeepaliveMs: 3000 }).typingKeepaliveMs).toBe(2500);
+    expect(applyPluginSettings({ typingKeepaliveMs: 10_000 }).typingKeepaliveMs).toBe(2500);
+    expect(applyPluginSettings({ typingKeepaliveMs: 2000 }).typingKeepaliveMs).toBe(2000);
+    expect(applyPluginSettings({ typingKeepaliveMs: 2500 }).typingKeepaliveMs).toBe(2500);
   });
 });

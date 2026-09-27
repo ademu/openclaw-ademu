@@ -28,13 +28,23 @@ export type AdemuPluginSettings = {
 
 export const DEFAULT_SETTINGS: AdemuPluginSettings = { typingKeepaliveMs: 2000, mentionAliases: [] };
 
+/** The runtime ceiling for `typingKeepaliveMs` — below Ademú's ~3 s receiver TTL (AdemuMLS#621). */
+export const TYPING_KEEPALIVE_MAX_MS = 2500;
+
 let settings: AdemuPluginSettings = DEFAULT_SETTINGS;
 
 export function applyPluginSettings(raw: Record<string, unknown> | undefined): AdemuPluginSettings {
   const ms = raw?.typingKeepaliveMs;
   const aliases = raw?.mentionAliases;
   settings = {
-    typingKeepaliveMs: typeof ms === "number" && Number.isFinite(ms) && ms >= 500 && ms <= 10_000 ? Math.round(ms) : DEFAULT_SETTINGS.typingKeepaliveMs,
+    // The manifest keeps accepting 500–10000 (a lowered schema maximum would reject existing configs at
+    // OpenClaw's plugin-config validation); the RUNTIME clamps to ≤ 2500 because since adc 0.3.0 the daemon
+    // relays each keepalive tick as at most one typing frame and Ademú's receiver expires the indicator
+    // ~3 s after the last frame (AdemuMLS#621) — a slower tick would blink.
+    typingKeepaliveMs:
+      typeof ms === "number" && Number.isFinite(ms) && ms >= 500 && ms <= 10_000
+        ? Math.min(Math.round(ms), TYPING_KEEPALIVE_MAX_MS)
+        : DEFAULT_SETTINGS.typingKeepaliveMs,
     mentionAliases: Array.isArray(aliases) ? aliases.filter((a): a is string => typeof a === "string" && a.trim().length > 0) : [],
   };
   return settings;

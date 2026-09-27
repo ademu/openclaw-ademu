@@ -12,7 +12,7 @@ import { clearAccountCredentials } from "./enroll-config.js";
 import { startAccount, type StartAccountDeps } from "./monitor/index.js";
 import type { RuntimeChannelSurface } from "./monitor/ingress.js";
 import { realSessionDeps } from "./monitor/session.js";
-import { ademuMessageAdapter, ademuMessaging, getLiveAccount, resolveConversationTarget, resolveOutboundAccountId } from "./outbound.js";
+import { ademuMessageAdapter, ademuMessaging } from "./outbound.js";
 import { createQr } from "./qr.js";
 import { getAdemuRuntime, getAdemuStore, getDaemonManager, getPluginSettings, tryGetAdemuRuntime } from "./runtime.js";
 import { ademuSetupBase } from "./setup-plugin.js";
@@ -85,12 +85,10 @@ export const ademuPlugin: ChannelPlugin<ResolvedAdemuAccount> = createChatChanne
     message: ademuMessageAdapter,
     messaging: ademuMessaging,
     actions: ademuMessageActions,
-    heartbeat: {
-      sendTyping: async ({ to, accountId }) => {
-        const { client } = getLiveAccount(resolveOutboundAccountId(accountId));
-        await client.sendTyping({ group_id: resolveConversationTarget(to), active: true });
-      },
-    },
+    // No `heartbeat.sendTyping` (owner decision 2026-09-26, AdemuMLS#621): OpenClaw shows typing at the
+    // START of a heartbeat run, before it knows whether the run will say anything, and almost every run
+    // ends in NO_REPLY — on Ademú that is a bubble that leads nowhere. Heartbeats stay invisible unless
+    // they produce a message; reply typing (the ingress pipeline's keepalive) is unaffected.
   },
   security: {
     // Doctor/status report only (V3): the runtime gate is the ingress resolver with allowFrom=[owner].

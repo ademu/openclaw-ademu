@@ -328,6 +328,27 @@ describe("projection, commands, typing and shutdown", () => {
     expect(pipeline.typingCallbacks).toBeDefined();
   });
 
+  it("the reply pipeline's typing.start pulses the daemon once per call, never active:false (AdemuMLS#621)", async () => {
+    const w = await world();
+    w.client.message({ body: "hi" });
+    const d = await w.rt.nextDispatch();
+    const pipeline = d.plan.replyPipeline as {
+      typingCallbacks: { onReplyStart: () => Promise<void>; onIdle: () => Promise<void> | void };
+    };
+    await pipeline.typingCallbacks.onReplyStart();
+    await w.settle();
+    expect(w.client.typing).toEqual([{ group_id: ROOM_DM, active: true }]);
+    await pipeline.typingCallbacks.onReplyStart();
+    await w.settle();
+    expect(w.client.typing).toEqual([
+      { group_id: ROOM_DM, active: true },
+      { group_id: ROOM_DM, active: true },
+    ]);
+    await pipeline.typingCallbacks.onIdle();
+    await w.settle();
+    expect(w.client.typing.every((t) => t.active)).toBe(true);
+  });
+
   it("a guest's slash command is projected as unauthorized", async () => {
     const w = await world();
     w.client.message({ group_id: ROOM_GROUP, sender_user_id: GUEST, body: "/status Iris" });
