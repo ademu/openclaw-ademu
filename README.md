@@ -49,7 +49,9 @@ machine (see door two). Both doors assume you are at the gateway machine.
 openclaw channels add --channel ademu
 ```
 
-1. The wizard starts the Ademú device host (in `~/.openclaw/ademu/adc` by default) and shows a QR.
+1. The wizard asks **Enroll a new agent** or **I have a device token** (see below). For a new agent it
+   starts the Ademú device host (in `~/.openclaw/ademu/adc` by default — or attaches to this host's
+   system-wide one, see *Hardened hosts*) and shows a QR.
 2. On your phone: Ademú → your profile → **Agents → Add** → scan.
 3. Your phone and the terminal both show **four safety words**. Confirm they match. (If they do
    not, say no — nothing is enrolled.)
@@ -97,12 +99,60 @@ There are no settings for the page. Its URL is a bearer link that only the brows
 ever receives; the route answers loopback clients only, and the four-word comparison against your phone
 remains the real check.
 
-### Reconnecting an already-enrolled agent
+### I have a device token (reconnecting an already-enrolled agent)
 
 If you reinstalled the plugin, rotated the token, or lost the config, the device is still enrolled on
-Ademú. Run `openclaw channels add --channel ademu` and pick **Connect an already-enrolled agent**:
-it issues a fresh device token and writes the account again. (There is no `channels login` path for
-Ademú; this is it.)
+Ademú. Mint a token for it at the `adc` CLI and paste it into the wizard: run
+`openclaw channels add --channel ademu`, pick **I have a device token**, paste. The plugin checks the
+token against the device host's session socket (`get_self`), asks the owner question, and writes the
+account again. (There is no `channels login` path for Ademú; this is it.)
+
+```sh
+# the bundled device host keeps its state in the plugin's data dir — tell the CLI where:
+ADC_DATA_DIR=~/.openclaw/ademu/adc adc agent list
+ADC_DATA_DIR=~/.openclaw/ademu/adc adc token mint <device_id> --label openclaw-<accountId>
+# on a hardened host (system-wide adc): sudo adc --system token mint <device_id> --label openclaw-<accountId>
+```
+
+The token door needs no enrollment ceremony and no enrollment socket: it is also the recovery path
+when an operator enrolled the agent for you, or when the plugin could not finish a mint itself.
+
+### Hardened hosts (a system-wide `adc`)
+
+On Linux an operator can run the device host as a system service (`sudo adc service install --system`:
+a dedicated `adc` user, `/etc/adc/config.toml`, state in `/var/lib/adc`, the three sockets under
+`/run/adc`). The plugin detects that install by itself (a root-owned `/etc/adc/config.toml` and the
+enrollment socket `/run/adc/adc-enroll.sock`) whenever `channels.ademu` names no `dataDir`,
+`socketPath` or `enrollSocketPath`, and then **attaches** to it: it never starts a device host of its
+own beside the hardened one, never stops or upgrades it.
+
+Enrollment still takes the same three actions. The plugin's ceremony runs over the daemon's
+**enrollment socket** (`adc-enroll.sock`, world-connectable on a system install): it exposes only the
+ceremony (create a device, show the QR, confirm the words, mint one token) and pins each connection to
+the device it created; the owner's phone is the gate, and the daemon bounds unfinished ceremonies per
+user and host-wide. The plugin never opens the control socket (`/run/adc/adc.sock`, root and group
+`adc` only). `sudo adc --system agent list` shows which local user created each device (`creator_uid`).
+
+When the plugin cannot run the ceremony — an operator group-gated the enrollment socket, the host's
+enrollment budget is full, or the plugin was pointed at a data dir it may not use — it prints the
+operator's path instead of a raw error:
+
+```sh
+sudo adc --system agent add "Iris"          # then scan the QR and confirm the words on the phone
+sudo adc --system token mint <device_id> --label openclaw-iris
+openclaw channels add --channel ademu        # → I have a device token → paste
+```
+
+Two recoveries the plugin names by command, because the enrollment socket mints at most one token per
+device and closes the connection after it: a mint whose reply was lost (or whose label was taken) is
+**not** retried — mint a fresh label at the CLI and paste it; a configuration write that failed after
+the mint leaves that token orphaned — revoke it by label (`adc [--system] token revoke <device_id>
+--label <label>`).
+
+A device host from before the enrollment socket (adc < 0.5.0) that the plugin itself started is
+replaced by the bundled one at the next gateway start (through the same ownership fence). If its
+recorded version is unknown the plugin leaves it alone and reports `recovering`: stop it by hand
+(`ADC_DATA_DIR=<dataDir> adc daemon stop`, or `kill <pid>`).
 
 ## Living with it
 
@@ -147,9 +197,12 @@ Ademú; this is it.)
 }
 ```
 
-**Using your own `adc` daemon** (an operator install, not the bundled one): set `dataDir` and
-`socketPath` to its paths. The plugin then runs in *foreign* mode: it attaches to that daemon but
-never starts, stops, or upgrades it.
+**Using your own `adc` daemon** (a user-scope daemon you run yourself): set `dataDir` to its data
+dir; add `socketPath` (its control socket) and `enrollSocketPath` (its enrollment socket) when they
+are not under that dir — on Linux a zero-config daemon binds them under `$XDG_RUNTIME_DIR`. The
+plugin then runs in *foreign* mode: it attaches to that daemon but never starts, stops, or upgrades
+it. A system-wide install needs none of this (see *Hardened hosts*); naming any of the three keys
+turns that detection off.
 
 **Owner authority:** enrollment adds `ademu:<ownerUserId>` to the global `commands.ownerAllowFrom`
 (if you said yes). Removing the account (`openclaw channels remove`) or logging it out removes that
@@ -159,8 +212,8 @@ entry again when no other Ademú account shares the owner.
 
 `openclaw plugins uninstall ademu` removes the plugin and its `channels.ademu` config. The device
 stays enrolled on Ademú and its data stays in the data dir; the token stays valid until you revoke it
-(`adc token revoke` against that data dir). Reinstall and use *Connect an already-enrolled agent* to
-come back.
+(`ADC_DATA_DIR=<dataDir> adc token revoke <device_id> --label openclaw-<accountId>`). Reinstall, mint
+a token and use *I have a device token* to come back.
 
 ## Troubleshooting
 
@@ -169,7 +222,12 @@ come back.
   revoked → reconnect; device not enrolled → finish on the phone; another process attached to the
   device → stop it). `recovering` means the plugin is retrying by itself.
 - The device host log: `<dataDir>/daemon.log`; `adc doctor` and `adc status` (with `ADC_DATA_DIR` set
-  to the plugin's data dir) speak for the daemon.
+  to the plugin's data dir; `sudo adc --system doctor` on a hardened host) speak for the daemon. Doctor
+  lists the three sockets — control, session, enrollment — with their modes; the plugin dials only the
+  last two.
+- `blocked` with "refused this user": the device host's enrollment socket denied the gateway's user
+  (an operator's group-gated posture), or a system-wide `adc` is installed and `channels.ademu` points
+  at a data dir the plugin may not run a device host in. Fix access, or use the token door.
 - The plugin never logs tokens, QR payloads, safety words, or message bodies.
 
 ## Development

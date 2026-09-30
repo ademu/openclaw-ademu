@@ -274,18 +274,37 @@ B is valid in both tiers. Two asks: a terminal disposition on `ChannelTurnResult
 ## 4. The daemon — ownership, identity, lifecycle
 
 **Identity.** A daemon is identified by the canonicalized pair `(dataDir, controlSocket)` (realpath of
-the deepest existing ancestor + verbatim tail, because Ademú joins paths verbatim). Cross-axis
-collisions across accounts (one data dir with two sockets, one socket for two data dirs) are a config
-validation error that blocks `startAccount`. The **session** socket is what `daemon_info`
-reports whenever a daemon is reachable — never re-derived then (a squatter on a derived path would
-receive the bearer token); only an *unreachable* foreign acquisition keeps the deterministic configured
-path, and its session connect then fails until the daemon answers.
+the deepest existing ancestor + verbatim tail, because Ademú joins paths verbatim), plus — since ADC
+Phase 3b Phase B (2026-09-30, openclaw-ademu#12) — its **enrollment socket** (`<dataDir>/adc-enroll.sock`
+or `enrollSocketPath`) and a **scope**. Cross-axis collisions across accounts (one data dir with two
+control sockets or two enrollment sockets, one socket for two data dirs) are a config validation
+error that blocks `startAccount`. The **session** socket is what `daemon_info` reports whenever a
+daemon is reachable — never re-derived then (a squatter on a derived path would receive the bearer
+token); only an *unreachable* foreign acquisition keeps the deterministic configured path, and its
+session connect then fails until the daemon answers.
+
+**The plugin never opens the control socket (Phase B).** The broker probes `daemon_info` over the
+ENROLLMENT socket (`@ademu/adc-control` `connectEnroll`); the ceremony half opens only that socket
+(the seven ceremony ops, pinned to the device the connection created, one terminal mint); the runtime
+half opens only the session socket with the token. `PrivilegeError` (EACCES/EPERM) from the probe is
+"a daemon exists that this uid may not open" — propagated typed, never read as absent, never a spawn;
+`remedyFor` turns it into the operator ceremony for the wizard and the tool, `classifyError` into
+`blocked` for the runtime. **Scope `system`**: with nothing configured and the client's
+`detectSystemInstall()` firing (a root-owned regular `/etc/adc/config.toml` AND a socket at
+`/run/adc/adc-enroll.sock` — never `/run/adc`'s owner, which is the service user), the identity IS the
+system layout (`/var/lib/adc`, the three `/run/adc` sockets) and `acquire` returns a foreign lease
+before any ownership row is read: zero claims, zero spawns (the coexistence gap, AdemuMLS#642). A
+refused enrollment socket still yields that lease — the session socket is the runtime's door and the
+ceremony half meets the refusal itself. Any explicit `dataDir`/`socketPath`/`enrollSocketPath` keeps
+user scope (an explicit `dataDir` on a hardened host is refused by the client's own detector inside
+`ensureDaemon`, propagated typed).
 
 **Default isolation (approval rider R2).** Default `dataDir` = `<OPENCLAW_STATE_DIR>/ademu/adc`,
-control socket `<dataDir>/adc.sock`, session socket `<dataDir>/adc-session.sock`. Every owned spawn
-receives `ADC_DATA_DIR`, `ADC_SOCKET_PATH`, `ADC_SESSION_SOCKET_PATH` (all three — the Linux
-`$XDG_RUNTIME_DIR` rungs would otherwise collide with an operator daemon) plus `ADC_REST_BASE_URL` /
-`ADC_WS_URL` from `channels.ademu.server` (defaults = Ademú production; **R11** — a fresh plugin data
+control socket `<dataDir>/adc.sock`, session socket `<dataDir>/adc-session.sock`, enrollment socket
+`<dataDir>/adc-enroll.sock`. Every owned spawn receives `ADC_DATA_DIR`, `ADC_SOCKET_PATH`,
+`ADC_SESSION_SOCKET_PATH`, `ADC_ENROLL_SOCKET_PATH` (all four — the Linux `$XDG_RUNTIME_DIR` rungs
+would otherwise collide with an operator daemon) plus `ADC_REST_BASE_URL` / `ADC_WS_URL` from
+`channels.ademu.server` (defaults = Ademú production; **R11** — a fresh plugin data
 dir has no `config.toml` and the daemon refuses to start without endpoints). An operator's own `adc`
 (e.g. `~/.local/share/adc`) is reached only by explicit config.
 
@@ -306,16 +325,22 @@ through an **atomic shutdown fence**: one transaction sweeps stale holders and, 
 `bound → stopping`; acquisitions fail while `stopping`. Setup leases (wizard, tool) may spawn but never
 stop — an idle owned daemon is harmless and is adopted by the runtime later (`pending-publication →
 bound` promotion by the runtime's acquire; a 1 h sweep for never-published ones, through the same
-fence). Stop sequence: control `shutdown` op (the daemon's own verb; it is daemon-global, acceptable
-only because an owned data dir hosts nothing but this plugin's devices) → SIGTERM → SIGKILL, hard-capped
-at 2500 ms; still alive at the cap → `stale`.
+fence). Stop sequence (Phase B): verified-pid SIGTERM (2 s grace) → SIGKILL, hard-capped at 2500 ms;
+still alive at the cap → `stale`. The control `shutdown` op is gone with the control connection: a
+signal targets the pid whose start time and `adc daemon run` command the row recorded at spawn,
+re-verified with the `stopping` generation immediately before each signal, so an impostor on the
+socket path is neither shielded nor endangered. A row without a pid can only be observed gone.
 
 **Signal divergence, recorded.** Signal's plugin owns its daemon unconditionally; we attach-if-running
 (adc is single-instance per socket) and decide owned/foreign before ever calling `ensureDaemon`.
 
 **Upgrade.** Bundled `@ademu/adc-bin` version ≠ the bound daemon's parsed leading semver
 (`"0.2.4 (abc)"` → `0.2.4`; unparsable → never) → stop through the fence → respawn under a new
-generation. Runtime role only.
+generation. Runtime role only. A bound daemon that is silent on its enrollment socket but whose
+recorded process is verified alive and whose recorded version differs from the bundled one is a daemon
+from before the enrollment socket (< 0.5.0): it takes the same fenced stop-and-respawn; a same-version
+silent daemon is still never touched (it may be slow), and a null recorded version fails closed
+(documented manual stop).
 
 ## 5. The account lifecycle (`startAccount`)
 
@@ -359,7 +384,7 @@ daemon relays each tick as one frame (adc 0.3.0, AdemuMLS#621); no heartbeat typ
 
 ## 7. Configuration, secrets, owner authority
 
-- `channels.ademu` — root-level `dataDir`/`socketPath`/`server` inherited by accounts; `groups.<id>`
+- `channels.ademu` — root-level `dataDir`/`socketPath`/`enrollSocketPath`/`server` inherited by accounts; `groups.<id>`
   (`requireMention`, `toolsBySender`, …); `accounts.<id>` with `agentName`, `deviceId`, `agentUserId`,
   `ownerUserId`, `token` (plain string by default — the wizard writes it — or a SecretRef;
   `uiHints` marks it sensitive). Schema built with `buildMultiAccountChannelSchema`, hybrid config
@@ -390,8 +415,17 @@ daemon relays each tick as one frame (adc 0.3.0, AdemuMLS#621); no heartbeat typ
   `AGENT_SELECTION_REQUIRED` → ingress halts before adoption → the account restart-loops with gray
   ticks and no reply; with implicit ownership the message reaches the default agent instead.
 - No `auth.login`: OpenClaw's login path may not mutate channel config. Reconnecting an enrolled device
-  is the wizard's "Connect an already-enrolled agent" (mints a new token under the same label; an
-  existing label asks for explicit replace consent → `replace: true`).
+  is the wizard's **"I have a device token"** (Phase B, 2026-09-30): an operator mints the token at the
+  CLI (`adc [--system] token mint <device_id> --label openclaw-<accountId>`), the wizard takes it as a
+  sensitive text before any daemon lease, checks it over the session socket (`get_self`; hello and self
+  must agree), and writes the account. No `list_devices`, no mint over the control socket, no replace
+  consent: the enrollment socket mints at most one token per device and refuses `replace`. The three
+  failure dispositions the plugin owes (spec M20): `daemon_info` is read before the mint (the mint
+  closes the connection); a lost mint reply or a taken label ends as `mint_lost` with the
+  mint-a-fresh-label instruction, never a `replace` retry; a config write that fails after the mint
+  names the label to revoke; a hardened host with no ceremony possible (refused socket, full quota)
+  prints the operator ceremony. All copy is composed from the daemon identity in `src/operator.ts`,
+  never from the client's message.
 - Windows: guarded before any socket resolver (`process.geteuid` is absent there) → `blocked`.
 
 ## 8. Privacy

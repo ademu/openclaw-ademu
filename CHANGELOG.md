@@ -10,6 +10,31 @@ Tested with `@ademu/adc-bin` **0.3.0**.
 
 ### Changed
 
+- **The plugin enrolls over the ADC enrollment socket and never opens the control socket** (ADC Phase
+  3b Phase B, AdemuMLS#386; openclaw-ademu#12, folding #11). The daemon broker probes `daemon_info`
+  over `adc-enroll.sock`; the ceremony (QR → words → confirm → one mint) runs on that socket, pinned to
+  the device it created; the runtime keeps to the session socket. Owned daemons are spawned with
+  `ADC_ENROLL_SOCKET_PATH` (six env vars) and stopped by verified-pid SIGTERM → SIGKILL — the control
+  `shutdown` op is gone. Requires `@ademu/adc-control` ^0.2.0 and `@ademu/adc-client` ^0.2.0; a device
+  host from before the enrollment socket that the plugin started is replaced through the ownership fence
+  at the next gateway start.
+- **Hardened hosts.** With nothing configured and a system-wide `adc` installed (a root-owned
+  `/etc/adc/config.toml` and `/run/adc/adc-enroll.sock`), the plugin attaches to it — zero spawns, zero
+  ownership claims — and enrolls over its enrollment socket. A permission refusal (`PrivilegeError`) is
+  never read as "no daemon": the wizard and `ademu_enroll` print the operator ceremony for this host
+  (`sudo adc --system agent add` → scan + confirm → `token mint` → paste into the token door), and the
+  runtime reports `blocked` instead of restarting. New config key: `enrollSocketPath` (root and per
+  account) for a user-scope daemon whose enrollment socket is not under its data dir.
+- **"I have a device token" replaces "Connect an already-enrolled agent".** The wizard asks the mode
+  first; the token door takes an operator-minted token (masked input), needs no enrollment connection,
+  checks the token over the session socket (`get_self`) and writes the account. `list_devices`,
+  `device_status` and the replace-token consent are gone.
+- **Mint dispositions.** `daemon_info` is read before the mint (the first mint closes the enrollment
+  connection); a mint whose reply was lost, or whose label is already taken, is never retried with
+  `replace` — the enrollment ends as `mint_lost` and names the fresh-label command; a configuration
+  write that fails after a successful mint names the label to revoke; a full enrollment budget
+  (`enroll_quota`) is refused with the cancel/list commands and the operator ceremony.
+
 - Typing is a pulse (AdemuMLS#621): the daemon relays each keepalive tick as at most one typing frame and
   no longer resends on its own, so the indicator clears ~3 s after the reply instead of staying lit
   forever (the daemon's resend loop was armed by every reply and never disarmed). `typingKeepaliveMs`
