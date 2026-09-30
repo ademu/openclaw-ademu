@@ -353,7 +353,9 @@ device has one seat); a registry keyed by accountId hands it to the adapter, and
 running account fails with a clear error. Targets are conversation ids (UUID), optionally `ademu:`-
 prefixed, compared lowercase. Reactions: `message(action: "react")` → `send_reaction`; removal is the
 empty emoji (Ademú's wire form). Typing: the reply pipeline's typing callbacks with a **2000 ms**
-keepalive (approval rider R3; Ademú's receiver TTL is ~3 s) plus `heartbeat.sendTyping`.
+keepalive (approval rider R3; Ademú's receiver TTL is ~3 s), clamped to ≤ 2500 ms at runtime since the
+daemon relays each tick as one frame (adc 0.3.0, AdemuMLS#621); no heartbeat typing (owner decision
+2026-09-26 — a heartbeat run shows a bubble before it knows whether it will speak, and almost never does).
 
 ## 7. Configuration, secrets, owner authority
 
@@ -678,7 +680,8 @@ and 6 passed; 4 is open with its fix landed; 5, 7 and 8 are tracked as issues (b
   removal/logout); the wizard asked the Rider-A question live; the prune is unit-tested (leg 7 not run).
 - **R4 no `auth.login`:** held; connect-existing is the wizard's second branch (not exercised live).
 - **R5 token in config, SecretRef-capable:** as built; the wizard wrote it live.
-- **R6 `heartbeat.sendTyping`:** as built (not observable in the legs run).
+- **R6 `heartbeat.sendTyping`:** built, then WITHDRAWN 2026-09-27 (AdemuMLS#621 — it latched the daemon's
+  former resend loop every 30 minutes; the owner chose no typing during heartbeats).
 - **R7 Windows guard:** as built (blocked before any resolver); unit-tested only.
 - **R8 skills assertion in CI:** `skills list --json` works headless (acceptance lane), symlink fallback
   kept; live: the resident and enroll skills were visible to the agent in the TUI.

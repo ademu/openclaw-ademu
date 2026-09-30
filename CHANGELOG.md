@@ -6,8 +6,16 @@ Each release pins the exact `@ademu/adc-bin` (Ademú device daemon) version it w
 
 ## [Unreleased]
 
+Tested with `@ademu/adc-bin` **0.3.0**.
+
 ### Changed
 
+- Typing is a pulse (AdemuMLS#621): the daemon relays each keepalive tick as at most one typing frame and
+  no longer resends on its own, so the indicator clears ~3 s after the reply instead of staying lit
+  forever (the daemon's resend loop was armed by every reply and never disarmed). `typingKeepaliveMs`
+  is clamped to 2500 ms at runtime (the schema still accepts 500–10000).
+- No typing during heartbeat runs: `heartbeat.sendTyping` is gone. A heartbeat that produces a message
+  still delivers it; one that ends in `NO_REPLY` shows nothing.
 - **The model never confirms or cancels an enrollment.** `ademu_enroll` now has exactly two actions,
   `start` and `status`. Removed: `wait` (the safety words never enter the model's context), `confirm`,
   `replace_token`, `cancel`, and the lease token the model had to carry (follow-up calls are bound by

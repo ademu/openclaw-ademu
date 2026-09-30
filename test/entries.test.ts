@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import fullEntry from "../index.js";
 import setupEntry from "../setup-entry.js";
+import { ademuPlugin } from "../src/channel.js";
 import { setSharedForTests } from "../src/runtime.js";
 
 function fakeApi(mode: string, stateDir: string) {
@@ -84,5 +85,11 @@ describe("entries", () => {
     process.env.OPENCLAW_STATE_DIR = tmp;
     expect(existsSync(join(tmp, "ademu"))).toBe(false);
     expect(setupEntry.plugin.gateway).toBeUndefined();
+  });
+});
+
+describe("typing surfaces (AdemuMLS#621)", () => {
+  it("offers no heartbeat typing surface — heartbeats are invisible unless they produce a message", () => {
+    expect(ademuPlugin.heartbeat).toBeUndefined();
   });
 });
