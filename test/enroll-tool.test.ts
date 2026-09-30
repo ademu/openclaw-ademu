@@ -148,11 +148,38 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     expect(w.released()).toBe(1);
   });
 
-  it("a duplicate token label on the device this ceremony created is replaced silently (our own earlier attempt)", async () => {
+  it("M20 a/b: daemon_info is read BEFORE the mint; a taken label or a lost mint reply is `mint_lost` — exactly one mint, never replace, nothing written, the fresh-label command named", async () => {
+    const { ControlError, ConnectionClosedError } = await import("@ademu/adc-control");
+    for (const thrown of [new ControlError("label_exists", "x"), new ConnectionClosedError({ op: "token_mint", id: "1" })]) {
+      const w = world();
+      w.control.tokenMintImpl = async () => {
+        throw thrown;
+      };
+      await w.call({ action: "start", agentName: "Iris" });
+      w.control.emit({ words: WORDS });
+      await tick();
+      const yesP = yes(w);
+      await tick(5);
+      w.control.finish("enrolled");
+      const done = await yesP;
+      expect(done).toMatchObject({ ok: false, state: "mint_lost" });
+      expect(done.message).toContain(`token mint ${NEW_DEVICE} --label openclaw-iris-2`);
+      expect(done.message).toContain("I have a device token");
+      expect(done.message).toContain("Nothing was written");
+      const ops = w.control.calls.map((c) => c.op);
+      expect(ops.indexOf("daemon_info")).toBeGreaterThan(-1);
+      expect(ops.indexOf("daemon_info")).toBeLessThan(ops.indexOf("token_mint"));
+      expect(w.control.calls.filter((c) => c.op === "token_mint").map((c) => c.params)).toEqual([{ device_id: NEW_DEVICE, label: "openclaw-iris" }]);
+      expect(w.writes).toHaveLength(0);
+      expect(w.released()).toBe(1);
+      expect(w.registry.size).toBe(0);
+    }
+  });
+
+  it("M20 c: a config write that fails after the mint names the label to revoke", async () => {
     const w = world();
-    w.control.tokenMintImpl = async (p) => {
-      if (!p.replace) throw new (await import("@ademu/adc-control")).ControlError("label_exists", "x");
-      return { token_id: "tid", label: p.label, token: "adc1_rotated", created_at_ms: 1 };
+    w.deps.writeConfig = async () => {
+      throw new Error("disk full");
     };
     await w.call({ action: "start", agentName: "Iris" });
     w.control.emit({ words: WORDS });
@@ -160,15 +187,37 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     const yesP = yes(w);
     await tick(5);
     w.control.finish("enrolled");
-    const done = await yesP;
-    expect(done).toMatchObject({ ok: true, state: "done" });
-    expect(done.message).not.toMatch(/token/i);
-    expect((w.current() as unknown as { channels: { ademu: { accounts: { iris: { token: string } } } } }).channels.ademu.accounts.iris.token).toBe("adc1_rotated");
-    expect(w.control.calls.filter((c) => c.op === "token_mint").map((c) => c.params)).toEqual([
-      { device_id: NEW_DEVICE, label: "openclaw-iris" },
-      { device_id: NEW_DEVICE, label: "openclaw-iris", replace: true },
-    ]);
-    expect(w.writes).toHaveLength(1);
+    await expect(yesP).rejects.toThrow(/token revoke .* --label openclaw-iris/);
+    expect(w.control.calls.filter((c) => c.op === "token_mint")).toHaveLength(1);
+    expect(w.released()).toBe(1);
+  });
+
+  it("M20 d: a hardened host (PrivilegeError at acquisition) answers with the operator ceremony for THIS host, ok:false, never throws", async () => {
+    const { PrivilegeError } = await import("@ademu/adc-control");
+    const w = world({} as never, new PrivilegeError("permission denied opening the enrollment socket at /run/adc/adc-enroll.sock", "permission_denied"));
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(r.details).toMatchObject({ ok: false, state: "unavailable" });
+    const msg = r.content[0]!.text;
+    expect(msg).toContain('agent add "Iris"');
+    expect(msg).toContain("token mint <device_id> --label openclaw-iris");
+    expect(msg).toContain("I have a device token");
+    expect(msg).not.toContain("permission denied opening");
+    expect(w.registry.size).toBe(0);
+  });
+
+  it("a full enrollment budget (enroll_quota) at create_device: nothing created, the lease disposed, the quota copy with the operator ceremony", async () => {
+    const { ControlError } = await import("@ademu/adc-control");
+    const w = world();
+    w.control.createDeviceImpl = async () => {
+      throw new ControlError("enroll_quota", "full");
+    };
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(r.details).toMatchObject({ ok: false, state: "unavailable" });
+    expect(r.content[0]!.text).toContain("enrollment budget is full");
+    expect(r.content[0]!.text).toContain("agent cancel");
+    expect(w.opens).toHaveLength(0);
+    expect(w.released()).toBe(1);
+    expect(w.registry.size).toBe(0);
   });
 
   it("a words mismatch (the daemon refuses the human's yes) disposes the lease and reports without writing", async () => {

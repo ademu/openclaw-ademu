@@ -392,22 +392,21 @@ describe("enrollment page: the ceremony (scan → words → Yes → enrolled)", 
     expect(await (await fetch(page(token, "/state"))).json()).toEqual({ phase: "enrolled" });
   });
 
-  it("a duplicate token label on the device this ceremony created is replaced silently; the page reports enrolled", async () => {
+  it("a taken token label is `mint_lost` (never replaced over the enrollment socket): nothing written, the page reports the failure", async () => {
     const w = world();
     const { token } = await started(w);
     const { page } = await serve(w);
     w.control.emit({ state: "paired", words: WORDS });
     const { ControlError } = await import("@ademu/adc-control");
-    w.control.tokenMintImpl = async (p) => {
-      if (!p.replace) throw new ControlError("label_exists", "exists");
-      return { token_id: "tid", label: p.label, token: "adc1_rotated", created_at_ms: 1 };
+    w.control.tokenMintImpl = async () => {
+      throw new ControlError("label_exists", "exists");
     };
     const confirmP = confirmPost(page(token, "/confirm"));
     await tick(10);
     w.control.finish("enrolled");
-    expect(await (await confirmP).json()).toEqual({ ok: true, state: "done" });
-    expect(await (await fetch(page(token, "/state"))).json()).toEqual({ phase: "enrolled" });
-    expect(w.writes).toHaveLength(1);
+    expect(await (await confirmP).json()).toMatchObject({ ok: false, state: "mint_lost" });
+    expect(w.control.calls.filter((c) => c.op === "token_mint")).toHaveLength(1);
+    expect(w.writes).toHaveLength(0);
   });
 });
 
