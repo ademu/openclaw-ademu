@@ -11,6 +11,7 @@ import {
   SessionRejectedError,
 } from "@ademu/adc-client";
 import { PlatformPackageMissingError, UnsupportedPlatformError } from "@ademu/adc-bin";
+import { PrivilegeError } from "@ademu/adc-control";
 import { channelBlockedPatch, channelReadyPatch } from "openclaw/plugin-sdk/gateway-runtime";
 import { strings } from "./i18n/strings.js";
 import { DaemonBusyError, DaemonLostError, DaemonUnreachableError, DaemonUnsupportedError } from "./monitor/daemon.js";
@@ -79,6 +80,8 @@ export function classifyError(err: unknown): Classified {
   if (err instanceof SessionWarmupError) return { kind: "recovering", lastError: strings.status.warmupFailed };
   if (err instanceof UnsupportedPlatformError) return { kind: "blocked", lastError: strings.status.unsupportedPlatform(err.platform) };
   if (err instanceof DaemonUnsupportedError) return { kind: "blocked", lastError: err.message };
+  // A restart cannot fix permissions: the hardened host's refusal is user-actionable, never a loop.
+  if (err instanceof PrivilegeError) return { kind: "blocked", lastError: strings.status.privilegeDenied };
   if (err instanceof PlatformPackageMissingError) return { kind: "blocked", lastError: strings.status.daemonUnreachable(undefined) };
   if (err instanceof DaemonUnreachableError) return { kind: "recovering", lastError: strings.status.daemonUnreachable(err.logPath) };
   if (err instanceof DaemonLostError) return { kind: "recovering", lastError: strings.status.daemonLost };
