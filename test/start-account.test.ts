@@ -54,7 +54,7 @@ function fakeDaemons(opts: { acquire?: () => Promise<void>; mode?: "owned" | "fo
         role: "runtime",
         identity: (params as { identity: unknown }).identity as never,
         holderId: "h1",
-        info: { controlSocketPath: "/d/adc.sock", sessionSocketPath: "/d/adc-session.sock" },
+        info: { enrollSocketPath: "/d/adc-enroll.sock", sessionSocketPath: "/d/adc-session.sock" },
         lost,
         released: 0,
         lose,

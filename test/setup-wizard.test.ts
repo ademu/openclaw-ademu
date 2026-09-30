@@ -61,7 +61,7 @@ function world(opts: { acquireError?: unknown } = {}) {
     role: "setup",
     identity: {} as never,
     holderId: "h",
-    info: { controlSocketPath: "/d/adc.sock", sessionSocketPath: "/d/adc-session.sock" },
+    info: { enrollSocketPath: "/d/adc-enroll.sock", sessionSocketPath: "/d/adc-session.sock" },
     lost: new Promise<never>(() => {}),
     release: async () => void released++,
   };

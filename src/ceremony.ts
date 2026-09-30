@@ -315,7 +315,7 @@ export async function createEnrollmentLease(params: {
       beforeEffect: params.beforeEffect,
     });
     try {
-      control = await deps.connectControl(daemonLease.info.controlSocketPath);
+      control = await deps.connectControl(daemonLease.info.enrollSocketPath);
     } catch (err) {
       await daemonLease.release().catch(() => {});
       throw err;
