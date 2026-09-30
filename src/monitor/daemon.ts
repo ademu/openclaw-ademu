@@ -23,7 +23,7 @@ import { chmodSync, existsSync, lstatSync, readdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { PlatformPackageMissingError, resolveAdcBinaryPath, UnsupportedPlatformError } from "@ademu/adc-bin";
 import { connect as connectControlReal, ensureDaemon as ensureDaemonReal, type ChildLike, type DaemonInfoResult } from "@ademu/adc-control";
-import { canonicalizePath, type DaemonIdentity } from "../config.js";
+import { canonicalizePath, ENROLL_SOCKET_FILE, type DaemonIdentity } from "../config.js";
 import { strings } from "../i18n/strings.js";
 import type { AdemuStore, OwnershipRow, OwnershipState } from "../store.js";
 
@@ -1099,8 +1099,10 @@ export class DaemonManager {
         dataDir: row.dataDir,
         controlSocket: row.controlSocket,
         sessionSocket: row.sessionSocket,
-        raw: { dataDir: row.dataDir, controlSocket: row.controlSocket, sessionSocket: row.sessionSocket },
-        explicit: { dataDir: true, socketPath: true },
+        enrollSocket: `${row.dataDir}/${ENROLL_SOCKET_FILE}`,
+        raw: { dataDir: row.dataDir, controlSocket: row.controlSocket, sessionSocket: row.sessionSocket, enrollSocket: `${row.dataDir}/${ENROLL_SOCKET_FILE}` },
+        explicit: { dataDir: true, socketPath: true, enrollSocketPath: false },
+        scope: "user",
       };
       const holderId = `runtime:${this.#deps.selfPid}:sweep:${randomUUID()}`;
       if (!this.#deps.store.addHolder({ holderId, dataDir: row.dataDir, role: "runtime", pid: this.#deps.selfPid, pidStartedAt: this.#deps.selfPidStartedAt, heartbeatMs: this.#deps.now() })) continue;

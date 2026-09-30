@@ -20,6 +20,7 @@ import {
   type SecretInputStringResolutionMode,
 } from "openclaw/plugin-sdk/secret-input";
 import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
+import { detectSystemInstall, SYSTEM_CONTROL_SOCKET_PATH, SYSTEM_ENROLL_SOCKET_PATH, SYSTEM_SESSION_SOCKET_PATH } from "@ademu/adc-control";
 import { z } from "zod";
 import { pruneRouteBindings } from "./bindings.js";
 
@@ -33,6 +34,10 @@ export const DEFAULT_SERVER = {
 
 export const CONTROL_SOCKET_FILE = "adc.sock";
 export const SESSION_SOCKET_FILE = "adc-session.sock";
+/** The daemon's ENROLLMENT socket (ADC Phase 3b Phase B): the only socket the ceremony half opens. */
+export const ENROLL_SOCKET_FILE = "adc-enroll.sock";
+/** The system install's state dir (`adc-daemon/src/system_layout.rs` STATE_DIR; not exported by the client). */
+export const SYSTEM_DATA_DIR = "/var/lib/adc";
 
 // ---------------------------------------------------------------------------------------------
 // Schemas
@@ -57,6 +62,7 @@ export const AdemuAccountSchema = z
     token: buildOptionalSecretInputSchema(),
     dataDir: z.string().optional(),
     socketPath: z.string().optional(),
+    enrollSocketPath: z.string().optional(),
   })
   .strict();
 
@@ -66,6 +72,7 @@ const AdemuBaseSchema = z
     enabled: z.boolean().optional(),
     dataDir: z.string().optional(),
     socketPath: z.string().optional(),
+    enrollSocketPath: z.string().optional(),
     server: ServerSchema.optional(),
     groups: z.record(z.string(), buildGroupEntrySchema()).optional(),
   })
@@ -86,7 +93,7 @@ export const ADEMU_UI_HINTS = {
   "accounts.*.token": {
     label: "Device token",
     sensitive: true,
-    help: "Minted by the enrollment wizard or the ademu_enroll tool; rotate with adc token rotate.",
+    help: "Minted by the enrollment wizard or the ademu_enroll tool; rotate it at the adc CLI and paste the new token via “I have a device token”.",
   },
   "accounts.*.agentName": { label: "Agent name on Ademú" },
   "accounts.*.deviceId": { label: "Device id", advanced: true },
@@ -94,8 +101,10 @@ export const ADEMU_UI_HINTS = {
   "accounts.*.ownerUserId": { label: "Owner user id", advanced: true },
   "accounts.*.dataDir": { label: "Device host data dir (override)", advanced: true },
   "accounts.*.socketPath": { label: "Device host control socket (override)", advanced: true },
+  "accounts.*.enrollSocketPath": { label: "Device host enrollment socket (override)", advanced: true },
   dataDir: { label: "Device host data dir", advanced: true },
   socketPath: { label: "Device host control socket", advanced: true },
+  enrollSocketPath: { label: "Device host enrollment socket", advanced: true },
   "server.restBaseUrl": { label: "Ademú REST base URL", advanced: true },
   "server.wsUrl": { label: "Ademú WebSocket URL", advanced: true },
 } as const;
@@ -107,19 +116,34 @@ export const ademuConfigSchema: ReturnType<typeof buildChannelConfigSchema> = bu
 
 // ---------------------------------------------------------------------------------------------
 // Daemon identity (R1): the validated, canonical pair (dataDir, controlSocket) + session socket
+// + the enrollment socket (Phase B) + the scope (user, or a hardened system install: attach-only)
 // ---------------------------------------------------------------------------------------------
+
+export type DaemonScope = "user" | "system";
 
 export type DaemonIdentity = {
   /** Canonical data dir (realpath of the deepest existing ancestor + verbatim tail). */
   dataDir: string;
-  /** Canonical control socket path. */
+  /** Canonical control socket path (identity data only — the plugin never opens it). */
   controlSocket: string;
   /** Session socket we inject on owned spawns (`<dataDir>/adc-session.sock`). */
   sessionSocket: string;
+  /** Enrollment socket we inject on owned spawns and dial for the ceremony (`<dataDir>/adc-enroll.sock`). */
+  enrollSocket: string;
   /** Raw values as configured/derived (what we pass to the daemon). */
-  raw: { dataDir: string; controlSocket: string; sessionSocket: string };
-  explicit: { dataDir: boolean; socketPath: boolean };
+  raw: { dataDir: string; controlSocket: string; sessionSocket: string; enrollSocket: string };
+  explicit: { dataDir: boolean; socketPath: boolean; enrollSocketPath: boolean };
+  /**
+   * `system`: a system-scope ADC daemon is installed on this host (`detectSystemInstall`: a root-owned
+   * regular /etc/adc/config.toml AND a socket at /run/adc/adc-enroll.sock) and nothing was configured
+   * explicitly, so the identity IS the system layout and the daemon is foreign (attach-only, never
+   * spawned beside — the coexistence gap, AdemuMLS#642). `user`: everything else.
+   */
+  scope: DaemonScope;
 };
+
+/** The hardened host's detector (seam for tests). */
+export type SystemInstallDetector = () => boolean;
 
 export function defaultDataDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(resolveStateDir(env), "ademu", "adc");
@@ -155,25 +179,68 @@ export function canonicalizePath(p: string): string {
   return tail.length ? join(base, ...tail) : base;
 }
 
+export type DaemonIdentityInput = {
+  dataDir?: string | undefined;
+  socketPath?: string | undefined;
+  enrollSocketPath?: string | undefined;
+};
+
+/** The system layout as an identity: `/var/lib/adc` + the three `/run/adc` sockets, foreign by scope. */
+function systemIdentity(): DaemonIdentity {
+  return {
+    dataDir: canonicalizePath(SYSTEM_DATA_DIR),
+    controlSocket: canonicalizePath(SYSTEM_CONTROL_SOCKET_PATH),
+    sessionSocket: canonicalizePath(SYSTEM_SESSION_SOCKET_PATH),
+    enrollSocket: canonicalizePath(SYSTEM_ENROLL_SOCKET_PATH),
+    raw: {
+      dataDir: SYSTEM_DATA_DIR,
+      controlSocket: SYSTEM_CONTROL_SOCKET_PATH,
+      sessionSocket: SYSTEM_SESSION_SOCKET_PATH,
+      enrollSocket: SYSTEM_ENROLL_SOCKET_PATH,
+    },
+    explicit: { dataDir: false, socketPath: false, enrollSocketPath: false },
+    scope: "system",
+  };
+}
+
+/**
+ * Resolves the daemon identity. With NOTHING configured (no `dataDir`, `socketPath` or
+ * `enrollSocketPath`, inherited root values included) and a system install detected, the identity is
+ * the system layout (scope `system`). Any explicit key keeps user scope: an operator who names paths
+ * gets exactly those paths.
+ */
 export function resolveDaemonIdentity(
-  input: { dataDir?: string | undefined; socketPath?: string | undefined },
+  input: DaemonIdentityInput,
   env: NodeJS.ProcessEnv = process.env,
+  detect: SystemInstallDetector = () => detectSystemInstall(),
 ): DaemonIdentity {
+  const explicit = {
+    dataDir: Boolean(input.dataDir?.trim()),
+    socketPath: Boolean(input.socketPath?.trim()),
+    enrollSocketPath: Boolean(input.enrollSocketPath?.trim()),
+  };
+  if (!explicit.dataDir && !explicit.socketPath && !explicit.enrollSocketPath && detect()) return systemIdentity();
   const rawDataDir = input.dataDir?.trim() ? expandHome(input.dataDir.trim()) : defaultDataDir(env);
   const rawControl = input.socketPath?.trim()
     ? expandHome(input.socketPath.trim())
     : join(rawDataDir, CONTROL_SOCKET_FILE);
   const rawSession = join(rawDataDir, SESSION_SOCKET_FILE);
+  const rawEnroll = input.enrollSocketPath?.trim()
+    ? expandHome(input.enrollSocketPath.trim())
+    : join(rawDataDir, ENROLL_SOCKET_FILE);
   return {
     dataDir: canonicalizePath(rawDataDir),
     controlSocket: canonicalizePath(rawControl),
     sessionSocket: canonicalizePath(rawSession),
+    enrollSocket: canonicalizePath(rawEnroll),
     raw: {
       dataDir: isAbsolute(rawDataDir) ? rawDataDir : resolve(rawDataDir),
       controlSocket: isAbsolute(rawControl) ? rawControl : resolve(rawControl),
       sessionSocket: isAbsolute(rawSession) ? rawSession : resolve(rawSession),
+      enrollSocket: isAbsolute(rawEnroll) ? rawEnroll : resolve(rawEnroll),
     },
-    explicit: { dataDir: Boolean(input.dataDir?.trim()), socketPath: Boolean(input.socketPath?.trim()) },
+    explicit,
+    scope: "user",
   };
 }
 
@@ -241,6 +308,7 @@ function readAccount(
   accountId: string | null | undefined,
   mode: SecretInputStringResolutionMode,
   env: NodeJS.ProcessEnv,
+  detect?: SystemInstallDetector,
 ): ResolvedAdemuAccount {
   const channel = getChannelConfig(cfg) ?? ({} as AdemuChannelConfig);
   const id = normalizeOptionalAccountId(accountId) ?? resolveDefaultAdemuAccountId(cfg);
@@ -250,7 +318,7 @@ function readAccount(
   const token = resolveSecretInputString({ value: merged.token, path: tokenPath(id), mode });
   const tokenSource: ResolvedAdemuAccount["tokenSource"] =
     token.status === "available" ? "config" : token.status === "configured_unavailable" ? "secretRef" : "none";
-  const daemon = resolveDaemonIdentity({ dataDir: merged.dataDir, socketPath: merged.socketPath }, env);
+  const daemon = resolveDaemonIdentity({ dataDir: merged.dataDir, socketPath: merged.socketPath, enrollSocketPath: merged.enrollSocketPath }, env, detect);
   const enabled = channel.enabled !== false && entry?.enabled !== false;
   const deviceId = merged.deviceId?.trim() || undefined;
   const configured = enabled && Boolean(deviceId) && token.status !== "missing";
@@ -272,36 +340,42 @@ function readAccount(
 }
 
 /**
- * Cross-axis daemon identity validation (R1): one data dir ↔ one control socket. Returns a map of
- * accountId → error message for every account involved in a collision.
+ * Cross-axis daemon identity validation (R1): one data dir ↔ one control socket ↔ one enrollment
+ * socket. Returns a map of accountId → error message for every account involved in a collision.
  */
 export function validateDaemonIdentities(
   cfg: OpenClawConfig,
   env: NodeJS.ProcessEnv = process.env,
+  detect?: SystemInstallDetector,
 ): Map<string, string> {
   const errors = new Map<string, string>();
   const ids = listAdemuAccountIds(cfg);
   const byDir = new Map<string, Set<string>>();
+  const byDirEnroll = new Map<string, Set<string>>();
   const bySocket = new Map<string, Set<string>>();
   const identities = new Map<string, DaemonIdentity>();
+  const add = (map: Map<string, Set<string>>, key: string, value: string) =>
+    (map.get(key) ?? map.set(key, new Set()).get(key)!).add(value);
   for (const id of ids) {
-    const account = readAccount(cfg, id, "inspect", env);
+    const account = readAccount(cfg, id, "inspect", env, detect);
     identities.set(id, account.daemon);
-    (byDir.get(account.daemon.dataDir) ?? byDir.set(account.daemon.dataDir, new Set()).get(account.daemon.dataDir)!).add(
-      account.daemon.controlSocket,
-    );
-    (
-      bySocket.get(account.daemon.controlSocket) ??
-      bySocket.set(account.daemon.controlSocket, new Set()).get(account.daemon.controlSocket)!
-    ).add(account.daemon.dataDir);
+    add(byDir, account.daemon.dataDir, account.daemon.controlSocket);
+    add(byDirEnroll, account.daemon.dataDir, account.daemon.enrollSocket);
+    add(bySocket, account.daemon.controlSocket, account.daemon.dataDir);
   }
   for (const [id, identity] of identities) {
     const sockets = byDir.get(identity.dataDir)!;
+    const enrollSockets = byDirEnroll.get(identity.dataDir)!;
     const dirs = bySocket.get(identity.controlSocket)!;
     if (sockets.size > 1) {
       errors.set(
         id,
         `daemon identity collision: data dir ${identity.dataDir} is named with ${sockets.size} different control sockets across accounts`,
+      );
+    } else if (enrollSockets.size > 1) {
+      errors.set(
+        id,
+        `daemon identity collision: data dir ${identity.dataDir} is named with ${enrollSockets.size} different enrollment sockets across accounts`,
       );
     } else if (dirs.size > 1) {
       errors.set(
@@ -318,9 +392,10 @@ export function resolveAdemuAccount(
   cfg: OpenClawConfig,
   accountId?: string | null,
   env: NodeJS.ProcessEnv = process.env,
+  detect?: SystemInstallDetector,
 ): ResolvedAdemuAccount {
-  const account = readAccount(cfg, accountId, "strict", env);
-  const error = validateDaemonIdentities(cfg, env).get(account.accountId);
+  const account = readAccount(cfg, accountId, "strict", env, detect);
+  const error = validateDaemonIdentities(cfg, env, detect).get(account.accountId);
   return error ? { ...account, configError: error } : account;
 }
 
@@ -329,9 +404,10 @@ export function inspectAdemuAccount(
   cfg: OpenClawConfig,
   accountId?: string | null,
   env: NodeJS.ProcessEnv = process.env,
+  detect?: SystemInstallDetector,
 ): Omit<ResolvedAdemuAccount, "token"> {
-  const { token: _token, ...account } = readAccount(cfg, accountId, "inspect", env);
-  const error = validateDaemonIdentities(cfg, env).get(account.accountId);
+  const { token: _token, ...account } = readAccount(cfg, accountId, "inspect", env, detect);
+  const error = validateDaemonIdentities(cfg, env, detect).get(account.accountId);
   return error ? { ...account, configError: error } : account;
 }
 

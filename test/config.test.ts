@@ -14,6 +14,8 @@ import {
   canonicalizePath,
   DEFAULT_SERVER,
   defaultDataDir,
+  ENROLL_SOCKET_FILE,
+  SYSTEM_DATA_DIR,
   inspectAdemuAccount,
   listAdemuAccountIds,
   ownerAllowFromEntry,
@@ -52,7 +54,25 @@ describe("accounts and inheritance", () => {
     expect(iris.daemon.raw.dataDir).toBe(join(tmp, "shared"));
     expect(iris.daemon.raw.controlSocket).toBe(join(tmp, "shared", "adc.sock"));
     expect(iris.daemon.raw.sessionSocket).toBe(join(tmp, "shared", "adc-session.sock"));
-    expect(iris.daemon.explicit).toEqual({ dataDir: true, socketPath: false });
+    expect(iris.daemon.raw.enrollSocket).toBe(join(tmp, "shared", "adc-enroll.sock"));
+    expect(iris.daemon.explicit).toEqual({ dataDir: true, socketPath: false, enrollSocketPath: false });
+    expect(iris.daemon.scope).toBe("user");
+  });
+
+  it("the enrollment socket is derived under dataDir; an explicit enrollSocketPath wins (root or account)", () => {
+    const c = cfg({
+      dataDir: join(tmp, "own"),
+      enrollSocketPath: join(tmp, "run", "adc-enroll.sock"),
+      accounts: { a: { deviceId: "d", token: "t" }, b: { deviceId: "d", token: "t", enrollSocketPath: "~/b-enroll.sock" } },
+    });
+    const a = resolveAdemuAccount(c, "a", ENV);
+    expect(a.daemon.raw.enrollSocket).toBe(join(tmp, "run", "adc-enroll.sock"));
+    expect(a.daemon.explicit.enrollSocketPath).toBe(true);
+    expect(a.daemon.raw.controlSocket).toBe(join(tmp, "own", "adc.sock"));
+    const b = resolveAdemuAccount(c, "b", ENV);
+    expect(b.daemon.raw.enrollSocket.endsWith("/b-enroll.sock")).toBe(true);
+    expect(b.daemon.raw.enrollSocket.startsWith("~")).toBe(false);
+    expect(ENROLL_SOCKET_FILE).toBe("adc-enroll.sock");
   });
 
   it("an account override of dataDir wins and moves the derived sockets", () => {
@@ -155,6 +175,57 @@ describe("daemon identity canonicalization and collisions (R1)", () => {
     const b = resolveDaemonIdentity({ dataDir: join(tmp, "same", "."), socketPath: join(tmp, "same", "adc.sock") }, ENV);
     expect(a.dataDir).toBe(b.dataDir);
     expect(a.controlSocket).toBe(b.controlSocket);
+  });
+
+  it("two accounts naming different enrollment sockets for one data dir collide", () => {
+    const c = cfg({
+      accounts: {
+        a: { deviceId: "d", token: "t", dataDir: join(tmp, "de"), enrollSocketPath: join(tmp, "de", "one-enroll.sock") },
+        b: { deviceId: "d", token: "t", dataDir: join(tmp, "de"), enrollSocketPath: join(tmp, "de", "two-enroll.sock") },
+      },
+    });
+    const errors = validateDaemonIdentities(c, ENV);
+    expect([...errors.keys()].sort()).toEqual(["a", "b"]);
+    expect(errors.get("a")).toMatch(/enrollment sockets/);
+  });
+});
+
+describe("daemon scope: a hardened host (system-scope adc install) is attach-only", () => {
+  const detected = () => true;
+
+  it("with nothing configured and the detector firing, the identity IS the system layout, scope system", () => {
+    const id = resolveDaemonIdentity({}, ENV, detected);
+    expect(id.scope).toBe("system");
+    expect(id.raw).toEqual({
+      dataDir: SYSTEM_DATA_DIR,
+      controlSocket: "/run/adc/adc.sock",
+      sessionSocket: "/run/adc/adc-session.sock",
+      enrollSocket: "/run/adc/adc-enroll.sock",
+    });
+    expect(id.explicit).toEqual({ dataDir: false, socketPath: false, enrollSocketPath: false });
+  });
+
+  it("any explicit key (dataDir, socketPath or enrollSocketPath — root values included) keeps user scope and the configured paths", () => {
+    for (const input of [{ dataDir: join(tmp, "x") }, { socketPath: join(tmp, "x.sock") }, { enrollSocketPath: join(tmp, "x-enroll.sock") }]) {
+      const id = resolveDaemonIdentity(input, ENV, detected);
+      expect(id.scope).toBe("user");
+      expect(id.raw.dataDir).not.toBe(SYSTEM_DATA_DIR);
+    }
+    const c = cfg({ dataDir: join(tmp, "root"), accounts: { a: { deviceId: "d", token: "t" } } });
+    expect(resolveAdemuAccount(c, "a", ENV, detected).daemon.scope).toBe("user");
+  });
+
+  it("every unconfigured account resolves to the one system identity — no collision", () => {
+    const c = cfg({ accounts: { a: { deviceId: "d", token: "t" }, b: { deviceId: "e", token: "t" } } });
+    expect(validateDaemonIdentities(c, ENV, detected).size).toBe(0);
+    expect(inspectAdemuAccount(c, "a", ENV, detected).daemon.scope).toBe("system");
+    expect(inspectAdemuAccount(c, "b", ENV, detected).daemon.dataDir).toBe(inspectAdemuAccount(c, "a", ENV, detected).daemon.dataDir);
+  });
+
+  it("without a system install (the default detector on this host) the default identity stays under the state dir", () => {
+    const id = resolveDaemonIdentity({}, ENV, () => false);
+    expect(id.scope).toBe("user");
+    expect(id.raw.dataDir).toBe(defaultDataDir(ENV));
   });
 });
 

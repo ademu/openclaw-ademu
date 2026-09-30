@@ -63,6 +63,9 @@
           "socketPath": {
             "type": "string"
           },
+          "enrollSocketPath": {
+            "type": "string"
+          },
           "server": {
             "type": "object",
             "properties": {
@@ -303,6 +306,9 @@
                 },
                 "socketPath": {
                   "type": "string"
+                },
+                "enrollSocketPath": {
+                  "type": "string"
                 }
               },
               "additionalProperties": false
@@ -318,7 +324,7 @@
         "accounts.*.token": {
           "label": "Device token",
           "sensitive": true,
-          "help": "Minted by the enrollment wizard or the ademu_enroll tool; rotate with adc token rotate."
+          "help": "Minted by the enrollment wizard or the ademu_enroll tool; rotate it at the adc CLI and paste the new token via “I have a device token”."
         },
         "accounts.*.agentName": {
           "label": "Agent name on Ademú"
@@ -343,12 +349,20 @@
           "label": "Device host control socket (override)",
           "advanced": true
         },
+        "accounts.*.enrollSocketPath": {
+          "label": "Device host enrollment socket (override)",
+          "advanced": true
+        },
         "dataDir": {
           "label": "Device host data dir",
           "advanced": true
         },
         "socketPath": {
           "label": "Device host control socket",
+          "advanced": true
+        },
+        "enrollSocketPath": {
+          "label": "Device host enrollment socket",
           "advanced": true
         },
         "server.restBaseUrl": {
