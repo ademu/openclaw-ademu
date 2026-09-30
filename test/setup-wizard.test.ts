@@ -53,7 +53,7 @@ function fakePrompter(script: Script) {
   return { prompter, log, progress };
 }
 
-function world(opts: { acquireError?: unknown } = {}) {
+function world(opts: { acquireError?: unknown; connectSession?: () => Promise<never> } = {}) {
   const control = new FakeControl();
   let released = 0;
   const daemonLease: Lease = {
@@ -71,11 +71,11 @@ function world(opts: { acquireError?: unknown } = {}) {
       return daemonLease;
     },
   } as unknown as DaemonManager;
-  const lease: EnrollmentLeaseDeps = { daemons, connectControl: async () => control, now: () => 0, setTimer: () => 0, clearTimer: () => {} };
+  const lease: EnrollmentLeaseDeps = { daemons, connectEnroll: async () => control, now: () => 0, setTimer: () => 0, clearTimer: () => {} };
   const client = new FakeAdcClient({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER });
   const wizard = createAdemuSetupWizard({
     lease,
-    connectSession: async () => client as never,
+    connectSession: opts.connectSession ?? (async () => client as never),
     qr: { terminal: async (p) => `[QR ${p}]`, pngDataUrl: async () => "data:image/png;base64,AAA" },
   });
   return { wizard, control, released: () => released };
@@ -104,7 +104,7 @@ describe("setup wizard: status", () => {
 describe("setup wizard: new enrollment", () => {
   it("runs the ceremony, asks the R3 grant, and returns the whole config with the account + owner entry", async () => {
     const { wizard, control, released } = world();
-    const { prompter, log, progress } = fakePrompter({ texts: ["Iris"], confirms: [true /* words */, true /* grant */] });
+    const { prompter, log, progress } = fakePrompter({ selects: ["new"], texts: ["Iris"], confirms: [true /* words */, true /* grant */] });
     effects.length = 0;
     const run = Promise.resolve(wizard.finalize!({ cfg: baseCfg, accountId: "iris", credentialValues: {}, runtime: {} as never, prompter: prompter as never, options, forceAllowFrom: false }));
     run.catch(() => {});
@@ -141,7 +141,7 @@ describe("setup wizard: new enrollment", () => {
 
   it("declining the grant writes the account without the owner entry", async () => {
     const { wizard, control } = world();
-    const { prompter } = fakePrompter({ texts: [""], confirms: [true, false] });
+    const { prompter } = fakePrompter({ selects: ["new"], texts: [""], confirms: [true, false] });
     const run = Promise.resolve(wizard.finalize!({ cfg: baseCfg, accountId: "iris", credentialValues: {}, runtime: {} as never, prompter: prompter as never, options, forceAllowFrom: false }));
     run.catch(() => {});
     await new Promise((r) => setTimeout(r, 5));
@@ -156,7 +156,7 @@ describe("setup wizard: new enrollment", () => {
 
   it("a words mismatch shows the kind copy and THROWS WizardCancelledError (never a silent success)", async () => {
     const { wizard, control, released } = world();
-    const { prompter, log } = fakePrompter({ texts: ["Iris"], confirms: [true] });
+    const { prompter, log } = fakePrompter({ selects: ["new"], texts: ["Iris"], confirms: [true] });
     control.confirmWordsImpl = async () => {
       throw new (await import("@ademu/adc-control")).ControlError("words_mismatch", "x");
     };
@@ -171,7 +171,7 @@ describe("setup wizard: new enrollment", () => {
 
   it("saying no to the words cancels pairing and throws WizardCancelledError", async () => {
     const { wizard, control } = world();
-    const { prompter } = fakePrompter({ texts: ["Iris"], confirms: [false] });
+    const { prompter } = fakePrompter({ selects: ["new"], texts: ["Iris"], confirms: [false] });
     const run = Promise.resolve(wizard.finalize!({ cfg: baseCfg, accountId: "iris", credentialValues: {}, runtime: {} as never, prompter: prompter as never, options, forceAllowFrom: false }));
     run.catch(() => {});
     await new Promise((r) => setTimeout(r, 5));
@@ -182,7 +182,7 @@ describe("setup wizard: new enrollment", () => {
 
   it("a daemon that cannot start shows the remedy and throws WizardCancelledError", async () => {
     const { wizard } = world({ acquireError: new DaemonUnreachableError("boom", "/var/log/adc.log") });
-    const { prompter, log, progress } = fakePrompter({});
+    const { prompter, log, progress } = fakePrompter({ selects: ["new"] });
     await expect(
       wizard.finalize!({ cfg: baseCfg, accountId: "iris", credentialValues: {}, runtime: {} as never, prompter: prompter as never, options, forceAllowFrom: false }),
     ).rejects.toBeInstanceOf(WizardCancelledError);
@@ -191,18 +191,93 @@ describe("setup wizard: new enrollment", () => {
   });
 });
 
-describe("setup wizard: connect an already-enrolled agent", () => {
-  it("offers the mode choice when enrolled devices exist and mints without a QR", async () => {
-    const { wizard, control } = world();
-    control.devices = [{ device_id: NEW_DEVICE, agent_user_id: NEW_AGENT, agent_name: "Iris", state: "enrolled" }];
-    const { prompter, log } = fakePrompter({ selects: ["existing", NEW_DEVICE], confirms: [true] });
-    const result = await wizard.finalize!({ cfg: baseCfg, accountId: "main", credentialValues: {}, runtime: {} as never, prompter: prompter as never, options, forceAllowFrom: false });
-    expect(control.calls.map((c) => c.op)).toEqual(["list_devices", "device_status", "token_mint", "daemon_info"]);
-    expect(control.calls.find((c) => c.op === "token_mint")?.params).toEqual({ device_id: NEW_DEVICE, label: "openclaw-main" });
+describe("setup wizard: the token door and the hardened host", () => {
+  const finalize = (wizard: ReturnType<typeof world>["wizard"], prompter: unknown, accountId = "main") =>
+    wizard.finalize!({ cfg: baseCfg, accountId, credentialValues: {}, runtime: {} as never, prompter: prompter as never, options, forceAllowFrom: false });
+
+  it("“I have a device token” enrolls from a pasted token via get_self: no enrollment connection, no list_devices, no mint, no QR", async () => {
+    const { wizard, control, released } = world();
+    const { prompter, log } = fakePrompter({ selects: ["token"], texts: ["adc1_pasted_secret"], confirms: [true] });
+    const result = await finalize(wizard, prompter);
+    expect(control.calls).toEqual([]);
     expect(log.some((l) => l.kind === "plain")).toBe(false);
-    const cfg = result!.cfg as unknown as { channels: { ademu: { accounts: Record<string, { deviceId: string }> } } };
-    expect(cfg.channels.ademu.accounts.main?.deviceId).toBe(NEW_DEVICE);
+    const text = log.find((l) => l.kind === "text");
+    expect(text?.message).toContain("device token");
+    const cfg = result!.cfg as unknown as { channels: { ademu: { accounts: Record<string, { deviceId: string; agentUserId: string; ownerUserId: string; token: string; agentName: string }> } }; commands: { ownerAllowFrom: string[] } };
+    expect(cfg.channels.ademu.accounts.main).toMatchObject({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_pasted_secret", agentName: "Iris" });
+    expect(cfg.commands.ownerAllowFrom).toContain(`ademu:${OWNER}`);
     expect(log.at(-1)?.message).toContain("Connected");
+    expect(released()).toBe(1);
+    // the token never appears in any prompt copy
+    expect(log.map((l) => l.message ?? "").join("\n")).not.toContain("adc1_pasted_secret");
+  });
+
+  it("the token door is asked BEFORE any daemon lease and asks the prompter for a sensitive text", async () => {
+    const order: string[] = [];
+    const { wizard } = world();
+    const { prompter } = fakePrompter({ selects: ["token"], texts: ["adc1_x"], confirms: [true] });
+    const spy = {
+      ...prompter,
+      select: async (p: { message: string }) => {
+        order.push("select");
+        return prompter.select(p);
+      },
+      text: async (p: { message: string; sensitive?: boolean }) => {
+        order.push(`text:${p.sensitive ? "sensitive" : "plain"}`);
+        return prompter.text(p);
+      },
+      progress: (label: string) => {
+        order.push("progress");
+        return prompter.progress(label);
+      },
+    };
+    await finalize(wizard, spy);
+    expect(order.slice(0, 3)).toEqual(["select", "text:sensitive", "progress"]);
+  });
+
+  it("a rejected token shows the token copy and throws WizardCancelledError; a device with a live mind asks for takeover", async () => {
+    const { InvalidTokenError } = await import("@ademu/adc-client");
+    const { wizard: wizardRejecting } = world({
+      connectSession: async () => {
+        throw new InvalidTokenError();
+      },
+    });
+    const { prompter, log, progress } = fakePrompter({ selects: ["token"], texts: ["adc1_bad"] });
+    await expect(finalize(wizardRejecting, prompter)).rejects.toBeInstanceOf(WizardCancelledError);
+    expect(log.find((l) => l.kind === "note")?.message).toContain("rejected that token");
+    expect(progress.every((p) => p.stopped)).toBe(true);
+  });
+
+  it("a hardened host (acquire refused with PrivilegeError) prints the three operator commands and the token door, and never throws the raw error", async () => {
+    const { PrivilegeError } = await import("@ademu/adc-control");
+    const { wizard } = world({ acquireError: new PrivilegeError("permission denied opening the enrollment socket at /run/adc/adc-enroll.sock", "permission_denied") });
+    const { prompter, log, progress } = fakePrompter({ selects: ["new"] });
+    await expect(finalize(wizard, prompter, "iris")).rejects.toBeInstanceOf(WizardCancelledError);
+    const note = log.find((l) => l.kind === "note")?.message ?? "";
+    expect(note).toContain("adc agent add");
+    expect(note).toContain("adc token mint <device_id> --label openclaw-iris");
+    expect(note).toContain("I have a device token");
+    expect(note).not.toContain("permission denied opening"); // the client's message is never shown
+    expect(progress.every((p) => p.stopped)).toBe(true);
+  });
+
+  it("a failure after the mint names the label to revoke (M20 c)", async () => {
+    const { wizard, control } = world();
+    const { prompter, log } = fakePrompter({ selects: ["new"], texts: ["Iris"], confirms: [true /* words */] });
+    // the owner-grant confirm is unscripted → throws after the mint
+    const failing = { ...prompter, confirm: async (p: { message: string }) => {
+      if (/owner/i.test(p.message)) throw new (await import("../src/ceremony.js")).EnrollmentError("aborted");
+      return prompter.confirm(p);
+    } };
+    const run = finalize(wizard, failing, "iris");
+    await new Promise((r) => setTimeout(r, 5));
+    control.emit({ words: WORDS });
+    await new Promise((r) => setTimeout(r, 5));
+    control.finish("enrolled");
+    await expect(run).rejects.toBeInstanceOf(WizardCancelledError);
+    const note = log.filter((l) => l.kind === "note").at(-1)?.message ?? "";
+    expect(note).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
+    expect(control.calls.filter((c) => c.op === "token_mint")).toHaveLength(1);
   });
 });
 

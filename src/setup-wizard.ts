@@ -1,19 +1,23 @@
 // Door one (plan T12): `openclaw channels add --channel ademu`. A declarative wizard whose whole
-// body is `finalize` — the token is PRODUCED by the ceremony, never typed (credentials: []). The
-// account is written under the wizard-resolved accountId; the R3 owner grant is a default-yes
-// confirm naming the one "no" case (Rider A). Every progress handle is stopped before any prompt
-// and in `finally`; a failure THROWS WizardCancelledError (a void return would be recorded as
-// success). The QR goes through `prompter.plain` only (K11) — never `note`, never `runtime.log`.
+// body is `finalize`. Two doors behind one question: enroll a NEW agent (the ceremony over the
+// daemon's ENROLLMENT socket — the token is PRODUCED, never typed) or "I have a device token" (an
+// already-enrolled agent whose token an operator minted at the CLI: pasted here, checked over the
+// SESSION socket with `get_self`; no enrollment connection is needed, so it works even where the
+// enrollment socket refuses this user). The account is written under the wizard-resolved accountId;
+// the R3 owner grant is a default-yes confirm naming the one "no" case (Rider A). Every progress
+// handle is stopped before any prompt and in `finally`; a failure THROWS WizardCancelledError (a void
+// return would be recorded as success). The QR goes through `prompter.plain` only (K11) — never
+// `note`, never `runtime.log`. Credentials: [] — the token field is sensitive and never a wizard input.
 import type { AdcClient, AdcClientOptions } from "@ademu/adc-client";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { resolveAgentConfig, tryResolveDefaultAgentId } from "openclaw/plugin-sdk/agent-scope-runtime";
 import type { ChannelSetupWizard } from "openclaw/plugin-sdk/channel-setup";
 import { WizardCancelledError, type WizardPrompter } from "openclaw/plugin-sdk/setup";
 import {
-  connectExisting,
   createEnrollmentLease,
-  listEnrolledDevices,
+  probeTokenIdentity,
   runEnrollment,
+  tokenLabelFor,
   type EnrollmentLease,
   type EnrollmentLeaseDeps,
   type EnrollmentResult,
@@ -21,6 +25,8 @@ import {
 import { CHANNEL_ID, inspectAdemuAccount, listAdemuAccountIds } from "./config.js";
 import { applyEnrollment } from "./enroll-config.js";
 import { strings } from "./i18n/strings.js";
+import type { Lease } from "./monitor/daemon.js";
+import { revokeLabelCommand, type OperatorContext } from "./operator.js";
 import { remedyFor } from "./remedies.js";
 import type { Qr } from "./qr.js";
 
@@ -65,125 +71,173 @@ export const ademuWizardStatus: ChannelSetupWizard["status"] = {
   resolveConfigured: ({ cfg, accountId }) => isAccountEnrolled(cfg, accountId),
 };
 
+type Finalize = NonNullable<ChannelSetupWizard["finalize"]>;
+type FinalizeArgs = Parameters<Finalize>[0];
+type FinalizeResult = Awaited<ReturnType<Finalize>>;
+
 export function createAdemuSetupWizard(deps: WizardDeps): ChannelSetupWizard {
   return {
     channel: CHANNEL_ID,
     status: ademuWizardStatus,
     credentials: [],
-    finalize: async ({ cfg, accountId, prompter, options }) => {
-      const beforeEffect = options?.beforePersistentEffect ?? (async () => {});
-      const deferToClient = options?.deferDeviceLinkToClient === true;
+    finalize: async (args) => {
+      const { cfg, accountId, prompter } = args;
       await prompter.intro(strings.enroll.wizardIntro);
-
       const account = inspectAdemuAccount(cfg, accountId);
-      let progress = prompter.progress(strings.enroll.startingHost);
-      let lease: EnrollmentLease | undefined;
-      try {
-        try {
-          lease = await createEnrollmentLease({
-            deps: deps.lease,
-            accountId,
-            identity: account.daemon,
-            server: account.server,
-            beforeEffect,
-          });
-        } catch (err) {
-          progress.stop();
-          const remedy = remedyFor(err);
-          if (!remedy) throw err;
-          await prompter.note(remedy, strings.channelLabel);
-          throw new WizardCancelledError(remedy);
-        }
-        progress.stop();
-
-        const enrolled = await listEnrolledDevices(lease.control);
-        const mode = enrolled.length
-          ? await prompter.select<"new" | "existing">({
-              message: strings.enroll.modeQuestion,
-              options: [
-                { value: "new", label: strings.enroll.modeNew },
-                { value: "existing", label: strings.enroll.modeExisting },
-              ],
-            })
-          : "new";
-
-        const common = {
-          control: lease.control,
-          connectSession: deps.connectSession,
-          accountId,
-          beforeEffect,
-          signal: lease.signal,
-          confirmReplace: async () => prompter.confirm({ message: strings.enroll.replaceTokenConfirm, initialValue: false }),
-          confirmTakeover: async () => prompter.confirm({ message: strings.enroll.takeoverConfirm, initialValue: false }),
-        };
-
-        let result: EnrollmentResult;
-        let agentName: string;
-        if (mode === "existing") {
-          const deviceId = await prompter.select<string>({
-            message: strings.enroll.pickDevice,
-            options: enrolled.map((d) => ({ value: d.deviceId, label: d.agentName, hint: d.deviceId })),
-          });
-          agentName = enrolled.find((d) => d.deviceId === deviceId)?.agentName ?? strings.enroll.agentNameFallback;
-          lease.deviceId = deviceId;
-          lease.terminal = true;
-          progress = prompter.progress(strings.enroll.mintingToken);
-          try {
-            result = await connectExisting({ ...common, deviceId });
-          } finally {
-            progress.stop();
-          }
-        } else {
-          agentName = (await prompter.text({ message: strings.enroll.agentNamePrompt, initialValue: defaultAgentName(cfg) })).trim() || defaultAgentName(cfg);
-          const activeLease = lease;
-          let waiting: ReturnType<WizardPrompter["progress"]> | undefined;
-          try {
-            result = await runEnrollment({
-              ...common,
-              agentName,
-              onDevice: (id) => {
-                activeLease.deviceId = id;
-              },
-              onQr: (payload) => presentQr(prompter, deps.qr, payload, deferToClient),
-              onWords: (words) => prompter.note(strings.enroll.words(words), strings.enroll.wordsTitle),
-              confirm: async () => {
-                const ok = await prompter.confirm({ message: strings.enroll.wordsConfirm, initialValue: true });
-                if (ok) waiting = prompter.progress(strings.enroll.waitingEnrollment);
-                return ok;
-              },
-            });
-            activeLease.terminal = true;
-          } finally {
-            waiting?.stop();
-          }
-        }
-
-        // R3 Rider A — default yes, the copy names the grant and the one "no" scenario.
-        const grant = await prompter.confirm({ message: strings.enroll.ownerGrantConfirm, initialValue: true });
-        await beforeEffect();
-        const nextCfg = applyEnrollment(cfg, {
-          accountId,
-          agentName,
-          deviceId: result.deviceId,
-          agentUserId: result.agentUserId,
-          ownerUserId: result.ownerUserId,
-          token: result.token,
-          grantOwnerAuthority: grant,
-        });
-        await prompter.outro(mode === "existing" ? strings.enroll.connected(agentName) : strings.enroll.enrolled(agentName));
-        return { cfg: nextCfg };
-      } catch (err) {
+      const operator: OperatorContext = { identity: account.daemon, label: tokenLabelFor(accountId) };
+      // The question comes BEFORE any daemon lease: the token door must not need the enrollment socket.
+      const mode = await prompter.select<"new" | "token">({
+        message: strings.enroll.modeQuestion,
+        options: [
+          { value: "new", label: strings.enroll.modeNew },
+          { value: "token", label: strings.enroll.modeToken },
+        ],
+      });
+      /** A known failure becomes fixed remedy copy + WizardCancelledError; anything else is rethrown. */
+      const fail = async (err: unknown, ctx: OperatorContext, trailer?: string): Promise<never> => {
         if (err instanceof WizardCancelledError) throw err;
-        const remedy = remedyFor(err);
-        if (remedy) {
-          await prompter.note(remedy, strings.channelLabel);
-          throw new WizardCancelledError(remedy);
-        }
-        throw err;
-      } finally {
-        progress.stop();
-        await lease?.dispose("wizard-exit");
-      }
+        const remedy = remedyFor(err, ctx);
+        if (!remedy) throw err;
+        const note = trailer ? `${remedy}\n\n${trailer}` : remedy;
+        await prompter.note(note, strings.channelLabel);
+        throw new WizardCancelledError(note);
+      };
+      return mode === "token" ? await tokenDoor(deps, args, account, operator, fail) : await newDoor(deps, args, account, operator, fail);
     },
   };
+}
+
+type Account = ReturnType<typeof inspectAdemuAccount>;
+type Fail = (err: unknown, ctx: OperatorContext, trailer?: string) => Promise<never>;
+
+/** "I have a device token": a setup lease for the session socket path, `get_self`, the grant, the write. */
+async function tokenDoor(deps: WizardDeps, args: FinalizeArgs, account: Account, operator: OperatorContext, fail: Fail): Promise<FinalizeResult> {
+  const { cfg, accountId, prompter, options } = args;
+  const beforeEffect = options?.beforePersistentEffect ?? (async () => {});
+  const token = (
+    await prompter.text({
+      message: strings.enroll.tokenPrompt,
+      sensitive: true,
+      validate: (value) => (value.trim() ? undefined : strings.enroll.tokenEmpty),
+    })
+  ).trim();
+  if (!token) throw new WizardCancelledError(strings.enroll.tokenEmpty);
+  let progress = prompter.progress(account.daemon.scope === "system" ? strings.enroll.attachingSystemDaemon : strings.enroll.startingHost);
+  let daemonLease: Lease | undefined;
+  try {
+    try {
+      daemonLease = await deps.lease.daemons.acquire({ identity: account.daemon, server: account.server, role: "setup", beforeEffect });
+    } catch (err) {
+      progress.stop();
+      await fail(err, operator);
+    }
+    progress.stop();
+    progress = prompter.progress(strings.enroll.checkingToken);
+    let identity: Awaited<ReturnType<typeof probeTokenIdentity>>;
+    try {
+      identity = await probeTokenIdentity({
+        token,
+        sessionSocketPath: daemonLease!.info.sessionSocketPath,
+        connectSession: deps.connectSession,
+        signal: new AbortController().signal,
+        confirmTakeover: async () => {
+          progress.stop();
+          return prompter.confirm({ message: strings.enroll.takeoverConfirm, initialValue: false });
+        },
+      });
+    } finally {
+      progress.stop();
+    }
+    const agentName =
+      identity.agentDisplayName.trim() || (await prompter.text({ message: strings.enroll.agentNamePrompt, initialValue: defaultAgentName(cfg) })).trim() || defaultAgentName(cfg);
+    // R3 Rider A — default yes, the copy names the grant and the one "no" scenario.
+    const grant = await prompter.confirm({ message: strings.enroll.ownerGrantConfirm, initialValue: true });
+    await beforeEffect();
+    const nextCfg = applyEnrollment(cfg, {
+      accountId,
+      agentName,
+      deviceId: identity.deviceId,
+      agentUserId: identity.agentUserId,
+      ownerUserId: identity.ownerUserId,
+      token,
+      grantOwnerAuthority: grant,
+    });
+    await prompter.outro(strings.enroll.connected(agentName));
+    return { cfg: nextCfg };
+  } catch (err) {
+    return await fail(err, operator);
+  } finally {
+    progress.stop();
+    await daemonLease?.release().catch(() => {});
+  }
+}
+
+/** Enroll a NEW agent: the ceremony over the enrollment socket (QR → words → confirm → mint). */
+async function newDoor(deps: WizardDeps, args: FinalizeArgs, account: Account, operator: OperatorContext, fail: Fail): Promise<FinalizeResult> {
+  const { cfg, accountId, prompter, options } = args;
+  const beforeEffect = options?.beforePersistentEffect ?? (async () => {});
+  const deferToClient = options?.deferDeviceLinkToClient === true;
+  let progress = prompter.progress(account.daemon.scope === "system" ? strings.enroll.attachingSystemDaemon : strings.enroll.startingHost);
+  let lease: EnrollmentLease | undefined;
+  /** Set once a token exists: a failure after this point names the label to revoke (M20 c). */
+  let minted: EnrollmentResult | undefined;
+  try {
+    try {
+      lease = await createEnrollmentLease({ deps: deps.lease, accountId, identity: account.daemon, server: account.server, beforeEffect });
+    } catch (err) {
+      progress.stop();
+      await fail(err, operator);
+    }
+    progress.stop();
+    const activeLease = lease!;
+    const agentName = (await prompter.text({ message: strings.enroll.agentNamePrompt, initialValue: defaultAgentName(cfg) })).trim() || defaultAgentName(cfg);
+    let waiting: ReturnType<WizardPrompter["progress"]> | undefined;
+    let result: EnrollmentResult;
+    try {
+      result = await runEnrollment({
+        control: activeLease.control,
+        connectSession: deps.connectSession,
+        accountId,
+        beforeEffect,
+        signal: activeLease.signal,
+        confirmTakeover: async () => prompter.confirm({ message: strings.enroll.takeoverConfirm, initialValue: false }),
+        agentName,
+        onDevice: (id) => {
+          activeLease.deviceId = id;
+        },
+        onQr: (payload) => presentQr(prompter, deps.qr, payload, deferToClient),
+        onWords: (words) => prompter.note(strings.enroll.words(words), strings.enroll.wordsTitle),
+        confirm: async () => {
+          const ok = await prompter.confirm({ message: strings.enroll.wordsConfirm, initialValue: true });
+          if (ok) waiting = prompter.progress(strings.enroll.waitingEnrollment);
+          return ok;
+        },
+      });
+      activeLease.terminal = true;
+      minted = result;
+    } finally {
+      waiting?.stop();
+    }
+    // R3 Rider A — default yes, the copy names the grant and the one "no" scenario.
+    const grant = await prompter.confirm({ message: strings.enroll.ownerGrantConfirm, initialValue: true });
+    await beforeEffect();
+    const nextCfg = applyEnrollment(cfg, {
+      accountId,
+      agentName,
+      deviceId: result.deviceId,
+      agentUserId: result.agentUserId,
+      ownerUserId: result.ownerUserId,
+      token: result.token,
+      grantOwnerAuthority: grant,
+    });
+    await prompter.outro(strings.enroll.enrolled(agentName));
+    return { cfg: nextCfg };
+  } catch (err) {
+    const ctx: OperatorContext = { ...operator, deviceId: lease?.deviceId ?? minted?.deviceId, label: minted?.tokenLabel ?? operator.label };
+    const trailer = minted ? strings.enroll.orphanedToken(revokeLabelCommand({ ...ctx, deviceId: minted.deviceId, label: minted.tokenLabel })) : undefined;
+    return await fail(err, ctx, trailer);
+  } finally {
+    progress.stop();
+    await lease?.dispose("wizard-exit");
+  }
 }
