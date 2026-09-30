@@ -14,16 +14,26 @@ export type OperatorContext = {
   agentName?: string | undefined;
 };
 
-/** `sudo adc --system` on a system install; `ADC_DATA_DIR=<dir> adc` for a user-scope daemon; bare `adc` when unknown. */
+/** POSIX single-quoting: the one safe way to hand a path or a name to a copied shell line. */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * `sudo adc --system` on a system install; for a user-scope daemon `ADC_DATA_DIR` AND `ADC_SOCKET_PATH`
+ * (the CLI's own ladder prefers `$XDG_RUNTIME_DIR` over the data dir on Linux, and a configured control
+ * socket may live anywhere — the ceremony verbs the operator runs are control-socket ops); bare `adc`
+ * when the identity is unknown.
+ */
 export function adcCommandPrefix(identity: DaemonIdentity | undefined): string {
   if (!identity) return "adc";
   if (identity.scope === "system") return "sudo adc --system";
-  return `ADC_DATA_DIR=${identity.raw.dataDir} adc`;
+  return `ADC_DATA_DIR=${shellQuote(identity.raw.dataDir)} ADC_SOCKET_PATH=${shellQuote(identity.raw.controlSocket)} adc`;
 }
 
 /** The three operator steps: enroll at the CLI, mint the token, paste it into the wizard's token door. */
 export function operatorCeremony(ctx: OperatorContext): string {
-  return strings.enroll.operatorSteps(adcCommandPrefix(ctx.identity), ctx.agentName ?? strings.enroll.agentNameFallback, ctx.label ?? "openclaw-<accountId>");
+  return strings.enroll.operatorSteps(adcCommandPrefix(ctx.identity), shellQuote(ctx.agentName ?? strings.enroll.agentNameFallback), ctx.label ?? "openclaw-<accountId>");
 }
 
 /** M20 (b): a lost mint reply — mint a fresh label at the CLI and paste it. */

@@ -353,6 +353,7 @@ export function validateDaemonIdentities(
   const byDir = new Map<string, Set<string>>();
   const byDirEnroll = new Map<string, Set<string>>();
   const bySocket = new Map<string, Set<string>>();
+  const byEnrollSocket = new Map<string, Set<string>>();
   const identities = new Map<string, DaemonIdentity>();
   const add = (map: Map<string, Set<string>>, key: string, value: string) =>
     (map.get(key) ?? map.set(key, new Set()).get(key)!).add(value);
@@ -362,12 +363,22 @@ export function validateDaemonIdentities(
     add(byDir, account.daemon.dataDir, account.daemon.controlSocket);
     add(byDirEnroll, account.daemon.dataDir, account.daemon.enrollSocket);
     add(bySocket, account.daemon.controlSocket, account.daemon.dataDir);
+    add(byEnrollSocket, account.daemon.enrollSocket, account.daemon.dataDir);
   }
   for (const [id, identity] of identities) {
     const sockets = byDir.get(identity.dataDir)!;
     const enrollSockets = byDirEnroll.get(identity.dataDir)!;
     const dirs = bySocket.get(identity.controlSocket)!;
-    if (sockets.size > 1) {
+    const enrollDirs = byEnrollSocket.get(identity.enrollSocket)!;
+    // The three sockets play three roles: the enrollment socket the plugin dials must never be the
+    // control socket (the plugin would drive the ceremony with ambient operator authority) or the
+    // session socket.
+    if (identity.enrollSocket === identity.controlSocket || identity.enrollSocket === identity.sessionSocket) {
+      errors.set(
+        id,
+        `daemon identity error: the enrollment socket ${identity.enrollSocket} must differ from the control and session sockets (channels.ademu.enrollSocketPath names adc-enroll.sock, never adc.sock)`,
+      );
+    } else if (sockets.size > 1) {
       errors.set(
         id,
         `daemon identity collision: data dir ${identity.dataDir} is named with ${sockets.size} different control sockets across accounts`,
@@ -381,6 +392,11 @@ export function validateDaemonIdentities(
       errors.set(
         id,
         `daemon identity collision: control socket ${identity.controlSocket} is shared by ${dirs.size} different data dirs across accounts`,
+      );
+    } else if (enrollDirs.size > 1) {
+      errors.set(
+        id,
+        `daemon identity collision: enrollment socket ${identity.enrollSocket} is shared by ${enrollDirs.size} different data dirs across accounts`,
       );
     }
   }

@@ -17,7 +17,7 @@ export function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?:
   const daemonLease: Lease = {
     mode: "owned",
     role: "setup",
-    identity: { dataDir: "/d", raw: { dataDir: "/d", enrollSocket: "/d/adc-enroll.sock" }, scope: "user" } as never,
+    identity: { dataDir: "/d", raw: { dataDir: "/d", controlSocket: "/d/adc.sock", sessionSocket: "/d/adc-session.sock", enrollSocket: "/d/adc-enroll.sock" }, scope: "user" } as never,
     holderId: "h",
     info: { enrollSocketPath: "/d/adc-enroll.sock", sessionSocketPath: "/d/adc-session.sock" },
     lost: new Promise<never>(() => {}),

@@ -177,6 +177,26 @@ describe("daemon identity canonicalization and collisions (R1)", () => {
     expect(a.controlSocket).toBe(b.controlSocket);
   });
 
+  it("Codex #2: the enrollment socket may never be the control (or session) socket — a configError, before anything is dialled", () => {
+    const c = cfg({ accounts: { a: { deviceId: "d", token: "t", dataDir: join(tmp, "dr"), enrollSocketPath: join(tmp, "dr", "adc.sock") } } });
+    expect(validateDaemonIdentities(c, ENV).get("a")).toMatch(/must differ from the control and session sockets/);
+    expect(inspectAdemuAccount(c, "a", ENV).configError).toMatch(/enrollment socket/);
+    const c2 = cfg({ accounts: { a: { deviceId: "d", token: "t", dataDir: join(tmp, "dr"), enrollSocketPath: join(tmp, "dr", "adc-session.sock") } } });
+    expect(validateDaemonIdentities(c2, ENV).get("a")).toMatch(/must differ/);
+  });
+
+  it("one enrollment socket shared by two data dirs collides", () => {
+    const c = cfg({
+      accounts: {
+        a: { deviceId: "d", token: "t", dataDir: join(tmp, "e1"), enrollSocketPath: join(tmp, "shared-enroll.sock") },
+        b: { deviceId: "d", token: "t", dataDir: join(tmp, "e2"), enrollSocketPath: join(tmp, "shared-enroll.sock") },
+      },
+    });
+    const errors = validateDaemonIdentities(c, ENV);
+    expect(errors.size).toBe(2);
+    expect(errors.get("a")).toMatch(/enrollment socket .* shared by 2/);
+  });
+
   it("two accounts naming different enrollment sockets for one data dir collide", () => {
     const c = cfg({
       accounts: {

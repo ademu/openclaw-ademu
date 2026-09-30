@@ -407,6 +407,10 @@ describe("enrollment page: the ceremony (scan → words → Yes → enrolled)", 
     expect(await (await confirmP).json()).toMatchObject({ ok: false, state: "mint_lost" });
     expect(w.control.calls.filter((c) => c.op === "token_mint")).toHaveLength(1);
     expect(w.writes).toHaveLength(0);
+    // Codex #4: the page's failed screen carries the human's instruction, not a generic line
+    const state = (await (await fetch(page(token, "/state"))).json()) as { phase: string; message?: string };
+    expect(state.phase).toBe("failed");
+    expect(state.message).toContain(`token mint ${NEW_DEVICE} --label openclaw-iris-2`);
   });
 });
 

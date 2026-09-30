@@ -114,8 +114,12 @@ ADC_DATA_DIR=~/.openclaw/ademu/adc adc token mint <device_id> --label openclaw-<
 # on a hardened host (system-wide adc): sudo adc --system token mint <device_id> --label openclaw-<accountId>
 ```
 
-The token door needs no enrollment ceremony and no enrollment socket: it is also the recovery path
-when an operator enrolled the agent for you, or when the plugin could not finish a mint itself.
+The token door needs no enrollment ceremony and no enrollment socket (a refusal there is ignored; the
+session socket is the token's door): it is also the recovery path when an operator enrolled the agent
+for you, or when the plugin could not finish a mint itself. One residual: the wizard hands the account
+back to OpenClaw, which saves the configuration after the wizard has finished — if *that* save fails,
+the token is still minted under the label `openclaw-<accountId>`; revoke it at the CLI
+(`… token revoke <device_id> --label openclaw-<accountId>`) and run the wizard again.
 
 ### Hardened hosts (a system-wide `adc`)
 
@@ -150,9 +154,11 @@ the mint leaves that token orphaned — revoke it by label (`adc [--system] toke
 --label <label>`).
 
 A device host from before the enrollment socket (adc < 0.5.0) that the plugin itself started is
-replaced by the bundled one at the next gateway start (through the same ownership fence). If its
-recorded version is unknown the plugin leaves it alone and reports `recovering`: stop it by hand
-(`ADC_DATA_DIR=<dataDir> adc daemon stop`, or `kill <pid>`).
+replaced by the bundled one at the next gateway start (through the same ownership fence — also when a
+wizard run had already marked it `stale`). If its recorded version is unknown the plugin leaves it
+alone and reports `recovering`: stop it by hand (`ADC_DATA_DIR=<dataDir> adc daemon stop`, or
+`kill <pid>`). The bundled daemon itself must be adc 0.5.0 or newer; an older bundle is refused
+(`blocked`) rather than started.
 
 ## Living with it
 

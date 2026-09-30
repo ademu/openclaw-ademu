@@ -53,7 +53,7 @@ function fakePrompter(script: Script) {
   return { prompter, log, progress };
 }
 
-function world(opts: { acquireError?: unknown; connectSession?: () => Promise<never> } = {}) {
+function world(opts: { acquireError?: unknown; connectSession?: (o: unknown) => Promise<never> } = {}) {
   const control = new FakeControl();
   let released = 0;
   const daemonLease: Lease = {
@@ -261,23 +261,51 @@ describe("setup wizard: the token door and the hardened host", () => {
     expect(progress.every((p) => p.stopped)).toBe(true);
   });
 
-  it("a failure after the mint names the label to revoke (M20 c)", async () => {
-    const { wizard, control } = world();
-    const { prompter, log } = fakePrompter({ selects: ["new"], texts: ["Iris"], confirms: [true /* words */] });
-    // the owner-grant confirm is unscripted → throws after the mint
-    const failing = { ...prompter, confirm: async (p: { message: string }) => {
-      if (/owner/i.test(p.message)) throw new (await import("../src/ceremony.js")).EnrollmentError("aborted");
-      return prompter.confirm(p);
-    } };
-    const run = finalize(wizard, failing, "iris");
-    await new Promise((r) => setTimeout(r, 5));
-    control.emit({ words: WORDS });
-    await new Promise((r) => setTimeout(r, 5));
-    control.finish("enrolled");
-    await expect(run).rejects.toBeInstanceOf(WizardCancelledError);
-    const note = log.filter((l) => l.kind === "note").at(-1)?.message ?? "";
-    expect(note).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
-    expect(control.calls.filter((c) => c.op === "token_mint")).toHaveLength(1);
+  it("a failure after the mint names the label to revoke (M20 c) — for a known failure AND for an unknown host error", async () => {
+    const { EnrollmentError } = await import("../src/ceremony.js");
+    for (const thrown of [new EnrollmentError("aborted"), new Error("EIO: disk full")]) {
+      const { wizard, control } = world();
+      const { prompter, log } = fakePrompter({ selects: ["new"], texts: ["Iris"], confirms: [true /* words */] });
+      // the owner-grant confirm throws after the mint (a stand-in for anything failing past the mint)
+      const failing = {
+        ...prompter,
+        confirm: async (p: { message: string }) => {
+          if (/owner/i.test(p.message)) throw thrown;
+          return prompter.confirm(p);
+        },
+      };
+      const run = finalize(wizard, failing, "iris");
+      await new Promise((r) => setTimeout(r, 5));
+      control.emit({ words: WORDS });
+      await new Promise((r) => setTimeout(r, 5));
+      control.finish("enrolled");
+      if (thrown instanceof EnrollmentError) await expect(run).rejects.toBeInstanceOf(WizardCancelledError);
+      else await expect(run).rejects.toThrow(/disk full[\s\S]*token revoke/);
+      const note = log.filter((l) => l.kind === "note").at(-1)?.message ?? "";
+      expect(note).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
+      expect(control.calls.filter((c) => c.op === "token_mint")).toHaveLength(1);
+    }
+  });
+
+  it("Codex #5: the token door works when the enrollment socket refuses this user — no lease, the identity's own session socket, the account written", async () => {
+    const { PrivilegeError } = await import("@ademu/adc-control");
+    const connects: Array<{ socketPath?: string }> = [];
+    const client = new FakeAdcClient({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER });
+    const { wizard, released } = world({
+      acquireError: new PrivilegeError("permission denied opening the enrollment socket", "permission_denied"),
+      connectSession: async (o) => {
+        connects.push(o as { socketPath?: string });
+        return client as never;
+      },
+    });
+    const { prompter, log } = fakePrompter({ selects: ["token"], texts: ["adc1_ok"], confirms: [true] });
+    const result = await finalize(wizard, prompter, "main");
+    expect(connects).toHaveLength(1);
+    expect(connects[0]!.socketPath?.endsWith("/adc-session.sock")).toBe(true);
+    expect(released()).toBe(0);
+    const cfg = result!.cfg as unknown as { channels: { ademu: { accounts: Record<string, { deviceId: string; token: string }> } } };
+    expect(cfg.channels.ademu.accounts.main).toMatchObject({ deviceId: NEW_DEVICE, token: "adc1_ok" });
+    expect(log.some((l) => l.kind === "note" && /operator/i.test(l.message ?? ""))).toBe(false);
   });
 });
 

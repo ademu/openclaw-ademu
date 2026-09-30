@@ -277,8 +277,11 @@ B is valid in both tiers. Two asks: a terminal disposition on `ChannelTurnResult
 the deepest existing ancestor + verbatim tail, because Ademú joins paths verbatim), plus — since ADC
 Phase 3b Phase B (2026-09-30, openclaw-ademu#12) — its **enrollment socket** (`<dataDir>/adc-enroll.sock`
 or `enrollSocketPath`) and a **scope**. Cross-axis collisions across accounts (one data dir with two
-control sockets or two enrollment sockets, one socket for two data dirs) are a config validation
-error that blocks `startAccount`. The **session** socket is what `daemon_info` reports whenever a
+control sockets or two enrollment sockets, one control or enrollment socket for two data dirs) and a
+socket-role error (the enrollment socket naming the control or session socket — the plugin would drive
+the ceremony with ambient operator authority) are config validation errors that block `startAccount`
+and the doors. The bundled daemon must be at least `MIN_BUNDLED_ADC_VERSION` (0.5.0, the first with an
+enrollment socket): an older bundle is refused before any spawn. The **session** socket is what `daemon_info` reports whenever a
 daemon is reachable — never re-derived then (a squatter on a derived path would receive the bearer
 token); only an *unreachable* foreign acquisition keeps the deterministic configured path, and its
 session connect then fails until the daemon answers.
@@ -423,9 +426,16 @@ daemon relays each tick as one frame (adc 0.3.0, AdemuMLS#621); no heartbeat typ
   failure dispositions the plugin owes (spec M20): `daemon_info` is read before the mint (the mint
   closes the connection); a lost mint reply or a taken label ends as `mint_lost` with the
   mint-a-fresh-label instruction, never a `replace` retry; a config write that fails after the mint
-  names the label to revoke; a hardened host with no ceremony possible (refused socket, full quota)
-  prints the operator ceremony. All copy is composed from the daemon identity in `src/operator.ts`,
-  never from the client's message.
+  names the label to revoke (the chat door returns `commit_failed`, and the page's failed screen shows
+  the same instruction; a wizard failure past the mint shows it whatever the error; the host's own
+  save of the returned config happens after `finalize` and is outside the plugin — a documented
+  residual); a hardened host with no ceremony possible (refused socket, full quota, an absent or silent
+  enrollment socket) prints the operator ceremony. The token door ignores an enrollment-socket refusal
+  at acquisition and probes the identity's own session socket without a lease. All copy is composed
+  from the daemon identity in `src/operator.ts` — `sudo adc --system` or `ADC_DATA_DIR` +
+  `ADC_SOCKET_PATH`, paths and names single-quoted — never from the client's message. On a detected
+  system install the broker keeps a refused enrollment socket from blocking a running account (the
+  session socket is its door; the refusal is logged); at user scope it is `blocked`.
 - Windows: guarded before any socket resolver (`process.geteuid` is absent there) → `blocked`.
 
 ## 8. Privacy

@@ -28,6 +28,8 @@ export const strings = {
     unsupportedPlatform: (platform: string) => `Ademú is not available on ${platform} yet.`,
     daemonUnreachable: (logPath: string | undefined) =>
       `The Ademú device host is not reachable. Check channels.ademu.server${logPath ? ` and the daemon log at ${logPath}` : ""}.`,
+    bundledDaemonTooOld: (bundled: string, min: string) =>
+      `The bundled Ademú device host (adc ${bundled}) predates the enrollment socket (adc ${min}); update the plugin, or point channels.ademu at a current adc daemon.`,
     privilegeDenied:
       "This host's Ademú device host refused this user: permission denied on its enrollment socket, or a system-wide device host is installed and the plugin was pointed at a data dir it may not run one in. Ask the operator to grant access, or point channels.ademu at a device host this user may use.",
     daemonLost: "The Ademú device host exited; restarting.",
@@ -86,7 +88,7 @@ export const strings = {
       [
         "An operator (root, or a member of the adc group) can enroll the agent and hand over its token:",
         "",
-        `  1. ${prefix} agent add "${agentName}"`,
+        `  1. ${prefix} agent add ${agentName}`,
         "     then scan the QR with the Ademú app and confirm the four safety words on the phone",
         `  2. ${prefix} token mint <device_id> --label ${label}`,
         "  3. openclaw channels add --channel ademu → “I have a device token” → paste the token",
@@ -98,6 +100,9 @@ export const strings = {
     mintLost: (command: string) =>
       `Enrollment reached the end, but the device token could not be issued (its reply was lost, or the label is already taken) and that cannot be retried from here. Nothing was written. Mint a fresh token at the CLI:\n\n  ${command}\n\nthen run \`openclaw channels add --channel ademu\` and choose “I have a device token”.`,
     orphanedToken: (command: string) => `A device token was issued but the configuration could not be written, so that token is orphaned. Revoke it:\n\n  ${command}`,
+    enrollSocketUnreachable: (steps: string) =>
+      `The Ademú device host did not answer on its enrollment socket. If it is starting, try again in a moment; if it is not running, start it (or check channels.ademu.dataDir / enrollSocketPath). Nothing was created.\n\n${steps}`,
+    toolCommitFailed: "The enrollment finished on the device host, but OpenClaw could not write the configuration; nothing was saved.",
     authorityExpired: "Ademú enrollment authority is no longer active.",
     toolDescription:
       "Enroll this agent on Ademú (end-to-end encrypted messaging). Use when the user wants to talk to you on Ademú or asks to enroll or connect the agent to the Ademú app. Actions: start (the plugin opens the enrollment page in a browser on the gateway machine; it shows a QR code and, later, the four safety words with Yes/No), status (where the enrollment stands; re-opens the page if no browser showed it). While an enrollment is in progress, start creates nothing and reports where it stands: only the user can end it, on the page. You are never given the page's address, the QR or the words, and you can neither confirm nor cancel an enrollment: only the user does, on the page.",

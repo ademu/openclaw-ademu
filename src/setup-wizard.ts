@@ -12,6 +12,7 @@ import type { AdcClient, AdcClientOptions } from "@ademu/adc-client";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { resolveAgentConfig, tryResolveDefaultAgentId } from "openclaw/plugin-sdk/agent-scope-runtime";
 import type { ChannelSetupWizard } from "openclaw/plugin-sdk/channel-setup";
+import { PrivilegeError } from "@ademu/adc-control";
 import { WizardCancelledError, type WizardPrompter } from "openclaw/plugin-sdk/setup";
 import {
   createEnrollmentLease,
@@ -93,11 +94,23 @@ export function createAdemuSetupWizard(deps: WizardDeps): ChannelSetupWizard {
           { value: "token", label: strings.enroll.modeToken },
         ],
       });
-      /** A known failure becomes fixed remedy copy + WizardCancelledError; anything else is rethrown. */
+      /**
+       * A known failure becomes fixed remedy copy + WizardCancelledError; anything else is rethrown.
+       * The trailer (the revoke-by-label instruction after a mint) is shown whatever the error is.
+       */
       const fail = async (err: unknown, ctx: OperatorContext, trailer?: string): Promise<never> => {
-        if (err instanceof WizardCancelledError) throw err;
+        if (err instanceof WizardCancelledError) {
+          if (trailer) await prompter.note(trailer, strings.channelLabel);
+          throw err;
+        }
         const remedy = remedyFor(err, ctx);
-        if (!remedy) throw err;
+        if (!remedy) {
+          if (trailer) {
+            await prompter.note(trailer, strings.channelLabel);
+            if (err instanceof Error) err.message = `${err.message}\n\n${trailer}`;
+          }
+          throw err;
+        }
         const note = trailer ? `${remedy}\n\n${trailer}` : remedy;
         await prompter.note(note, strings.channelLabel);
         throw new WizardCancelledError(note);
@@ -110,7 +123,13 @@ export function createAdemuSetupWizard(deps: WizardDeps): ChannelSetupWizard {
 type Account = ReturnType<typeof inspectAdemuAccount>;
 type Fail = (err: unknown, ctx: OperatorContext, trailer?: string) => Promise<never>;
 
-/** "I have a device token": a setup lease for the session socket path, `get_self`, the grant, the write. */
+/**
+ * "I have a device token": a setup lease for the session socket path (it also starts a user-scope
+ * device host that is not running), `get_self`, the grant, the write. The door never needs the
+ * enrollment socket: a broker refusal there (a group-gated posture, or an explicitly configured
+ * hardened layout) is not fatal — the session socket is the token's door, so the probe falls back to
+ * the identity's own session socket path and proceeds without a lease.
+ */
 async function tokenDoor(deps: WizardDeps, args: FinalizeArgs, account: Account, operator: OperatorContext, fail: Fail): Promise<FinalizeResult> {
   const { cfg, accountId, prompter, options } = args;
   const beforeEffect = options?.beforePersistentEffect ?? (async () => {});
@@ -124,12 +143,15 @@ async function tokenDoor(deps: WizardDeps, args: FinalizeArgs, account: Account,
   if (!token) throw new WizardCancelledError(strings.enroll.tokenEmpty);
   let progress = prompter.progress(account.daemon.scope === "system" ? strings.enroll.attachingSystemDaemon : strings.enroll.startingHost);
   let daemonLease: Lease | undefined;
+  let sessionSocketPath = account.daemon.raw.sessionSocket;
   try {
     try {
       daemonLease = await deps.lease.daemons.acquire({ identity: account.daemon, server: account.server, role: "setup", beforeEffect });
+      sessionSocketPath = daemonLease.info.sessionSocketPath;
     } catch (err) {
       progress.stop();
-      await fail(err, operator);
+      // The enrollment socket refused this user: irrelevant to a token — keep the configured session path.
+      if (!(err instanceof PrivilegeError)) await fail(err, operator);
     }
     progress.stop();
     progress = prompter.progress(strings.enroll.checkingToken);
@@ -137,7 +159,7 @@ async function tokenDoor(deps: WizardDeps, args: FinalizeArgs, account: Account,
     try {
       identity = await probeTokenIdentity({
         token,
-        sessionSocketPath: daemonLease!.info.sessionSocketPath,
+        sessionSocketPath,
         connectSession: deps.connectSession,
         signal: new AbortController().signal,
         confirmTakeover: async () => {

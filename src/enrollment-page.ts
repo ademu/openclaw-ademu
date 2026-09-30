@@ -185,6 +185,7 @@ export async function pageStateFor(active: ActiveEnrollment, qr: Qr): Promise<Pa
       return { phase: "enrolled" };
     case "failed":
       if (active.failure === "words_mismatch") return { phase: "failed", message: strings.enroll.wordsMismatch };
+      if (active.failureMessage) return { phase: "failed", message: active.failureMessage };
       return { phase: "failed", message: strings.enroll.pageFailedReason(active.terminalState ?? active.failure ?? "ended") };
     case "cancelled":
       return { phase: "cancelled" };

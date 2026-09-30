@@ -187,9 +187,13 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     const yesP = yes(w);
     await tick(5);
     w.control.finish("enrolled");
-    await expect(yesP).rejects.toThrow(/token revoke .* --label openclaw-iris/);
+    const done = await yesP;
+    expect(done).toMatchObject({ ok: false, state: "commit_failed" });
+    expect(done.message).toContain("could not write the configuration");
+    expect(done.message).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
     expect(w.control.calls.filter((c) => c.op === "token_mint")).toHaveLength(1);
     expect(w.released()).toBe(1);
+    expect(w.registry.size).toBe(0);
   });
 
   it("M20 d: a hardened host (PrivilegeError at acquisition) answers with the operator ceremony for THIS host, ok:false, never throws", async () => {
@@ -198,7 +202,7 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     const r = await w.call({ action: "start", agentName: "Iris" });
     expect(r.details).toMatchObject({ ok: false, state: "unavailable" });
     const msg = r.content[0]!.text;
-    expect(msg).toContain('agent add "Iris"');
+    expect(msg).toContain("agent add 'Iris'");
     expect(msg).toContain("token mint <device_id> --label openclaw-iris");
     expect(msg).toContain("I have a device token");
     expect(msg).not.toContain("permission denied opening");
@@ -456,7 +460,7 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.control.calls.some((c) => c.op === "cancel_pairing")).toBe(true);
   });
 
-  it("#14 a non-retryable failure during the yes (mint error) disposes the lease; a retryable one (device attached) keeps it", async () => {
+  it("#14 a failure during the yes (mint error) disposes the lease; a device attached after the mint is terminal too (the mint closed the ceremony) and names the label", async () => {
     const w = world();
     w.control.tokenMintImpl = async () => {
       throw new Error("mint exploded");
@@ -471,6 +475,23 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.registry.size).toBe(0);
     expect(w.released()).toBe(1);
     expect((await w.call({ action: "status" })).details.state).toBe("failed");
+
+    const { AlreadyAttachedError } = await import("@ademu/adc-client");
+    const a = world();
+    a.deps.connectSession = async () => {
+      throw new AlreadyAttachedError();
+    };
+    await a.call({ action: "start", agentName: "Iris" });
+    a.control.emit({ words: WORDS });
+    await tick();
+    const yesA = yes(a);
+    await tick(5);
+    a.control.finish("enrolled");
+    const r = await yesA;
+    expect(r).toMatchObject({ ok: false, state: "device_attached" });
+    expect(r.message).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
+    expect(a.registry.size).toBe(0);
+    expect(a.released()).toBe(1);
   });
 
   it("#15 a known acquisition failure returns fixed remedy text (ok:false), never throws, never installs", async () => {

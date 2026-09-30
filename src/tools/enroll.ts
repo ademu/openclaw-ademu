@@ -68,6 +68,8 @@ export type ActiveEnrollment = {
   terminal: Promise<PairingSnapshot>;
   terminalState: string | undefined;
   failure: string | undefined;
+  /** The human-facing outcome of a failed yes (a remedy, a revoke instruction) for the page's failed screen. */
+  failureMessage?: string | undefined;
 };
 
 export type EnrollToolDeps = {
@@ -682,6 +684,7 @@ async function confirmEnrollment(p: { active: ActiveEnrollment; deps: EnrollTool
     const fail = async (reason: string, msg: string, details: Record<string, unknown>) => {
       active.state = "failed";
       active.failure = reason;
+      active.failureMessage = msg;
       p.registry.forget(active);
       await active.lease.dispose(reason);
       return text(msg, { ok: false, ...details });
@@ -698,10 +701,17 @@ async function confirmEnrollment(p: { active: ActiveEnrollment; deps: EnrollTool
     }
     if (err instanceof EnrollmentError) {
       if (err.reason === "words_mismatch") return fail("words_mismatch", strings.enroll.wordsMismatch, { state: "words_mismatch" });
-      if (err.reason === "device_attached") return text(orphaned(strings.enroll.deviceAttachedRefused), { ok: false, state: "device_attached" });
+      // Post-mint only (the probe follows the mint), and the mint closed the enrollment connection: there
+      // is no retry — the ceremony ends, the minted token is named for revocation.
+      if (err.reason === "device_attached") return fail("device_attached", orphaned(strings.enroll.deviceAttachedRefused), { state: "device_attached", deviceId: active.deviceId });
       if (err.reason === "mint_lost" || err.reason === "label_exists") {
         return fail("mint_lost", remedyFor(err, operator)!, { state: "mint_lost", deviceId: active.deviceId });
       }
+    }
+    // A host write error after the mint (disk full, permissions): the outcome must reach the human
+    // through the page and the model through the result, never only a thrown exception (M20 c).
+    if (minted) {
+      return fail("commit-failed", orphaned(strings.enroll.toolCommitFailed), { state: "commit_failed", deviceId: active.deviceId });
     }
     // Anything else is terminal for this enrollment: release the daemon/enrollment resources now,
     // not at TTL.
@@ -710,18 +720,9 @@ async function confirmEnrollment(p: { active: ActiveEnrollment; deps: EnrollTool
     p.registry.forget(active);
     await active.lease.dispose("confirm-failed");
     const remedy = remedyFor(err, operator);
-    if (remedy) return text(orphaned(strings.enroll.toolUnavailable(remedy)), { ok: false, state: "failed" });
-    throw orphanedError(err, orphaned);
+    if (remedy) return text(strings.enroll.toolUnavailable(remedy), { ok: false, state: "failed" });
+    throw err;
   }
-}
-
-/** A rethrown unknown error after a mint still carries the revoke instruction for the host's log. */
-function orphanedError(err: unknown, orphaned: (msg: string) => string): unknown {
-  if (!(err instanceof Error)) return err;
-  const note = orphaned("");
-  if (!note) return err;
-  err.message = `${err.message}${note}`;
-  return err;
 }
 
 export function registerEnrollTool(api: OpenClawPluginApi, deps: EnrollToolDeps, registry = sharedEnrollmentRegistry()): EnrollmentRegistry {

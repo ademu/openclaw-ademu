@@ -44,6 +44,18 @@ export const HEARTBEAT_MS = 30_000;
 export const PENDING_PUBLICATION_SWEEP_MS = 3_600_000;
 /** Bound on ensureDaemon's pre-spawn bare probe (its `connectFn` seam; the package sets none). */
 export const PROBE_CONNECT_MS = 1_000;
+/** The first adc that binds the enrollment socket; an older bundled daemon can never become ready here. */
+export const MIN_BUNDLED_ADC_VERSION = "0.5.0";
+
+/** `a >= b` on parsed `x.y.z` versions; an unparsable side is "not at least" (fail closed). */
+export function versionAtLeast(a: string | undefined, b: string): boolean {
+  const pa = parseAdcVersion(a);
+  const pb = parseAdcVersion(b);
+  if (!pa || !pb) return false;
+  const [a1, a2, a3] = pa.split(".").map(Number) as [number, number, number];
+  const [b1, b2, b3] = pb.split(".").map(Number) as [number, number, number];
+  return a1 !== b1 ? a1 > b1 : a2 !== b2 ? a2 > b2 : a3 >= b3;
+}
 
 export type Role = "runtime" | "setup";
 /** Whether a `starting` generation came from a never-bound fresh claim or from existing ownership. */
@@ -505,8 +517,10 @@ export class DaemonManager {
    * A system-scope daemon on this host (identity.scope === "system"): attach-only. The probe's
    * outcome only decides the session socket path (a reachable daemon's own report, else the fixed
    * system layout); a refusal on the enrollment socket (an operator's group-gated posture) still
-   * yields the lease — the runtime half needs only the 0666 session socket, and the ceremony half
-   * meets the same PrivilegeError itself and prints the operator copy. No row, no claim, no spawn.
+   * yields the lease — the runtime half needs only the 0666 session socket (a working runtime must
+   * not turn `blocked` because enrollment is gated), and the ceremony half meets the same
+   * PrivilegeError itself on connectEnroll and prints the operator copy. The refusal is logged
+   * (`daemon_enroll_privilege_denied`). No row, no claim, no spawn.
    */
   async #systemLease(params: AcquireParams, holderId: string): Promise<Lease> {
     const { identity } = params;
@@ -654,6 +668,13 @@ export class DaemonManager {
             continue;
           }
           if (probe) return this.#foreignLease(params, holderId, probe.info);
+          // A `stale` row left by #refuseSiblingSpawn over a verified pre-Phase-B child of ours (a setup
+          // acquisition, or a deferred fence, saw it silent on the enrollment socket): take it back to
+          // `bound` under the same generation so the bound branch replaces it through the fence.
+          if (row.state === "stale" && this.#legacyUpgradeCandidate(params, row)) {
+            const rebound = store.cas({ dataDir: identity.dataDir, from: ["stale"], to: "bound", expectedGeneration: row.generation, set: { reason: null } });
+            if (rebound) continue;
+          }
           // Our recorded child MAY be alive but not listening (a spawn that never came up, or slow):
           // never start a second daemon beside it — retry once it has exited (rounds 11 #2 / 14 #2).
           if (this.#recordedChildMayBeAlive(row)) this.#refuseSiblingSpawn(identity, row);
@@ -739,6 +760,12 @@ export class DaemonManager {
     // stop and forbids a second spawn beside it). Without a child the origin rule applies.
     const abandon = (to: "stopped" | "stale", reason: string) =>
       child ? this.#abandonStarting(identity, starting, "existing", "stale", reason) : this.#abandonStarting(identity, starting, origin, to, reason);
+    // The bundled daemon must bind the enrollment socket (the only socket this broker ever probes):
+    // an older bundle would spawn a child that can never answer here and leave every row `stale`.
+    if (!versionAtLeast(this.#deps.bundledVersion, MIN_BUNDLED_ADC_VERSION)) {
+      abandon("stopped", "bundled daemon predates the enrollment socket");
+      throw new DaemonUnsupportedError(strings.status.bundledDaemonTooOld(this.#deps.bundledVersion, MIN_BUNDLED_ADC_VERSION));
+    }
     let binaryPath: string;
     try {
       binaryPath = this.#deps.resolveBinaryPath();

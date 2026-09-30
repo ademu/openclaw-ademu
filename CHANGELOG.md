@@ -22,9 +22,14 @@ Tested with `@ademu/adc-bin` **0.3.0**.
   `/etc/adc/config.toml` and `/run/adc/adc-enroll.sock`), the plugin attaches to it — zero spawns, zero
   ownership claims — and enrolls over its enrollment socket. A permission refusal (`PrivilegeError`) is
   never read as "no daemon": the wizard and `ademu_enroll` print the operator ceremony for this host
-  (`sudo adc --system agent add` → scan + confirm → `token mint` → paste into the token door), and the
-  runtime reports `blocked` instead of restarting. New config key: `enrollSocketPath` (root and per
-  account) for a user-scope daemon whose enrollment socket is not under its data dir.
+  (`sudo adc --system agent add` → scan + confirm → `token mint` → paste into the token door). At user
+  scope (an explicitly configured daemon) the runtime reports `blocked` instead of restarting; on a
+  detected system install a gated enrollment socket does not touch a running account — the runtime
+  needs only the session socket, so it attaches and logs the refusal. New config key: `enrollSocketPath`
+  (root and per account) for a user-scope daemon whose enrollment socket is not under its data dir; it
+  may never name the control or session socket (a config error), and one enrollment socket may not be
+  shared by two data dirs. A bundled daemon older than adc 0.5.0 is refused before any spawn (typed,
+  `blocked`) instead of leaving `stale` rows behind.
 - **"I have a device token" replaces "Connect an already-enrolled agent".** The wizard asks the mode
   first; the token door takes an operator-minted token (masked input), needs no enrollment connection,
   checks the token over the session socket (`get_self`) and writes the account. `list_devices`,
@@ -32,8 +37,12 @@ Tested with `@ademu/adc-bin` **0.3.0**.
 - **Mint dispositions.** `daemon_info` is read before the mint (the first mint closes the enrollment
   connection); a mint whose reply was lost, or whose label is already taken, is never retried with
   `replace` — the enrollment ends as `mint_lost` and names the fresh-label command; a configuration
-  write that fails after a successful mint names the label to revoke; a full enrollment budget
-  (`enroll_quota`) is refused with the cancel/list commands and the operator ceremony.
+  write that fails after a successful mint names the label to revoke (the chat door ends as
+  `commit_failed`, shown on the page too; a device already attached after the mint is terminal as well);
+  a full enrollment budget (`enroll_quota`) and an absent or silent enrollment socket are refused with
+  the operator ceremony. Every operator command is composed from the daemon identity — `sudo adc
+  --system …` on a system install, `ADC_DATA_DIR=… ADC_SOCKET_PATH=… adc …` at user scope (the CLI's
+  own socket ladder must not pick another daemon) — with paths and names single-quoted for the shell.
 
 - Typing is a pulse (AdemuMLS#621): the daemon relays each keepalive tick as at most one typing frame and
   no longer resends on its own, so the indicator clears ~3 s after the reply instead of staying lit

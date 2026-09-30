@@ -10,6 +10,12 @@ import { strings } from "./i18n/strings.js";
 import { DaemonBusyError, DaemonUnreachableError, DaemonUnsupportedError } from "./monitor/daemon.js";
 import { adcCommandPrefix, mintFreshLabelCommand, operatorCeremony, type OperatorContext } from "./operator.js";
 
+/** A socket that is absent or not listening (the client passes Node's own error through unchanged). */
+function isConnectFailure(err: unknown): boolean {
+  const code = (err as { code?: unknown } | undefined)?.code;
+  return err instanceof Error && typeof code === "string" && ["ENOENT", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE"].includes(code);
+}
+
 export function remedyFor(err: unknown, ctx: OperatorContext = {}): string | undefined {
   if (err instanceof NotInstalledError || err instanceof PlatformPackageMissingError) return strings.enroll.notInstalled;
   if (err instanceof UnsupportedPlatformError) return strings.status.unsupportedPlatform(err.platform);
@@ -20,6 +26,9 @@ export function remedyFor(err: unknown, ctx: OperatorContext = {}): string | und
   // The hardened host: the enrollment socket refused this uid, or the client refused to spawn beside a
   // system install. The operator ceremony is the fallback (M20 d); the client's message is never shown.
   if (err instanceof PrivilegeError) return strings.enroll.operatorInstructions(operatorCeremony(ctx));
+  // The enrollment socket is absent or silent (a system daemon that vanished after detection, a
+  // foreign user-scope daemon that is down): the operator ceremony is the fallback (M20 d).
+  if (isConnectFailure(err)) return strings.enroll.enrollSocketUnreachable(operatorCeremony(ctx));
   if (err instanceof InvalidTokenError) return strings.enroll.tokenRejected;
   if (err instanceof DeviceNotReadyError) return strings.enroll.notEnrolledDevice;
   if (err instanceof EnrollmentError) {

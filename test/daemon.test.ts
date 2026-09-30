@@ -10,10 +10,12 @@ import {
   DaemonManager,
   DaemonUnreachableError,
   DaemonUnsupportedError,
+  MIN_BUNDLED_ADC_VERSION,
   boundedProbeConnect,
   daemonEnv,
   infoMatchesIdentity,
   parseAdcVersion,
+  versionAtLeast,
   PROBE_CONNECT_MS,
   RELEASE_CAP_MS,
   STARTING_DEADLINE_MS,
@@ -110,7 +112,7 @@ class World {
     throw new Error("the fake ensureDaemon never dials");
   };
   platform = "darwin";
-  bundledVersion = "0.2.4";
+  bundledVersion = "0.5.0";
   selfPid = 100;
 
   constructor() {
@@ -256,7 +258,7 @@ describe("fresh spawn (runtime) and env injection", () => {
     expect(row.state).toBe("bound");
     expect(row.generation).toBe(1);
     expect(row.daemonPid).toBe(w.daemons.get(`${DIR}/adc-enroll.sock`)!.pid);
-    expect(row.adcVersion).toBe("0.2.4");
+    expect(row.adcVersion).toBe("0.5.0");
     expect(lease.info.sessionSocketPath).toBe(`${DIR}/adc-session.sock`);
     expect(lease.info.enrollSocketPath).toBe(`${DIR}/adc-enroll.sock`);
     expect(w.store.listHolders(DIR)).toHaveLength(1);
@@ -505,11 +507,11 @@ describe("stop escalation and upgrade", () => {
 
   it("runtime upgrades a bound daemon whose version differs from the bundled one (through the fence)", async () => {
     const w = new World();
-    w.bundledVersion = "0.2.5";
-    const old = w.addDaemon(DIR, { version: "0.2.4" });
+    w.bundledVersion = "0.5.1";
+    const old = w.addDaemon(DIR, { version: "0.5.0" });
     w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
     w.store.cas({ dataDir: DIR, from: ["claimed"], to: "starting", bumpGeneration: true });
-    w.store.cas({ dataDir: DIR, from: ["starting"], to: "bound", expectedGeneration: 1, set: { daemonPid: old.pid, daemonPidStartedAt: `start-${old.pid}`, daemonStartedAtMs: old.info.started_at_ms, adcVersion: "0.2.4" } });
+    w.store.cas({ dataDir: DIR, from: ["starting"], to: "bound", expectedGeneration: 1, set: { daemonPid: old.pid, daemonPidStartedAt: `start-${old.pid}`, daemonStartedAtMs: old.info.started_at_ms, adcVersion: "0.5.0" } });
     const m = new DaemonManager(w.deps());
     const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
     expect(lease.mode).toBe("owned");
@@ -521,8 +523,8 @@ describe("stop escalation and upgrade", () => {
 
   it("the upgrade is deferred while another holder is live", async () => {
     const w = new World();
-    w.bundledVersion = "0.2.5";
-    const old = w.addDaemon(DIR, { version: "0.2.4" });
+    w.bundledVersion = "0.5.1";
+    const old = w.addDaemon(DIR, { version: "0.5.0" });
     w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
     w.store.cas({ dataDir: DIR, from: ["claimed"], to: "starting", bumpGeneration: true });
     w.store.cas({ dataDir: DIR, from: ["starting"], to: "bound", expectedGeneration: 1, set: { daemonPid: old.pid, daemonPidStartedAt: `start-${old.pid}`, daemonStartedAtMs: old.info.started_at_ms } });
@@ -530,7 +532,7 @@ describe("stop escalation and upgrade", () => {
     w.store.addHolder({ holderId: "setup:777:y", dataDir: DIR, role: "setup", pid: 777, pidStartedAt: "cli", heartbeatMs: w.clock });
     const m = new DaemonManager(w.deps());
     const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    expect(lease.info.daemonVersion).toBe("0.2.4");
+    expect(lease.info.daemonVersion).toBe("0.5.0");
     expect(w.spawns).toHaveLength(0);
     expect(w.logs.some((l) => l.event === "daemon_upgrade_deferred")).toBe(true);
   });
@@ -766,8 +768,8 @@ describe("Codex branch-review folds (daemon)", () => {
 
   it("R3#4 a claimed upgrade whose stop fails leaves `stale` and yields a FOREIGN lease (never 'owned' over an unproven instance)", async () => {
     const w = new World();
-    w.bundledVersion = "0.2.5";
-    const old = w.addDaemon(DIR, { version: "0.2.4", honoursSigterm: false });
+    w.bundledVersion = "0.5.1";
+    const old = w.addDaemon(DIR, { version: "0.5.0", honoursSigterm: false });
     bindLive(w, old);
     const deps = w.deps();
     const m = new DaemonManager({ ...deps, kill: (pid, signal) => w.kills.push({ pid, signal }) });
@@ -780,8 +782,8 @@ describe("Codex branch-review folds (daemon)", () => {
 
   it("R4#4 a claimed upgrade whose stop fails AND whose listener then vanishes → DaemonUnreachableError, holder removed, no owned lease", async () => {
     const w = new World();
-    w.bundledVersion = "0.2.5";
-    const old = w.addDaemon(DIR, { version: "0.2.4", honoursSigterm: false });
+    w.bundledVersion = "0.5.1";
+    const old = w.addDaemon(DIR, { version: "0.5.0", honoursSigterm: false });
     bindLive(w, old);
     const deps = w.deps();
     let enrollCalls = 0;
@@ -1408,5 +1410,46 @@ describe("Phase B: the enrollment socket, the hardened host (spec A38 / M20)", (
     const { enroll_socket_path: _omitted, ...older } = d.info;
     expect(infoMatchesIdentity(older, identityFor(DIR))).toBe(true);
     expect(infoMatchesIdentity({ ...d.info, enroll_socket_path: "" }, identityFor(DIR))).toBe(true);
+  });
+
+  it("Codex #1: a bundled daemon older than the enrollment socket is refused before any spawn (typed, no lingering row)", async () => {
+    expect(MIN_BUNDLED_ADC_VERSION).toBe("0.5.0");
+    expect(versionAtLeast("0.5.0", "0.5.0")).toBe(true);
+    expect(versionAtLeast("0.5.1 (abc)", "0.5.0")).toBe(true);
+    expect(versionAtLeast("0.3.0", "0.5.0")).toBe(false);
+    expect(versionAtLeast("garbage", "0.5.0")).toBe(false);
+    const w = new World();
+    w.bundledVersion = "0.3.0";
+    const m = new DaemonManager(w.deps());
+    await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnsupportedError);
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)).toBeUndefined();
+    expect(w.store.listHolders(DIR)).toHaveLength(0);
+  });
+
+  it("Codex doc #3: a `stale` row left over a verified pre-Phase-B child (a setup acquisition saw it silent) is still replaced by the runtime", async () => {
+    const w = new World();
+    const old = w.addDaemon(DIR, { version: "0.3.0", enrollSocket: false });
+    bindLegacy(w, old, "0.3.0");
+    const m = new DaemonManager(w.deps());
+    // setup never stops anything: the row goes stale with the child's pid facts
+    await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "setup" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(w.store.getOwnership(DIR)!.state).toBe("stale");
+    expect(w.kills).toEqual([]);
+    // the runtime takes it back to bound under the same generation and replaces it through the fence
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("owned");
+    expect(w.kills.map((k) => k.pid)).toEqual([old.pid]);
+    expect(w.spawns).toHaveLength(1);
+    expect(w.store.getOwnership(DIR)!.state).toBe("bound");
+    // a stale row over a SAME-version child is untouched (still retry-later)
+    const b = new World();
+    const same = b.addDaemon(DIR, { enrollSocket: false });
+    bindLegacy(b, same, b.bundledVersion);
+    b.store.cas({ dataDir: DIR, from: ["bound"], to: "stale", expectedGeneration: 1 });
+    const mb = new DaemonManager(b.deps());
+    await expect(mb.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(b.kills).toEqual([]);
+    expect(b.spawns).toHaveLength(0);
   });
 });
