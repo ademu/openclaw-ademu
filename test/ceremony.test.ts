@@ -1,12 +1,11 @@
 import { AlreadyAttachedError, type AdcClientOptions } from "@ademu/adc-client";
-import { ControlError, type FourWords } from "@ademu/adc-control";
+import { ConnectionClosedError, ControlError, ControlTimeoutError, type FourWords } from "@ademu/adc-control";
 import { describe, expect, it } from "vitest";
 import {
-  connectExisting,
   createEnrollmentLease,
   EnrollmentError,
   ENROLLMENT_TTL_MS,
-  listEnrolledDevices,
+  probeTokenIdentity,
   runEnrollment,
   tokenLabelFor,
   type EnrollmentLeaseDeps,
@@ -49,7 +48,7 @@ function hooks(over: Partial<Hooks> = {}): Hooks {
   return { qr: [], words: [], confirmAnswer: true, confirmedWith: [], effects: 0, ...over };
 }
 
-function startNew(control: FakeControl, h: Hooks, extra: { signal?: AbortSignal | undefined; confirmReplace?: (() => Promise<boolean>) | undefined; confirmTakeover?: (() => Promise<boolean>) | undefined; session?: ReturnType<typeof sessionFor> | undefined } = {}) {
+function startNew(control: FakeControl, h: Hooks, extra: { signal?: AbortSignal | undefined; confirmTakeover?: (() => Promise<boolean>) | undefined; session?: ReturnType<typeof sessionFor> | undefined } = {}) {
   const s = extra.session ?? sessionFor();
   const devices: string[] = [];
   const run = runEnrollment({
@@ -73,7 +72,6 @@ function startNew(control: FakeControl, h: Hooks, extra: { signal?: AbortSignal 
       return h.confirmAnswer;
     },
     onDevice: (id) => devices.push(id),
-    confirmReplace: extra.confirmReplace,
     confirmTakeover: extra.confirmTakeover,
   });
   run.catch(() => {});
@@ -104,9 +102,10 @@ describe("ceremony: new enrollment", () => {
 
     control.finish("enrolled");
     const result = await run;
-    expect(control.calls.map((c) => c.op)).toEqual(["create_device", "poll", "confirm_words", "token_mint", "daemon_info"]);
+    // daemon_info is requested BEFORE token_mint: the first successful mint closes the enrollment connection (M20 a)
+    expect(control.calls.map((c) => c.op)).toEqual(["create_device", "poll", "confirm_words", "daemon_info", "token_mint"]);
     expect(control.calls.find((c) => c.op === "token_mint")?.params).toEqual({ device_id: NEW_DEVICE, label: tokenLabelFor("iris") });
-    expect(result).toMatchObject({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_secret_1", tokenId: "tid-1", sessionSocketPath: "/d/adc-session.sock" });
+    expect(result).toMatchObject({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_secret_1", tokenId: "tid-1", tokenLabel: "openclaw-iris", sessionSocketPath: "/d/adc-session.sock" });
     // identity probe: takeover false, reconnect never, closed afterwards
     expect(session.connects).toEqual([{ token: "adc1_secret_1", socketPath: "/d/adc-session.sock", takeover: false, reconnect: "never" }]);
     expect(session.client.closed).toBe(true);
@@ -167,39 +166,64 @@ describe("ceremony: new enrollment", () => {
     expect(control.calls.some((c) => c.op === "token_mint")).toBe(false);
   });
 
-  it("an existing token label: refused without consent; rotated with replace:true on consent", async () => {
-    const make = (consent?: () => Promise<boolean>) => {
+  it("the mint happens exactly once and never with replace: label_exists, a lost reply and a timeout are typed dead ends (M20 b)", async () => {
+    const drive = async (impl: NonNullable<FakeControl["tokenMintImpl"]>) => {
       const control = new FakeControl();
-      let first = true;
-      control.tokenMintImpl = async (p) => {
-        if (first && !p.replace) {
-          first = false;
-          throw new ControlError("label_exists", "x");
-        }
-        return { token_id: "tid-r", label: p.label, token: "adc1_rotated", created_at_ms: 1 };
-      };
-      const { run } = startNew(control, hooks(), { confirmReplace: consent });
-      return { control, run };
+      control.tokenMintImpl = impl;
+      const { run } = startNew(control, hooks());
+      await tick();
+      control.emit({ words: WORDS });
+      await tick();
+      control.finish("enrolled");
+      const outcome = await run.then(
+        (r) => ({ ok: true as const, r }),
+        (e: unknown) => ({ ok: false as const, e }),
+      );
+      const mints = control.calls.filter((c) => c.op === "token_mint").map((c) => c.params as { replace?: true });
+      return { outcome, mints, control };
     };
-    const refused = make();
-    await tick();
-    refused.control.emit({ words: WORDS });
-    await tick();
-    refused.control.finish("enrolled");
-    await expect(refused.run).rejects.toMatchObject({ reason: "label_exists" });
+    const exists = await drive(async () => {
+      throw new ControlError("label_exists", "x");
+    });
+    expect(exists.outcome).toMatchObject({ ok: false, e: { reason: "label_exists" } });
+    expect(exists.mints).toHaveLength(1);
+    expect(exists.mints.some((m) => m.replace)).toBe(false);
 
-    const rotated = make(async () => true);
-    await tick();
-    rotated.control.emit({ words: WORDS });
-    await tick();
-    rotated.control.finish("enrolled");
-    const result = await rotated.run;
-    expect(result.token).toBe("adc1_rotated");
-    const mints = rotated.control.calls.filter((c) => c.op === "token_mint").map((c) => c.params);
-    expect(mints).toEqual([
-      { device_id: NEW_DEVICE, label: "openclaw-iris" },
-      { device_id: NEW_DEVICE, label: "openclaw-iris", replace: true },
-    ]);
+    const lost = await drive(async () => {
+      throw new ConnectionClosedError({ op: "token_mint", id: "7" });
+    });
+    expect(lost.outcome).toMatchObject({ ok: false, e: { reason: "mint_lost" } });
+    expect(lost.mints).toHaveLength(1);
+
+    const timedOut = await drive(async () => {
+      throw new ControlTimeoutError("token_mint", "8", 30_000);
+    });
+    expect(timedOut.outcome).toMatchObject({ ok: false, e: { reason: "mint_lost" } });
+    expect(timedOut.mints).toHaveLength(1);
+
+    // a closed connection with a DIFFERENT op in flight is not a lost mint
+    const other = await drive(async () => {
+      throw new ConnectionClosedError({ op: "daemon_info", id: "9" });
+    });
+    expect(other.outcome.ok).toBe(false);
+    expect((other.outcome as { e: unknown }).e).toBeInstanceOf(ConnectionClosedError);
+  });
+
+  it("a full enrollment budget (enroll_quota) on create_device is a typed refusal with no device and no poll; enroll_scope is unexpected", async () => {
+    const quota = new FakeControl();
+    quota.createDeviceImpl = async () => {
+      throw new ControlError("enroll_quota", "full");
+    };
+    const q = startNew(quota, hooks());
+    await expect(q.run).rejects.toMatchObject({ reason: "enroll_quota" });
+    expect(quota.calls.map((c) => c.op)).toEqual(["create_device"]);
+    expect(q.devices).toEqual([]);
+
+    const scope = new FakeControl();
+    scope.createDeviceImpl = async () => {
+      throw new ControlError("enroll_scope", "nope");
+    };
+    await expect(startNew(scope, hooks()).run).rejects.toMatchObject({ reason: "unexpected_state" });
   });
 
   it("identity probe: a device with a live mind is refused unless takeover is consented; a foreign device id is a mismatch", async () => {
@@ -246,26 +270,35 @@ describe("ceremony: new enrollment", () => {
   });
 });
 
-describe("ceremony: connect an already-enrolled device", () => {
-  it("mints the account label and probes identity; refuses a device that is not enrolled", async () => {
-    const control = new FakeControl();
-    const s = sessionFor();
-    const common = { control, connectSession: s.connect, accountId: "bob", beforeEffect: async () => {}, signal: new AbortController().signal };
-    const result = await connectExisting({ ...common, deviceId: NEW_DEVICE });
-    expect(result.ownerUserId).toBe(OWNER);
-    expect(control.calls.find((c) => c.op === "token_mint")?.params).toEqual({ device_id: NEW_DEVICE, label: "openclaw-bob" });
+describe("ceremony: the token door (probeTokenIdentity)", () => {
+  const signal = new AbortController().signal;
 
-    control.statusState = "created";
-    await expect(connectExisting({ ...common, deviceId: NEW_DEVICE })).rejects.toMatchObject({ reason: "not_enrolled" });
+  it("a pasted token yields the device and identities from the session's hello + get_self; nothing is minted", async () => {
+    const s = sessionFor();
+    const r = await probeTokenIdentity({ token: "adc1_pasted", sessionSocketPath: "/d/adc-session.sock", connectSession: s.connect, signal });
+    expect(r).toEqual({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, agentUsername: s.client.self.username, agentDisplayName: s.client.self.display_name });
+    expect(s.connects).toEqual([{ token: "adc1_pasted", socketPath: "/d/adc-session.sock", takeover: false, reconnect: "never" }]);
+    expect(s.client.closed).toBe(true);
   });
 
-  it("lists only enrolled devices", async () => {
-    const control = new FakeControl();
-    control.devices = [
-      { device_id: "a", agent_user_id: "ua", agent_name: "A", state: "enrolled" },
-      { device_id: "b", agent_user_id: "ub", agent_name: "B", state: "created" },
-    ];
-    expect(await listEnrolledDevices(control)).toEqual([{ deviceId: "a", agentName: "A", agentUserId: "ua" }]);
+  it("hello and get_self must agree on the device and the agent (identity_mismatch otherwise)", async () => {
+    const s = sessionFor();
+    s.client.hello.device_id = "cccccccc-1111-4222-8333-444444444444";
+    await expect(probeTokenIdentity({ token: "t", sessionSocketPath: "/d/adc-session.sock", connectSession: s.connect, signal })).rejects.toMatchObject({ reason: "identity_mismatch" });
+    const s2 = sessionFor();
+    s2.client.hello.agent_user_id = "dddddddd-1111-4222-8333-444444444444";
+    await expect(probeTokenIdentity({ token: "t", sessionSocketPath: "/d/adc-session.sock", connectSession: s2.connect, signal })).rejects.toMatchObject({ reason: "identity_mismatch" });
+    expect(s2.client.closed).toBe(true);
+  });
+
+  it("a device with a live mind is refused unless takeover is consented", async () => {
+    const refused = sessionFor();
+    refused.attachedOnce(true);
+    await expect(probeTokenIdentity({ token: "t", sessionSocketPath: "/d/adc-session.sock", connectSession: refused.connect, signal })).rejects.toMatchObject({ reason: "device_attached" });
+    const consented = sessionFor();
+    consented.attachedOnce(true);
+    await probeTokenIdentity({ token: "t", sessionSocketPath: "/d/adc-session.sock", connectSession: consented.connect, signal, confirmTakeover: async () => true });
+    expect(consented.connects.map((c) => c.takeover)).toEqual([false, true]);
   });
 });
 
@@ -293,9 +326,13 @@ describe("ceremony: EnrollmentLease", () => {
     const control = new FakeControl();
     const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
     const disposed: string[] = [];
+    const dialled: string[] = [];
     const deps: EnrollmentLeaseDeps = {
       daemons,
-      connectControl: async () => control,
+      connectEnroll: async (path) => {
+        dialled.push(path);
+        return control;
+      },
       now: () => 1000,
       setTimer: (fn, ms) => {
         const t = { fn, ms, cleared: false };
@@ -307,8 +344,16 @@ describe("ceremony: EnrollmentLease", () => {
       },
       onDisposed: (_l, reason) => disposed.push(reason),
     };
-    return { deps, control, timers, disposed, acquired, released: () => released };
+    return { deps, control, timers, disposed, acquired, dialled, released: () => released };
   }
+
+  it("A38: the ceremony lease dials the ENROLLMENT socket the daemon lease names and never a control endpoint", async () => {
+    const w = leaseWorld();
+    expect("connectControl" in w.deps).toBe(false);
+    const lease = await createEnrollmentLease({ deps: w.deps, accountId: "iris", identity: {} as never, server: { restBaseUrl: "r", wsUrl: "w" }, beforeEffect: async () => {} });
+    expect(w.dialled).toEqual(["/d/adc-enroll.sock"]);
+    await lease.dispose("done");
+  });
 
   it("acquires a SETUP lease, disposes exactly once (cancel pairing → close → release), and clears the TTL timer", async () => {
     const w = leaseWorld();
@@ -365,9 +410,9 @@ describe("ceremony: EnrollmentLease", () => {
     expect(w.released()).toBe(1);
   });
 
-  it("releases the daemon lease when the control connection cannot be opened", async () => {
+  it("releases the daemon lease when the enrollment connection cannot be opened", async () => {
     const w = leaseWorld();
-    w.deps.connectControl = async () => {
+    w.deps.connectEnroll = async () => {
       throw new Error("no socket");
     };
     await expect(createEnrollmentLease({ deps: w.deps, accountId: "iris", identity: {} as never, server: { restBaseUrl: "r", wsUrl: "w" }, beforeEffect: async () => {} })).rejects.toThrow(/no socket/);
