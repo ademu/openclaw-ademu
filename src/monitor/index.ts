@@ -3,10 +3,12 @@
 // finish in ≤ 4500 ms by construction, with a 2500 ms tail reserved for the release).
 //
 // Outcome contract with the gateway supervisor: a normal return = "done" (abort, or a user-actionable
-// `blocked` state that a restart cannot fix); a throw = "restart me" (`recovering`: device host not
-// answering, ingress halted, transient failures). The plugin never runs a device host (AdemuMLS #712):
-// the runtime attaches once and never starts one — the gateway's restart loop and the client's own
-// reconnect loop bring the account back when adc is up.
+// `blocked` state that a restart cannot fix); a throw = "restart me" (`recovering`: ingress halted,
+// transient failures). The plugin never runs a device host (AdemuMLS #712): the runtime never starts
+// one. A session socket with no listener (adc not installed, stopped, not up yet at boot) is waited
+// for IN the task — `recovering` with the reason, re-attaching on a capped backoff — because the
+// gateway's restart loop gives up after 10 attempts and replaces the reason with the raw connect
+// error; once seated, the client's own reconnect loop rides out a daemon restart.
 import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
 import { CHANNEL_ID, type ResolvedAdemuAccount } from "../config.js";
 import { classifyConversation, type ConversationKind } from "../grammar.js";
@@ -24,6 +26,9 @@ export const RELEASE_TAIL_MS = 2500;
 export const DRAIN_CAP_MS = 2000;
 /** After this many consecutive reconnect attempts the session path is re-resolved (it may have moved). */
 export const REPROBE_AFTER_ATTEMPTS = 5;
+/** The in-task wait while nothing listens on the session socket: first delay, doubling to the cap. */
+export const ABSENT_WAIT_INITIAL_MS = 2_000;
+export const ABSENT_WAIT_MAX_MS = 30_000;
 
 /** `channels.ademu.server` is deprecated and ignored (#712): say so once per process, not per account start. */
 let serverDeprecationLogged = false;
@@ -55,7 +60,15 @@ export type StartAccountDeps = {
 export type StartOutcome =
   | { kind: "aborted" }
   | { kind: "blocked"; lastError: string }
-  | { kind: "restart"; lastError: string; error: unknown };
+  | { kind: "restart"; lastError: string; error: unknown }
+  /** The initial session connect found no listener: wait in-task, then attach again. */
+  | { kind: "absent" };
+
+/** No daemon on the socket (no file, or nobody accepting) — not a refusal by a daemon that answered. */
+function nothingListening(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === "ENOENT" || code === "ECONNREFUSED";
+}
 
 function abortPromise(signal: AbortSignal): Promise<{ kind: "aborted" }> {
   return new Promise((resolve) => {
@@ -94,22 +107,31 @@ export async function startAccount(ctx: ChannelGatewayContext<ResolvedAdemuAccou
     log("config_server_deprecated", { ignored: true });
   }
 
-  // --- daemon attachment ------------------------------------------------------------------------
-  let attachment: Attachment;
-  try {
-    attachment = await deps.attacher.attach({ identity: account.daemon, role: "runtime", signal: ctx.abortSignal });
-  } catch (err) {
-    if (err instanceof DaemonAbortedError || ctx.abortSignal.aborted) return;
-    const c = classifyError(err);
-    setStatus(patchFor(err));
-    log("daemon_attach_failed", { errorClass: err instanceof Error ? err.name : typeof err, kind: c.kind });
-    if (c.kind === "blocked") return;
-    throw err;
-  }
-  log("daemon_attached", { reachable: !attachment.unreachable });
+  // --- daemon attachment (again after each in-task wait while nothing listens) -------------------
+  for (let waitMs = ABSENT_WAIT_INITIAL_MS; ; waitMs = Math.min(waitMs * 2, ABSENT_WAIT_MAX_MS)) {
+    let attachment: Attachment;
+    try {
+      attachment = await deps.attacher.attach({ identity: account.daemon, role: "runtime", signal: ctx.abortSignal });
+    } catch (err) {
+      if (err instanceof DaemonAbortedError || ctx.abortSignal.aborted) return;
+      const c = classifyError(err);
+      setStatus(patchFor(err));
+      log("daemon_attach_failed", { errorClass: err instanceof Error ? err.name : typeof err, kind: c.kind });
+      if (c.kind === "blocked") return;
+      throw err;
+    }
+    log("daemon_attached", { reachable: !attachment.unreachable });
 
-  const outcome = await runWithLease(ctx, deps, attachment, setStatus, log);
-  if (outcome.kind === "restart") throw outcome.error;
+    const outcome = await runWithLease(ctx, deps, attachment, setStatus, log);
+    if (outcome.kind === "restart") throw outcome.error;
+    if (outcome.kind !== "absent") return;
+    log("daemon_absent_waiting", { waitMs });
+    const waited = await Promise.race([deps.sleep(waitMs).then(() => "slept" as const), abortPromise(ctx.abortSignal)]);
+    if (waited !== "slept" || ctx.abortSignal.aborted) {
+      setStatus({ running: false, connected: false, lifecycle: "stopped" });
+      return;
+    }
+  }
 }
 
 async function runWithLease(
@@ -162,10 +184,17 @@ async function runWithLease(
     } catch (err) {
       if (ctx.abortSignal.aborted) return outcome;
       const c = classifyError(err);
-      // Nothing answered at attach time: name WHY (not installed / disabled / not running / system
-      // down) instead of the connect error's class — the restart loop retries.
-      setStatus(lease.unreachable && c.kind === "recovering" ? recoveringPatch(unreachableCopy(lease.unreachable)) : patchFor(err));
       log("session_open_failed", { errorClass: err instanceof Error ? err.name : typeof err, kind: c.kind });
+      if (c.kind === "recovering" && nothingListening(err)) {
+        // Nothing listens: name WHY (not installed / disabled / not running / system down) instead of
+        // the connect error, and let startAccount wait in-task (a daemon that answered at attach and
+        // died since reads as not running / system down).
+        const why = lease.unreachable ?? (lease.identity.scope === "system" ? "system_down" : "not_running");
+        setStatus(recoveringPatch(unreachableCopy(why)));
+        outcome = { kind: "absent" };
+        return outcome;
+      }
+      setStatus(lease.unreachable && c.kind === "recovering" ? recoveringPatch(unreachableCopy(lease.unreachable)) : patchFor(err));
       outcome = c.kind === "blocked" ? { kind: "blocked", lastError: c.lastError } : { kind: "restart", lastError: c.lastError, error: err };
       return outcome;
     }
@@ -209,7 +238,7 @@ async function runWithLease(
     log("account_ready", {});
 
     // --- run until something ends it ---------------------------------------------------------
-    const ended = await Promise.race<StartOutcome>([
+    const ended = await Promise.race<Exclude<StartOutcome, { kind: "absent" }>>([
       abortPromise(ctx.abortSignal),
       ingress.lifetime.catch((err: unknown) => toOutcome(err)),
       retriesExceededP.catch((err: unknown) => toOutcome(err)),
@@ -251,7 +280,7 @@ function isHalt(err: unknown): boolean {
   return classifyError(err).ingressUnavailable === true;
 }
 
-function toOutcome(err: unknown): StartOutcome {
+function toOutcome(err: unknown): Exclude<StartOutcome, { kind: "absent" | "aborted" }> {
   const c = classifyError(err);
   return c.kind === "blocked" ? { kind: "blocked", lastError: c.lastError } : { kind: "restart", lastError: c.lastError, error: err };
 }

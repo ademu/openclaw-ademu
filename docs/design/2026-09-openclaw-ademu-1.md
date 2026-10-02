@@ -312,12 +312,16 @@ the device host that minted its token: an explicit key → user scope at those p
 recorded scope ignored, so re-enrolling is how an agent moves.
 
 **Runtime role** (`startAccount`). Probe the enrollment socket once and attach — the reported session
-socket when it answers, else the identity's own path — and let the gateway's restart loop and the
-client's reconnect loop bring the account back. The runtime never starts a service and never waits:
-a deliberate `adc service stop` is respected, and at login adc and the gateway start together. When
+socket when it answers, else the identity's own path. The runtime never starts a service: a
+deliberate `adc service stop` is respected, and at login adc and the gateway start together. When
 nothing answered, the attachment carries why (`not_installed` / `disabled` / `not_running` /
-`system_down`, from the installed unit and, on launchd, `print-disabled`) and a failed first session
-open shows that copy while `recovering`. After `REPROBE_AFTER_ATTEMPTS` (5) failed reconnects the
+`system_down`, from the installed unit and, on launchd, `print-disabled`). A first session open that
+finds no listener (`ENOENT` / `ECONNREFUSED`) shows that copy while `recovering` and **waits in the
+task** — 2 s doubling to 30 s, then attaches again — instead of throwing: the gateway's restart loop
+gives up after 10 attempts (5 s → 300 s backoff, ~25 min) and replaces the status with the raw connect
+error, so an adc that stays down longer (not installed yet, stopped over lunch) would leave the account
+dead until a gateway restart (#712 live leg, 2026-10-02). Once seated, the client's reconnect loop rides
+out a daemon restart. After `REPROBE_AFTER_ATTEMPTS` (5) failed reconnects the
 session path is re-resolved once per streak; a device host that came back on another session socket
 ends the lifetime (`SessionSocketMovedError`) so a fresh attachment takes the new path.
 
@@ -347,8 +351,8 @@ loop → `ready` → race `[abort, loop lifetime, a moved session socket]`.
 **Outcome contract with the gateway supervisor.** Return normally for *abort* and for *blocked*
 (user-actionable, a restart cannot fix it: token revoked/rotated, device not enrolled, displaced by
 another mind, protocol violation, identity mismatch, unsupported platform). Throw for *restart*
-(the device host not answering, ingress halted, transient failures) so the supervisor re-runs the
-account. `blocked` is sticky in OpenClaw until a gateway restart or an explicit ready patch, so it is
+(ingress halted, transient failures) so the supervisor re-runs the account; a device host with no
+listener on the session socket is waited for in the task (§4), never thrown to the supervisor. `blocked` is sticky in OpenClaw until a gateway restart or an explicit ready patch, so it is
 used only for those cases; everything else is `recovering`. The attachment never rejects on its own:
 the client's reconnect loop probes while the status is `recovering`.
 

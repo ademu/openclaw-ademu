@@ -31,7 +31,8 @@ Requires adc ≥ **0.6.0** (the installed device host; the plugin bundles none).
   enrollment socket once and attaches, taking a reachable daemon's reported session socket as the
   authority; it never starts a service. While nothing answers, the account is `recovering` with the
   reason (not installed as a service / disabled / not running / the system device host is down) and
-  comes back once adc answers. An enrollment (wizard or `ademu_enroll`) may ask the system to start the
+  checks again in place (2 s, doubling to every 30 s) — it comes back once adc answers, however long
+  that takes, without spending the gateway's ten restart attempts. An enrollment (wizard or `ademu_enroll`) may ask the system to start the
   INSTALLED user service (`launchctl kickstart` / `systemctl --user start`, never a spawn) and waits up
   to 20 s; it never starts anything for a configured path or a system install. A device host older
   than adc 0.6.0, or one without the enrollment socket, is refused as too old. Requires

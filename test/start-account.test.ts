@@ -6,8 +6,9 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ResolvedAdemuAccount } from "../src/config.js";
 import { DaemonUnreachableError, DaemonUnsupportedError, SessionSocketMovedError, type Attacher, type Attachment, type Unreachable } from "../src/monitor/attach.js";
-import { DRAIN_CAP_MS, RELEASE_TAIL_MS, REPROBE_AFTER_ATTEMPTS, STOP_DEADLINE_MS, startAccount, type StartAccountDeps } from "../src/monitor/index.js";
+import { ABSENT_WAIT_INITIAL_MS, ABSENT_WAIT_MAX_MS, DRAIN_CAP_MS, RELEASE_TAIL_MS, REPROBE_AFTER_ATTEMPTS, STOP_DEADLINE_MS, startAccount, type StartAccountDeps } from "../src/monitor/index.js";
 import type { RuntimeChannelSurface } from "../src/monitor/ingress.js";
+import { strings } from "../src/i18n/strings.js";
 import { getLiveAccount, resetLiveAccountsForTests } from "../src/outbound.js";
 import { AdemuStore } from "../src/store.js";
 import { AGENT, DEVICE, FakeAdcClient, fakeConnect, GUEST, member, OWNER, ROOM_DM } from "./fakes/adc.js";
@@ -151,11 +152,98 @@ describe("startAccount: happy path and abort", () => {
   });
 });
 
-describe("startAccount: restart outcomes (throw)", () => {
-  it("#712: nothing answered at attach → the session open fails → recovering with WHY (not installed), rejects for a restart", async () => {
-    const w = world({ unreachable: "not_installed", connectError: Object.assign(new Error("ENOENT"), { code: "ENOENT" }) });
-    await expect(startAccount(w.ctx, w.deps)).rejects.toBeInstanceOf(Error);
+describe("startAccount: nothing listening waits in-task (#712 live leg)", () => {
+  // The gateway's restart loop gives up after 10 attempts (~25 min); a device host that is down must
+  // not exhaust it, and the gateway would overwrite the WHY with the raw connect error. So a session
+  // socket with no listener is waited for HERE, re-attaching on a capped backoff.
+  const enoent = () => Object.assign(new Error("connect ENOENT /d/adc-session.sock"), { code: "ENOENT" });
+  const refused = () => Object.assign(new Error("connect ECONNREFUSED /d/adc-session.sock"), { code: "ECONNREFUSED" });
+  /** A sleep that yields to the event loop (the default fake resolves in a microtask). */
+  function realisticSleep(w: ReturnType<typeof world>) {
+    const sleeps: number[] = [];
+    w.deps.sleep = (ms) =>
+      new Promise((r) => {
+        sleeps.push(ms);
+        setTimeout(r, 1);
+      });
+    return sleeps;
+  }
+
+  it("not installed: never rejects, stays running + recovering with WHY, re-attaches on a capped backoff, resolves on abort", async () => {
+    const w = world({ unreachable: "not_installed", connectError: enoent() });
+    const sleeps = realisticSleep(w);
+    let settled = false;
+    const run = startAccount(w.ctx, w.deps).then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    await new Promise((r) => setTimeout(r, 60));
+    expect(settled).toBe(false);
+    expect(w.dm.calls.length).toBeGreaterThanOrEqual(3);
     expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "recovering", lastError: expect.stringContaining("~/.local/bin/adc service install") });
+    expect(w.statuses.some((s) => s.running === false)).toBe(false);
+    const waits = w.logs.filter((l) => l.event === "daemon_absent_waiting").map((l) => l.fields!.waitMs as number);
+    expect(waits.slice(0, 2)).toEqual([ABSENT_WAIT_INITIAL_MS, ABSENT_WAIT_INITIAL_MS * 2]);
+    expect(sleeps).toEqual(expect.arrayContaining(waits));
+    w.ac.abort();
+    await run;
+    expect(w.statuses.at(-1)).toMatchObject({ running: false, lifecycle: "stopped" });
+  });
+
+  it("the wait doubles to the cap and stays there", async () => {
+    const w = world({ unreachable: "not_running", connectError: enoent() });
+    realisticSleep(w);
+    const run = startAccount(w.ctx, w.deps);
+    await new Promise((r) => setTimeout(r, 120));
+    const waits = w.logs.filter((l) => l.event === "daemon_absent_waiting").map((l) => l.fields!.waitMs as number);
+    expect(waits.length).toBeGreaterThan(6);
+    expect(waits.slice(0, 6)).toEqual([2_000, 4_000, 8_000, 16_000, ABSENT_WAIT_MAX_MS, ABSENT_WAIT_MAX_MS]);
+    expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "recovering", lastError: strings.status.adcNotRunning });
+    w.ac.abort();
+    await run;
+  });
+
+  it("adc comes up during the wait (ECONNREFUSED, then a listener) → ready on a fresh attachment, no restart", async () => {
+    const w = world({ unreachable: "not_running" });
+    realisticSleep(w);
+    const errors = [refused(), refused()];
+    const inner = w.deps.session.connect;
+    w.deps.session.connect = async (o) => {
+      const e = errors.shift();
+      if (e) throw e;
+      return inner(o);
+    };
+    const run = startAccount(w.ctx, w.deps);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(w.dm.calls).toHaveLength(3);
+    expect(w.statuses.at(-1)).toMatchObject({ connected: true });
+    expect(getLiveAccount("iris").client).toBe(w.client);
+    w.ac.abort();
+    await run;
+  });
+
+  it("an abort during the wait resolves at once", async () => {
+    const w = world({ unreachable: "not_installed", connectError: enoent() });
+    const sleeps: number[] = [];
+    w.deps.sleep = (ms) => {
+      sleeps.push(ms);
+      return new Promise(() => {}); // a wait that never ends on its own
+    };
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    expect(w.logs.filter((l) => l.event === "daemon_absent_waiting").map((l) => l.fields!.waitMs)).toEqual([ABSENT_WAIT_INITIAL_MS]);
+    expect(sleeps).toContain(ABSENT_WAIT_INITIAL_MS);
+    w.ac.abort();
+    await run;
+    expect(w.statuses.at(-1)).toMatchObject({ running: false, lifecycle: "stopped" });
+  });
+});
+
+describe("startAccount: restart outcomes (throw)", () => {
+  it("a connect error that is not 'nothing listening' still rejects for a restart", async () => {
+    const w = world({ connectError: Object.assign(new Error("connect EACCES /d/adc-session.sock"), { code: "EACCES" }) });
+    await expect(startAccount(w.ctx, w.deps)).rejects.toBeInstanceOf(Error);
+    expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "recovering" });
     expect(w.dm.lease()!.released).toBe(1);
   });
 
