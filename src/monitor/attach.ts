@@ -76,7 +76,8 @@ export type UserServiceSeam = {
 
 export type AttachDeps = {
   now: () => number;
-  sleep: (ms: number) => Promise<void>;
+  /** Resolves after `ms`, or early on `signal` (a real one clears its timer). */
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   connectEnroll: (socketPath: string) => Promise<EnrollLike>;
   /** Connect-and-close on the CONTROL socket path, nothing spoken: is a (pre-Phase-B) daemon here? */
   controlSocketAnswers: (socketPath: string) => Promise<boolean>;
@@ -190,10 +191,27 @@ function controlSocketAnswersReal(socketPath: string): Promise<boolean> {
   });
 }
 
+/** A real sleep that resolves early on abort and leaves neither its timer nor its listener behind. */
+export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
 export function realAttachDeps(params: { log: AttachDeps["log"] }): AttachDeps {
   return {
     now: () => Date.now(),
-    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    sleep: abortableSleep,
     connectEnroll: async (socketPath) => (await connectEnrollReal({ socketPath })) as unknown as EnrollLike,
     controlSocketAnswers: controlSocketAnswersReal,
     userService: {
@@ -299,7 +317,8 @@ export class DaemonAttacher implements Attacher {
       this.#deps.log("daemon_attached", { scope: identity.scope, reachable: true });
       return this.#attachment(params, info);
     }
-    const unreachable = await this.#whyUnreachable(identity);
+    // The service-state lookup (launchctl print-disabled, up to 5 s) must not hold a shutdown.
+    const unreachable = await this.#unlessAborted(this.#whyUnreachable(identity), params.signal);
     this.#deps.log("daemon_attached", { scope: identity.scope, reachable: false, unreachable });
     return this.#attachment(params, undefined, unreachable);
   }
@@ -351,7 +370,7 @@ export class DaemonAttacher implements Attacher {
       // An explicit path that is not the installed service's own: the plugin starts nothing for it.
       throw new DaemonUnreachableError(strings.status.adcNotRunningAt(identity.raw.enrollSocket));
     }
-    const state = await this.#deps.userService.installed(layout);
+    const state = await this.#unlessAborted(this.#deps.userService.installed(layout), signal);
     if (!state.installed) throw new AdcServiceNotInstalledError(layout);
     if (state.disabled) throw new AdcServiceNotAnsweringError(layout, true);
 
@@ -362,16 +381,43 @@ export class DaemonAttacher implements Attacher {
     if (started.kind === "disabled") throw new AdcServiceNotAnsweringError(layout, true);
     if (started.kind === "failed") throw new AdcServiceNotAnsweringError(layout, false, started.reason);
 
+    // Every probe and pause is bounded by what is left of the budget: a daemon that accepts but
+    // stalls hello / daemon_info cannot stretch the advertised wait (the late connection is closed).
     const deadline = this.#deps.now() + SERVICE_START_WAIT_MS;
     for (;;) {
-      const info = await this.#probe(identity.raw.enrollSocket, signal);
+      const remaining = deadline - this.#deps.now();
+      if (remaining <= 0) throw new AdcServiceNotAnsweringError(layout, false);
+      const budget = AbortSignal.timeout(remaining);
+      const bounded = signal ? AbortSignal.any([signal, budget]) : budget;
+      let info: DaemonInfoResult | undefined;
+      try {
+        info = await this.#probe(identity.raw.enrollSocket, bounded);
+        if (!info) await this.#sleepOrAbort(WAIT_POLL_MS, bounded);
+      } catch (err) {
+        if (err instanceof DaemonAbortedError && !signal?.aborted) throw new AdcServiceNotAnsweringError(layout, false);
+        throw err;
+      }
       if (info) {
         this.#checkVersion(info);
         this.#deps.log("daemon_attached", { scope: "user", reachable: true, started: true });
         return this.#attachment(params, info);
       }
-      if (this.#deps.now() >= deadline) throw new AdcServiceNotAnsweringError(layout, false);
-      await this.#sleepOrAbort(WAIT_POLL_MS, signal);
+    }
+  }
+
+  /** `step`, unless `signal` aborts first (DaemonAbortedError); no listener is left behind. */
+  async #unlessAborted<T>(step: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) throw new DaemonAbortedError();
+    if (!signal) return await step;
+    let onAbort!: () => void;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(new DaemonAbortedError());
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([step, aborted]);
+    } finally {
+      signal.removeEventListener("abort", onAbort);
     }
   }
 
@@ -383,7 +429,7 @@ export class DaemonAttacher implements Attacher {
       signal?.addEventListener("abort", onAbort, { once: true });
     });
     try {
-      await Promise.race([this.#deps.sleep(ms), aborted]);
+      await Promise.race([this.#deps.sleep(ms, signal), aborted]);
     } finally {
       if (onAbort) signal?.removeEventListener("abort", onAbort);
     }

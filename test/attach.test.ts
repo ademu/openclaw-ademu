@@ -1,10 +1,11 @@
 // DaemonAttacher (AdemuMLS #712): the plugin attaches to an installed adc and never runs one. The
 // runtime probes once and never starts a service; an enrollment may ask the service manager to start
 // the INSTALLED user service, and only when the identity is that service's own enrollment socket.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PrivilegeError, type DaemonInfoResult, type UserServiceLayout, type UserServiceStartResult } from "@ademu/adc-control";
 import { resolveDaemonIdentity, type DaemonIdentity } from "../src/config.js";
 import {
+  abortableSleep,
   AdcServiceNotAnsweringError,
   AdcServiceNotInstalledError,
   AdcTooOldError,
@@ -50,7 +51,7 @@ function layout(dataDir = DATA): UserServiceLayout {
   };
 }
 
-type Answer = "absent" | "privilege" | DaemonInfoResult;
+type Answer = "absent" | "privilege" | "stall" | DaemonInfoResult;
 
 type World = {
   deps: AttachDeps;
@@ -64,6 +65,8 @@ type World = {
   probes: string[];
   sleeps: number[];
   clock: { t: number };
+  /** Connections whose daemon_info never answers, and how many of them were closed. */
+  stalled: { opened: number; closed: number };
   effects: string[];
 };
 
@@ -78,6 +81,7 @@ function world(over: { layout?: UserServiceLayout; platform?: string } = {}): Wo
     probes: [],
     sleeps: [],
     clock: { t: 0 },
+    stalled: { opened: 0, closed: 0 },
     effects: [],
     deps: undefined as unknown as AttachDeps,
   };
@@ -93,6 +97,15 @@ function world(over: { layout?: UserServiceLayout; platform?: string } = {}): Wo
       const a = seq.length > 1 ? seq.shift()! : seq[0]!;
       if (a === "absent") throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
       if (a === "privilege") throw new PrivilegeError("denied", "EACCES");
+      if (a === "stall") {
+        w.stalled.opened++;
+        return {
+          daemonInfo: () => new Promise<never>(() => {}),
+          close: async () => {
+            w.stalled.closed++;
+          },
+        };
+      }
       return { daemonInfo: async () => a, close: async () => {} };
     },
     controlSocketAnswers: async () => w.controlAnswers,
@@ -275,6 +288,64 @@ describe("setup role (the enrollment doors)", () => {
     await expect(new DaemonAttacher(w.deps).attach({ identity: userIdentity(), role: "setup", signal: ctl.signal })).rejects.toBeInstanceOf(
       DaemonAbortedError,
     );
+  });
+});
+
+describe("cancellation and the setup budget (Codex branch pass, #712 PR-b)", () => {
+  it("setup: a started service whose daemon_info stalls is bounded by the 20 s budget, and the late connection is closed", async () => {
+    const w = world();
+    w.answers.set(`${DATA}/adc-enroll.sock`, ["absent", "absent", "stall"]);
+    // The first pause jumps the clock to 50 ms before the deadline: the stalled probe then has 50 ms.
+    let jumped = false;
+    w.deps.sleep = async (ms) => {
+      w.sleeps.push(ms);
+      w.clock.t += jumped ? ms : SERVICE_START_WAIT_MS - 50;
+      jumped = true;
+    };
+    const t0 = Date.now();
+    const err = await new DaemonAttacher(w.deps).attach({ identity: userIdentity(), role: "setup" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AdcServiceNotAnsweringError);
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(w.stalled).toEqual({ opened: 1, closed: 1 });
+  });
+
+  it("setup: an abort during a stalled probe is an abort, not 'not answering'", async () => {
+    const w = world();
+    w.answers.set(`${DATA}/adc-enroll.sock`, ["absent", "stall"]);
+    const ctl = new AbortController();
+    const run = new DaemonAttacher(w.deps).attach({ identity: userIdentity(), role: "setup", signal: ctl.signal }).catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 10));
+    ctl.abort();
+    expect(await run).toBeInstanceOf(DaemonAbortedError);
+  });
+
+  it("runtime: an abort while the service-state lookup is pending ends the attach at once", async () => {
+    const w = world();
+    w.deps.userService.installed = () => new Promise(() => {}); // launchctl print-disabled hanging
+    const ctl = new AbortController();
+    const run = new DaemonAttacher(w.deps).attach({ identity: userIdentity(), role: "runtime", signal: ctl.signal }).catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 10));
+    ctl.abort();
+    expect(await run).toBeInstanceOf(DaemonAbortedError);
+  });
+
+  it("the real sleep resolves early on abort and leaves no timer behind", async () => {
+    vi.useFakeTimers();
+    try {
+      const ctl = new AbortController();
+      let done = false;
+      const p = abortableSleep(30_000, ctl.signal).then(() => (done = true));
+      expect(vi.getTimerCount()).toBe(1);
+      ctl.abort();
+      await p;
+      expect(done).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+      await abortableSleep(10, ctl.signal); // already aborted: resolves at once, arms nothing
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

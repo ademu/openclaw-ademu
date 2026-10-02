@@ -222,6 +222,41 @@ describe("startAccount: nothing listening waits in-task (#712 live leg)", () => 
     await run;
   });
 
+  it("a long outage leaves no abort listeners behind, and each wait is handed the abort signal (Codex branch pass, #712 PR-b)", async () => {
+    const w = world({ unreachable: "not_installed", connectError: enoent() });
+    const calls: Array<{ ms: number; signal: AbortSignal | undefined }> = [];
+    w.deps.sleep = (ms, signal) =>
+      new Promise((r) => {
+        calls.push({ ms, signal });
+        setTimeout(r, 1);
+      });
+    const sig = w.ac.signal;
+    let live = 0;
+    const add = sig.addEventListener.bind(sig);
+    const remove = sig.removeEventListener.bind(sig);
+    sig.addEventListener = ((type: string, fn: never, opts?: never) => {
+      if (type === "abort") live++;
+      add(type, fn, opts);
+    }) as typeof sig.addEventListener;
+    sig.removeEventListener = ((type: string, fn: never, opts?: never) => {
+      if (type === "abort") live--;
+      remove(type, fn, opts);
+    }) as typeof sig.removeEventListener;
+    const run = startAccount(w.ctx, w.deps);
+    await new Promise((r) => setTimeout(r, 30));
+    const early = { live, waits: w.logs.filter((l) => l.event === "daemon_absent_waiting").length };
+    await new Promise((r) => setTimeout(r, 90));
+    const late = { live, waits: w.logs.filter((l) => l.event === "daemon_absent_waiting").length };
+    expect(late.waits).toBeGreaterThan(early.waits + 5);
+    expect(late.live).toBeLessThanOrEqual(early.live);
+    // the wait's own sleeps (not the cleanup's bounded release race) carry the account's signal
+    const waitSleeps = calls.filter((c) => c.ms >= ABSENT_WAIT_INITIAL_MS && c.ms <= ABSENT_WAIT_MAX_MS && c.ms % ABSENT_WAIT_INITIAL_MS === 0);
+    expect(waitSleeps.length).toBe(late.waits);
+    expect(waitSleeps.every((c) => c.signal === sig)).toBe(true);
+    w.ac.abort();
+    await run;
+  });
+
   it("an abort during the wait resolves at once", async () => {
     const w = world({ unreachable: "not_installed", connectError: enoent() });
     const sleeps: number[] = [];

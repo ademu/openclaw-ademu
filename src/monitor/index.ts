@@ -53,7 +53,8 @@ export type StartAccountDeps = {
   settings: { typingKeepaliveMs: number; mentionAliases: readonly string[] };
   platform: string;
   now: () => number;
-  sleep: (ms: number) => Promise<void>;
+  /** Resolves after `ms`, or early on `signal` (a real one clears its timer). */
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   log: (event: string, fields?: Record<string, string | number | boolean>) => void;
 };
 
@@ -68,6 +69,24 @@ export type StartOutcome =
 function nothingListening(err: unknown): boolean {
   const code = (err as { code?: unknown } | null)?.code;
   return code === "ENOENT" || code === "ECONNREFUSED";
+}
+
+/**
+ * Wait `ms` unless `signal` aborts (true = waited the whole time). Leaves no listener behind, and the
+ * sleep is handed the signal so a real timer is cleared on abort — the in-task wait may run for hours.
+ */
+async function waitUnlessAborted(deps: StartAccountDeps, ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return false;
+  let onAbort!: () => void;
+  const aborted = new Promise<false>((resolve) => {
+    onAbort = () => resolve(false);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([deps.sleep(ms, signal).then(() => !signal.aborted), aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
 }
 
 function abortPromise(signal: AbortSignal): Promise<{ kind: "aborted" }> {
@@ -126,8 +145,7 @@ export async function startAccount(ctx: ChannelGatewayContext<ResolvedAdemuAccou
     if (outcome.kind === "restart") throw outcome.error;
     if (outcome.kind !== "absent") return;
     log("daemon_absent_waiting", { waitMs });
-    const waited = await Promise.race([deps.sleep(waitMs).then(() => "slept" as const), abortPromise(ctx.abortSignal)]);
-    if (waited !== "slept" || ctx.abortSignal.aborted) {
+    if (!(await waitUnlessAborted(deps, waitMs, ctx.abortSignal))) {
       setStatus({ running: false, connected: false, lifecycle: "stopped" });
       return;
     }

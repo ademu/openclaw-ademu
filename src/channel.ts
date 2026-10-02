@@ -9,6 +9,7 @@ import { ademuMessageActions } from "./actions.js";
 import type { ControlLike, EnrollmentLeaseDeps } from "./ceremony.js";
 import { CHANNEL_ID, resolveAdemuAccount, type ResolvedAdemuAccount } from "./config.js";
 import { clearAccountCredentials } from "./enroll-config.js";
+import { abortableSleep } from "./monitor/attach.js";
 import { startAccount, type StartAccountDeps } from "./monitor/index.js";
 import type { RuntimeChannelSurface } from "./monitor/ingress.js";
 import { realSessionDeps } from "./monitor/session.js";
@@ -35,7 +36,7 @@ export function realStartAccountDeps(): StartAccountDeps {
     settings: getPluginSettings(),
     platform: process.platform,
     now: () => Date.now(),
-    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    sleep: abortableSleep,
     log: hostLog,
   };
 }
