@@ -15,8 +15,9 @@
 //
 // The token therefore goes ONLY to the browser the plugin opens: the tool never puts the URL into a
 // tool result (the model is a courier nobody needs — the user is at the gateway machine), and the
-// route answers loopback clients only; everything else gets 404, indistinguishable from "no such
-// route". There is no setting that widens either. Nothing here logs: the URL, the token, the payload
+// route answers local clients only — a loopback peer that no proxy forwarded, addressed to a loopback
+// Host; everything else gets 404, indistinguishable from "no such route". There is no setting that
+// widens either. Nothing here logs: the URL, the token, the payload
 // and the words are secrets.
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -134,6 +135,26 @@ function isLoopbackAddress(addr: string | undefined): boolean {
   return isLoopbackHostname(addr.startsWith("::ffff:") ? addr.slice("::ffff:".length) : addr);
 }
 
+/** Headers a reverse proxy adds: a request carrying any of them did not come from a local browser. */
+const FORWARDING_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip", "via"] as const;
+
+/**
+ * A local client is a loopback socket peer that no proxy forwarded, addressed to a loopback Host (the
+ * page URL the plugin opened). A local reverse proxy makes remote clients look like 127.0.0.1, and a
+ * DNS-rebinding page arrives with its own Host.
+ */
+function isLocalClient(req: IncomingMessage, addr: string | undefined): boolean {
+  if (!isLoopbackAddress(addr)) return false;
+  if (FORWARDING_HEADERS.some((h) => req.headers[h] !== undefined)) return false;
+  const host = req.headers.host;
+  if (!host) return false;
+  try {
+    return isLoopbackHostname(new URL(`http://${host}`).hostname);
+  } catch {
+    return false;
+  }
+}
+
 const BASE_HEADERS = {
   "Cache-Control": "no-store",
   "Referrer-Policy": "no-referrer",
@@ -221,9 +242,9 @@ export function registerEnrollmentPage(api: OpenClawPluginApi, deps: EnrollmentP
       return true;
     }
 
-    // Exposure gate: loopback clients only; no configuration widens it.
+    // Exposure gate: local clients only (before any rate limit); no configuration widens it.
     const addr = clientAddr(req);
-    if (!isLoopbackAddress(addr)) {
+    if (!isLocalClient(req, addr)) {
       send(res, 404, "text/plain; charset=utf-8", "Not found");
       return true;
     }

@@ -69,6 +69,25 @@ describe("findRouteBinding", () => {
   });
 });
 
+describe("the wildcard account (\"*\") is its own key (Codex branch pass, #712 PR-a)", () => {
+  // The host's normalizeAccountId("*") is "default": keyed naively, removing the default account
+  // would delete the every-account route.
+  const DEFAULT_ROW = { agentId: "iris", match: { channel: "ademu", accountId: "default" } };
+
+  it("pruning the default account keeps the wildcard row (and the other accounts' rows)", () => {
+    const input = cfg({ bindings: [LEDGER_ALL, DEFAULT_ROW, IRIS] });
+    expect(bindings(pruneRouteBindings(input, { channel: "ademu", accountId: "default" }))).toEqual([LEDGER_ALL, IRIS]);
+    const onlyWildcard = cfg({ bindings: [LEDGER_ALL] });
+    expect(pruneRouteBindings(onlyWildcard, { channel: "ademu", accountId: "default" })).toBe(onlyWildcard);
+  });
+
+  it("the default account finds no binding in a wildcard row, and binding it is not a conflict", () => {
+    const input = cfg({ bindings: [LEDGER_ALL] });
+    expect(findRouteBinding(input, { channel: "ademu", accountId: "default" })).toBeUndefined();
+    expect(bindings(applyRouteBinding(input, { channel: "ademu", accountId: "default", agentId: "iris" }))).toEqual([LEDGER_ALL, DEFAULT_ROW]);
+  });
+});
+
 describe("pruneRouteBindings", () => {
   it("removes exactly the account-scoped row and keeps wildcard, peer-scoped, other-channel and non-route rows", () => {
     const out = pruneRouteBindings(cfg({ bindings: [IRIS, LEDGER_ALL, LEDGER_PEER, TELEGRAM, ACP] }), { channel: "ademu", accountId: "iris" });

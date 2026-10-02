@@ -4,7 +4,8 @@
 // `openclaw/plugin-sdk/*` subpath), so this module mirrors its account-scoped semantics with pure
 // functions over the whole config:
 //   - a route binding is every binding whose `type` is not "acp" (a missing type means route);
-//   - the match key is (channel, accountId || "default", peer, guildId, teamId, roles);
+//   - the match key is (channel, accountId || "default", peer, guildId, teamId, roles), with "*"
+//     (every account) a key of its own;
 //   - same key + same agent → nothing to do; same key + another agent → conflict, never overwrite;
 //   - non-route bindings are preserved after the routes, in host order.
 // Deliberate divergence: the host "upgrades" a same-agent channel-wide binding (no accountId) in place;
@@ -65,6 +66,9 @@ function isAccountScoped(match: Partial<RouteBindingMatch>, channel: string): bo
 
 function accountKey(accountId: string | undefined): string {
   const trimmed = accountId?.trim();
+  // The wildcard is its own key: the host's normalizeAccountId("*") is "default", and an
+  // every-account route must never read as (or be pruned with) the default account's.
+  if (trimmed === "*") return "*";
   return trimmed ? normalizeAccountId(trimmed) : "default";
 }
 

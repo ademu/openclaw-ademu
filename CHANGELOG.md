@@ -50,7 +50,8 @@ Tested with `@ademu/adc-bin` **0.3.0**.
 - The **enrollment page**: a browser page served on the gateway itself (`/plugins/ademu/enroll/<token>`)
   that shows the QR, then the four safety words with **Yes — the words match** and **No — they differ**.
   The tool opens it in the gateway machine's browser, so a TUI user (no image rendering there) still
-  only asks, scans, and clicks. The route answers loopback clients only.
+  only asks, scans, and clicks. The route answers local clients only: a loopback peer with a loopback
+  `Host` and no forwarding headers (a local reverse proxy or a DNS-rebinding page gets 404).
 
 ### Fixed
 

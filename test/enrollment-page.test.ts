@@ -60,6 +60,18 @@ const confirmPost = (url: string, headers: Record<string, string> = { "content-t
 
 const UNKNOWN = "0".repeat(40);
 
+/** A request with headers fetch will not let us set (Host). */
+function raw(url: string, headers: Record<string, string>, method = "GET"): Promise<{ status: number }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(url, { method, headers }, (res) => {
+      res.resume();
+      res.on("end", () => resolve({ status: res.statusCode ?? 0 }));
+    });
+    req.on("error", reject);
+    req.end(method === "POST" ? "{}" : undefined);
+  });
+}
+
 describe("enrollment page: the tool's start result", () => {
   it("opens a loopback page URL with a 40-hex token exactly once, and the result names neither the URL, the token, the QR nor the words", async () => {
     const w = world();
@@ -244,6 +256,32 @@ describe("enrollment page: the route", () => {
     // IPv4-mapped loopback counts as loopback
     const mapped = await serve(w, { clientAddr: () => "::ffff:127.0.0.1" });
     expect((await fetch(mapped.page(token))).status).toBe(200);
+  });
+
+  it("a loopback peer that is a local reverse proxy (forwarding headers) or a non-loopback Host gets 404, before any rate limit (Codex branch pass, #712 PR-a)", async () => {
+    const w = world();
+    const { token } = await started(w);
+    // One poll per window: a refused request must not spend it.
+    const one = new FixedWindowLimiter(60_000, 1);
+    const open = new FixedWindowLimiter(60_000, 1000);
+    const s = await serve(w, { limiters: { poll: one, confirm: open, unknownToken: open } });
+    const port = new URL(s.base).port;
+    for (const headers of [
+      { "x-forwarded-for": "203.0.113.9" },
+      { forwarded: "for=203.0.113.9;proto=https" },
+      { "x-real-ip": "203.0.113.9" },
+      { "x-forwarded-host": "gateway.example.com" },
+      { host: "gateway.example.com" },
+      { host: `rebind.example:${port}` },
+    ]) {
+      expect((await raw(s.page(token, "/state"), headers)).status, JSON.stringify(headers)).toBe(404);
+      expect((await raw(s.page(token, "/confirm"), { ...headers, "content-type": "application/json" }, "POST")).status).toBe(404);
+    }
+    expect(w.control.calls.filter((c) => c.op === "confirm_words")).toEqual([]);
+    // the one poll is still there for the human's own browser (a loopback Host, no forwarding)
+    expect((await raw(s.page(token, "/state"), { host: `localhost:${port}` })).status).toBe(200);
+    const s2 = await serve(w);
+    expect((await raw(s2.page(token, "/state"), { host: `[::1]:${new URL(s2.base).port}` })).status).toBe(200);
   });
 
   it("rate limits answer 429 (poll, confirm, and unknown-token guessing)", async () => {
