@@ -30,8 +30,8 @@ export function remedyFor(err: unknown, ctx: OperatorContext = {}): string | und
   }
   if (err instanceof AdcTooOldError) return strings.status.adcTooOld;
   if (err instanceof DaemonUnreachableError) return err.message; // our own copy
-  // The hardened host: the enrollment socket refused this uid, or the client refused to spawn beside a
-  // system install. The operator ceremony is the fallback (M20 d); the client's message is never shown.
+  // The hardened host: the enrollment socket refused this uid. The operator ceremony is the fallback
+  // (M20 d); the client's message is never shown.
   if (err instanceof PrivilegeError) return strings.enroll.operatorInstructions(operatorCeremony(ctx));
   // The enrollment socket is absent or silent (a system daemon that vanished after detection, a
   // foreign user-scope daemon that is down): the operator ceremony is the fallback (M20 d).

@@ -145,19 +145,18 @@ export type DaemonIdentity = {
   dataDir: string;
   /** Canonical control socket path (identity data only — the plugin never opens it). */
   controlSocket: string;
-  /** Session socket we inject on owned spawns (`<dataDir>/adc-session.sock`). */
+  /** Canonical session socket (the fallback when no reachable daemon reports its own). */
   sessionSocket: string;
-  /** Enrollment socket we inject on owned spawns and dial for the ceremony (`<dataDir>/adc-enroll.sock`). */
+  /** Canonical enrollment socket: the probe and the ceremony dial it. */
   enrollSocket: string;
-  /** Raw values as configured/derived (what we pass to the daemon). */
+  /** Raw values as configured, or from the installed service's layout / the system layout. */
   raw: { dataDir: string; controlSocket: string; sessionSocket: string; enrollSocket: string };
   explicit: { dataDir: boolean; socketPath: boolean; enrollSocketPath: boolean };
   /**
-   * `system`: the identity IS the system layout and the daemon is foreign (attach-only, never spawned
-   * beside — the coexistence gap, AdemuMLS#642) — because the account was enrolled there, or because
-   * nothing is recorded or configured and a system-scope ADC daemon is installed on this host
-   * (`detectSystemInstall`: a root-owned regular /etc/adc/config.toml AND a socket at
-   * /run/adc/adc-enroll.sock). `user`: everything else.
+   * `system`: the identity IS the system layout (attach-only, never started — AdemuMLS #712) — because
+   * the account was enrolled there, or because nothing is recorded or configured and a system-scope
+   * ADC daemon is installed on this host (`detectSystemInstall`: the platform's root-owned config AND
+   * its enrollment socket). `user`: everything else — by default the installed user service.
    */
   scope: DaemonScope;
   scopeSource: ScopeSource;

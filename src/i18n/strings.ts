@@ -39,17 +39,8 @@ export const strings = {
     systemDaemonDown: "This host's system-wide Ademú device host is not running. Ask the operator to start it: sudo adc --system service start.",
     adcTooOld: "The Ademú device host (adc) is too old for this plugin. Upgrade it: re-run the adc installer (it restarts the service).",
     sessionSocketMoved: "The Ademú device host moved its session socket; reconnecting.",
-    daemonUnreachable: (logPath: string | undefined) =>
-      `The Ademú device host is not reachable. Check channels.ademu.server${logPath ? ` and the daemon log at ${logPath}` : ""}.`,
-    bundledDaemonTooOld: (bundled: string, min: string) =>
-      `The bundled Ademú device host (adc ${bundled}) predates the enrollment socket (adc ${min}); update the plugin, or point channels.ademu at a current adc daemon.`,
-    systemInstallBeside: (explicitKeys: string[]) =>
-      explicitKeys.length
-        ? `A system-wide Ademú device host is installed on this host, and the plugin never starts its own beside it; this account names its own (channels.ademu ${explicitKeys.join(", ")}). To use the system one, remove ${explicitKeys.length > 1 ? "those keys" : "that key"} (root or this account), then enroll the agent again: openclaw channels add --channel ademu.`
-        : "This agent was enrolled on this user's own Ademú device host; a system-wide one has since been installed, and the plugin never starts its own beside it. Enroll the agent again, on the system device host: openclaw channels add --channel ademu.",
     privilegeDenied:
-      "This host's Ademú device host refused this user: permission denied on its enrollment socket, or a system-wide device host is installed and the plugin was pointed at a data dir it may not run one in. Ask the operator to grant access, or point channels.ademu at a device host this user may use.",
-    daemonLost: "The Ademú device host exited; restarting.",
+      "This host's Ademú device host refused this user: permission denied on its enrollment socket. Ask the operator to grant access, or point channels.ademu at a device host this user may use.",
     ingressHalted: "Inbound processing halted before a message was adopted; restarting to replay.",
     securityNotice: "An Ademú security notice was raised for a conversation; see the room.",
     configCollision: (detail: string) => detail,
@@ -67,7 +58,7 @@ export const strings = {
     configuredLabel: "enrolled",
     unconfiguredLabel: "not enrolled",
     configuredHint: "An agent is enrolled on Ademú; add another account to enroll a second agent.",
-    startingHost: "Starting the Ademú device host…",
+    startingHost: "Connecting to the Ademú device host…",
     waitingEnrollment: "Waiting for your phone to finish enrollment…",
     mintingToken: "Issuing the device token…",
     modeQuestion: "What do you want to do?",
@@ -96,10 +87,6 @@ export const strings = {
     cancelled: "Enrollment cancelled. Nothing was written. Run `openclaw channels add --channel ademu` to try again.",
     notEnrolledDevice: "That agent is not enrolled yet. Finish enrollment from the Ademú app first.",
     deviceAttachedRefused: "Another program is attached to this agent; connection was not forced.",
-    daemonUnreachable: (logPath: string | undefined) =>
-      `The Ademú device host could not start or answer. Check the Ademú server endpoints in channels.ademu.server${logPath ? ` and the daemon log at ${logPath}` : ""}.`,
-    notInstalled:
-      "The Ademú device host binary is not available for this platform. Install the plugin from npm with optional dependencies enabled, or point channels.ademu.dataDir (and enrollSocketPath, if its enrollment socket is elsewhere) at a running adc daemon; a system-wide adc install on this host is used by itself.",
     // ----- the operator's path (hardened host, lost mint, orphaned token; spec M20 b–d) -----
     operatorSteps: (prefix: string, agentName: string, label: string) =>
       [
@@ -111,14 +98,14 @@ export const strings = {
         "  3. openclaw channels add --channel ademu → “I have a device token” → paste the token",
       ].join("\n"),
     operatorInstructions: (steps: string) =>
-      `Enrollment is not possible from this account on this host: the Ademú device host is a system install and its enrollment socket refused this user, or the plugin was pointed at a data dir it may not run a device host in. Nothing was created.\n\n${steps}`,
+      `Enrollment is not possible from this account on this host: the Ademú device host is a system install and its enrollment socket refused this user. Nothing was created.\n\n${steps}`,
     quotaFull: (prefix: string, steps: string) =>
       `The Ademú device host's enrollment budget is full (too many unfinished enrollments on this host). Nothing was created. Cancel stale ones (\`${prefix} agent list\`, then \`${prefix} agent cancel <device_id>\`) or wait for them to expire, then try again.\n\n${steps}`,
     mintLost: (command: string) =>
       `Enrollment reached the end, but the device token could not be issued (its reply was lost, or the label is already taken) and that cannot be retried from here. Nothing was written. Mint a fresh token at the CLI:\n\n  ${command}\n\nthen run \`openclaw channels add --channel ademu\` and choose “I have a device token”.`,
     orphanedToken: (command: string) => `A device token was issued but the configuration could not be written, so that token is orphaned. Revoke it:\n\n  ${command}`,
     enrollSocketUnreachable: (steps: string) =>
-      `The Ademú device host did not answer on its enrollment socket. If it is starting, try again in a moment; if it is not running, start it (or check channels.ademu.dataDir / enrollSocketPath). Nothing was created.\n\n${steps}`,
+      `The Ademú device host did not answer on its enrollment socket. If it is starting, try again in a moment; if it is not running, start it (~/.local/bin/adc service start, or check channels.ademu.dataDir / enrollSocketPath). Nothing was created.\n\n${steps}`,
     toolCommitFailed: "The enrollment finished on the device host, but OpenClaw could not write the configuration; nothing was saved.",
     authorityExpired: "Ademú enrollment authority is no longer active.",
     toolDescription:
