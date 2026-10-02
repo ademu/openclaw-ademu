@@ -40,7 +40,9 @@ Tested with `@ademu/adc-bin` **0.3.0**.
   system install: `DaemonScopeError` (`blocked`) names the keys to remove, or says the agent was enrolled
   on this user's own device host, and to enroll it again — the doors ignore the recorded scope, so a
   re-enrollment lands where the host points now. A daemon still running at those paths is attached as
-  before. Accounts enrolled before the key keep the detector rule.
+  before and is not upgraded (a reachable one is kept on its version; a pre-0.5.0 one is refused
+  without being stopped); a lost ownership record over the plugin's own data dir is refused the same
+  way instead of retrying forever. Accounts enrolled before the key keep the detector rule.
 - **"I have a device token" replaces "Connect an already-enrolled agent".** The wizard asks the mode
   first; the token door takes an operator-minted token (masked input), needs no enrollment connection,
   checks the token over the session socket (`get_self`) and writes the account. `list_devices`,

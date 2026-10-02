@@ -1354,6 +1354,58 @@ describe("Phase B: the enrollment socket, the hardened host (spec A38 / M20)", (
     await lease.release();
   });
 
+  const recordedUser = (dir: string): DaemonIdentity => ({ ...identityFor(dir), explicit: { dataDir: false, socketPath: false, enrollSocketPath: false }, scopeSource: "enrolled" });
+
+  it("Codex scope #1: a reachable upgrade beside a system install is skipped — the running, verified daemon is kept (owned, old version), never killed, no spawn", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    w.bundledVersion = "0.5.1";
+    const old = w.addDaemon(DIR, { version: "0.5.0" });
+    w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
+    w.store.cas({ dataDir: DIR, from: ["claimed"], to: "starting", bumpGeneration: true });
+    w.store.cas({ dataDir: DIR, from: ["starting"], to: "bound", expectedGeneration: 1, set: { daemonPid: old.pid, daemonPidStartedAt: `start-${old.pid}`, daemonStartedAtMs: old.info.started_at_ms, adcVersion: "0.5.0" } });
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: recordedUser(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("owned");
+    expect(lease.info.daemonVersion).toBe("0.5.0");
+    expect(w.kills).toEqual([]);
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)!).toMatchObject({ state: "bound", generation: 1 });
+    expect(w.logs.some((l) => l.event === "daemon_upgrade_skipped_system_install")).toBe(true);
+    expect(w.logs.some((l) => l.event === "daemon_upgrading")).toBe(false);
+  });
+
+  it("Codex scope #1: a pre-0.5.0 owned daemon beside a system install — DaemonScopeError BEFORE the stop: never killed, no spawn, the row untouched", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    w.bundledVersion = "0.5.0";
+    const old = w.addDaemon(DIR, { version: "0.3.0", enrollSocket: false });
+    bindLegacy(w, old, "0.3.0");
+    const before = w.store.getOwnership(DIR)!;
+    const m = new DaemonManager(w.deps());
+    await expect(m.acquire({ identity: recordedUser(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonScopeError);
+    expect(w.kills).toEqual([]);
+    expect(w.processes.get(old.pid)!.alive).toBe(true);
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)!).toMatchObject({ state: before.state, generation: before.generation });
+    expect(w.logs.some((l) => l.event === "daemon_system_install_beside" && l.fields?.at === "legacy-upgrade")).toBe(true);
+  });
+
+  it("Codex scope #2: no row, a non-empty data dir, nothing answering, beside a system install — the recorded user scope is refused (never an endless retry); an explicit key keeps the unreachable foreign lease (the operator's own daemon may come back)", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    w.dirs.set(DIR, "nonempty");
+    const m = new DaemonManager(w.deps());
+    const err = await m.acquire({ identity: recordedUser(DIR), server: SERVER, role: "runtime" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonScopeError);
+    expect((err as Error).message).toContain("enrolled on this user's own Ademú device host");
+    expect(w.store.getOwnership(DIR)).toBeUndefined();
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("foreign");
+    expect(w.spawns).toHaveLength(0);
+    await lease.release();
+  });
+
   it("a detected user scope whose host gains a system install mid-flight: the client's own refusal inside ensureDaemon is the backstop (PrivilegeError, claim deleted)", async () => {
     const w = new World();
     w.systemInstall = true;

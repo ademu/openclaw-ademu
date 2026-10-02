@@ -573,6 +573,22 @@ export class DaemonManager {
    * the enrollment socket existed (< 0.5.0). Runtime only; the same fence and the same kill
    * authority as a reachable upgrade. A same-version silent daemon is never touched (it may be slow).
    */
+  /**
+   * A user-scope identity held in place by an explicit key or the recorded scope, on a host where a
+   * system-scope daemon is installed: no daemon may be started for it (AdemuMLS#642). Checked before
+   * every spawn AND before an upgrade claims its stop, so a running daemon is never killed for a
+   * replacement that could not be started. A `detected` user scope is not checked here — the detector
+   * said no a moment ago, and the client's own detector inside ensureDaemon is the backstop for that race.
+   */
+  #spawnForbiddenBesideSystem(identity: DaemonIdentity): boolean {
+    return identity.scope === "user" && identity.scopeSource !== "detected" && this.#deps.detectSystemInstall();
+  }
+
+  #scopeRefusal(identity: DaemonIdentity, at: string): DaemonScopeError {
+    this.#deps.log("daemon_system_install_beside", { dataDir: identity.dataDir, scopeSource: identity.scopeSource, at });
+    return new DaemonScopeError(strings.status.systemInstallBeside(explicitKeys(identity)));
+  }
+
   #legacyUpgradeCandidate(params: AcquireParams, row: OwnershipRow): boolean {
     if (params.role !== "runtime") return false;
     if (!this.#daemonProcessVerified(row)) return false;
@@ -594,7 +610,14 @@ export class DaemonManager {
       if (!row) {
         const probe = await this.#probe(identity.raw.enrollSocket, identity, params.signal);
         if (probe) return this.#foreignLease(params, holderId, probe.info);
-        if (!this.#deps.isDirAbsentOrEmpty(identity.raw.dataDir)) return this.#foreignLease(params, holderId, undefined);
+        if (!this.#deps.isDirAbsentOrEmpty(identity.raw.dataDir)) {
+          // The plugin's own data dir (the recorded user scope), nothing answering, no ownership row (the
+          // record was lost): beside a system install no daemon will ever be started here, so refuse with
+          // the re-enrollment copy instead of an unreachable lease that retries forever. An explicit key
+          // names the operator's own daemon, which the plugin never starts either way: it may come back.
+          if (identity.scopeSource === "enrolled" && this.#spawnForbiddenBesideSystem(identity)) throw this.#scopeRefusal(identity, "unreachable");
+          return this.#foreignLease(params, holderId, undefined);
+        }
         // An EXISTING empty dir must be ours and private before we put a daemon's state in it
         // (ensureDaemon only applies 0700 to a dir it creates): symlink / other owner → refuse.
         if (this.#deps.secureEmptyDir(identity.raw.dataDir) === "unsafe") {
@@ -638,6 +661,9 @@ export class DaemonManager {
           // Unreachable on the enrollment socket. A verified pre-Phase-B daemon of ours (recorded
           // version ≠ bundled) has no such socket: replace it through the fence, by pid.
           if (this.#legacyUpgradeCandidate(params, row)) {
+            // Its replacement could never be started beside a system install: refuse BEFORE the stop and
+            // leave the old daemon alone (it cannot serve this plugin, but it is not ours to kill for nothing).
+            if (this.#spawnForbiddenBesideSystem(identity)) throw this.#scopeRefusal(identity, "legacy-upgrade");
             const replaced = await this.#stopAndRespawn(params, holderId, row, "upgrade: the device host predates the enrollment socket");
             if ("mode" in replaced) return replaced;
             if (replaced.kind === "failed") {
@@ -791,13 +817,10 @@ export class DaemonManager {
     // stop and forbids a second spawn beside it). Without a child the origin rule applies.
     const abandon = (to: "stopped" | "stale", reason: string) =>
       child ? this.#abandonStarting(identity, starting, "existing", "stale", reason) : this.#abandonStarting(identity, starting, origin, to, reason);
-    // A user-scope identity held in place by an explicit key or the recorded scope, with a system install
-    // on this host: never spawn beside it. A `detected` user scope is not checked here — the detector said
-    // no a moment ago, and the client's own detector inside ensureDaemon is the backstop for that race.
-    if (identity.scope === "user" && identity.scopeSource !== "detected" && this.#deps.detectSystemInstall()) {
+    // Never spawn beside a system install (the same check runs before an upgrade claims its stop).
+    if (this.#spawnForbiddenBesideSystem(identity)) {
       abandon("stopped", "a system-scope daemon is installed; never spawn beside it");
-      this.#deps.log("daemon_system_install_beside", { dataDir: identity.dataDir, scopeSource: identity.scopeSource });
-      throw new DaemonScopeError(strings.status.systemInstallBeside(explicitKeys(identity)));
+      throw this.#scopeRefusal(identity, "spawn");
     }
     // The bundled daemon must bind the enrollment socket (the only socket this broker ever probes):
     // an older bundle would spawn a child that can never answer here and leave every row `stale`.
@@ -1012,7 +1035,12 @@ export class DaemonManager {
     // Upgrade (runtime only, through the fence): the bound daemon's version ≠ the bundled one.
     if (role === "runtime") {
       const running = parseAdcVersion(info.version);
-      if (running && running !== this.#deps.bundledVersion) {
+      const outdated = Boolean(running) && running !== this.#deps.bundledVersion;
+      if (outdated && this.#spawnForbiddenBesideSystem(identity)) {
+        // Its replacement could never be started beside a system install: keep the running, verified
+        // instance (as a deferred upgrade does) rather than stop it and refuse.
+        this.#deps.log("daemon_upgrade_skipped_system_install", { dataDir: identity.dataDir, scopeSource: identity.scopeSource });
+      } else if (outdated) {
         const upgraded = await this.#tryUpgrade(params, holderId, row);
         if ("mode" in upgraded) return upgraded;
         if (upgraded.kind === "failed") {

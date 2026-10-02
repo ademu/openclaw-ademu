@@ -135,8 +135,9 @@ account), because a token belongs to the device host that minted it. An account 
 host whatever the host looks like later: an account enrolled at system scope keeps waiting for the
 system daemon while it is down (or not up yet at boot) instead of starting a private one, and an
 account enrolled on this user's own device host is not moved onto a system install added afterwards.
-If its own device host is not running then, the plugin will not start it beside the system one and
-says so (`blocked`); to move the agent, enroll it again (`openclaw channels add --channel ademu`) —
+If its own device host is still running, the plugin keeps using it (and skips upgrading it, since it
+could not start the replacement); once it is not running, the plugin will not start it beside the
+system one and says so (`blocked`); to move the agent, enroll it again (`openclaw channels add --channel ademu`) —
 both enrollment doors resolve the host as it is now and record the new scope. Accounts enrolled before
 the key existed follow the detection above.
 

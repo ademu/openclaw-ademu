@@ -313,8 +313,14 @@ the broker, a user-scope identity whose source is `explicit` or `enrolled` is ch
 client's detector before any spawn: on a system install it is never spawned beside it —
 `DaemonScopeError`, `blocked`, our own copy naming the keys to remove or the re-enrollment (the client's
 own refusal inside `ensureDaemon` is a `PrivilegeError` with the same code as a plain EACCES, so it
-cannot say why). A daemon already answering at those paths is attached as before; a `detected` user
-scope keeps the client's refusal as the backstop for a system install that appears mid-flight.
+cannot say why). The same check runs before an upgrade claims its stop (Codex scope review #1): a
+reachable outdated daemon is kept on its version, a pre-0.5.0 one is refused without being stopped —
+a running daemon is never killed for a replacement that could not start. With no ownership row, a
+non-empty data dir and nothing answering, the recorded user scope is refused too (#2: the plugin's own
+dir after a lost record, which would otherwise retry forever); an explicit key there keeps the
+unreachable foreign lease, since the operator's own daemon may come back. A daemon already answering
+at those paths is attached as before; a `detected` user scope keeps the client's refusal as the
+backstop for a system install that appears mid-flight.
 
 **Default isolation (approval rider R2).** Default `dataDir` = `<OPENCLAW_STATE_DIR>/ademu/adc`,
 control socket `<dataDir>/adc.sock`, session socket `<dataDir>/adc-session.sock`, enrollment socket
