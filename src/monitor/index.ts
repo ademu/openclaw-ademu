@@ -1,43 +1,29 @@
-// startAccount (plan T10): compose daemon lease → session → ingress loop for ONE account, publish
-// status, and tear down under one absolute deadline (K3: the host abandons stop at 5 s; we finish in
-// ≤ 4500 ms by construction, with a 2500 ms tail reserved for the daemon release).
+// startAccount (plan T10): compose daemon attachment → session → ingress loop for ONE account,
+// publish status, and tear down under one absolute deadline (K3: the host abandons stop at 5 s; we
+// finish in ≤ 4500 ms by construction, with a 2500 ms tail reserved for the release).
 //
 // Outcome contract with the gateway supervisor: a normal return = "done" (abort, or a user-actionable
-// `blocked` state that a restart cannot fix); a throw = "restart me" (`recovering`: daemon lost,
-// ingress halted, transient failures). Foreign daemons never reject on daemon loss (the client's own
-// reconnect loop probes; status stays `recovering`).
+// `blocked` state that a restart cannot fix); a throw = "restart me" (`recovering`: device host not
+// answering, ingress halted, transient failures). The plugin never runs a device host (AdemuMLS #712):
+// the runtime attaches once and never starts one — the gateway's restart loop and the client's own
+// reconnect loop bring the account back when adc is up.
 import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
-import { CHANNEL_ID, inspectAdemuAccount, listAdemuAccountIds, type ResolvedAdemuAccount } from "../config.js";
+import { CHANNEL_ID, type ResolvedAdemuAccount } from "../config.js";
 import { classifyConversation, type ConversationKind } from "../grammar.js";
 import { strings } from "../i18n/strings.js";
 import { registerLiveAccount, sendAdemuText, unregisterLiveAccount, type LiveAccount } from "../outbound.js";
 import { createAdemuIngressResolver } from "../security.js";
-import { blockedPatch, classifyError, patchFor, readyPatch, recoveringPatch, type StatusPatch } from "../status.js";
+import { blockedPatch, classifyError, patchFor, readyPatch, recoveringPatch, unreachableCopy, type StatusPatch } from "../status.js";
 import type { AdemuStore } from "../store.js";
-import { DaemonAbortedError, DaemonLostError, type DaemonManager, type Lease } from "./daemon.js";
+import { DaemonAbortedError, SessionSocketMovedError, type Attacher, type Attachment } from "./attach.js";
 import { startIngress, type IngressHandle, type RuntimeChannelSurface } from "./ingress.js";
 import { openSession, type Session, type SessionDeps } from "./session.js";
 
 export const STOP_DEADLINE_MS = 4500;
 export const RELEASE_TAIL_MS = 2500;
 export const DRAIN_CAP_MS = 2000;
-/** Owned daemon: the 5th consecutive reconnect attempt means our daemon is wedged → restart it. */
-export const OWNED_RETRY_LIMIT = 5;
-
-const sweptManagers = new WeakSet<DaemonManager>();
-
-/** Once per process (per manager): stop never-published setup daemons older than an hour. */
-async function sweepPendingOnce(deps: StartAccountDeps, cfg: ChannelGatewayContext["cfg"]): Promise<void> {
-  if (sweptManagers.has(deps.daemons)) return;
-  sweptManagers.add(deps.daemons);
-  try {
-    const referenced = new Set(listAdemuAccountIds(cfg).map((id) => inspectAdemuAccount(cfg, id).daemon.dataDir));
-    const swept = await deps.daemons.sweepPendingPublications((dataDir) => referenced.has(dataDir));
-    if (swept.length) deps.log("pending_publications_swept", { count: swept.length });
-  } catch (err) {
-    deps.log("pending_publication_sweep_failed", { errorClass: err instanceof Error ? err.name : typeof err });
-  }
-}
+/** After this many consecutive reconnect attempts the session path is re-resolved (it may have moved). */
+export const REPROBE_AFTER_ATTEMPTS = 5;
 
 /** Race a cleanup step against the remaining budget; a slow step is logged and abandoned, never awaited past the deadline. */
 async function bounded(deps: StartAccountDeps, label: string, step: Promise<unknown>, budgetMs: number, log: StartAccountDeps["log"]): Promise<void> {
@@ -53,7 +39,7 @@ async function bounded(deps: StartAccountDeps, label: string, step: Promise<unkn
 
 export type StartAccountDeps = {
   store: AdemuStore;
-  daemons: DaemonManager;
+  attacher: Attacher;
   session: SessionDeps;
   runtime: RuntimeChannelSurface;
   settings: { typingKeepaliveMs: number; mentionAliases: readonly string[] };
@@ -100,29 +86,28 @@ export async function startAccount(ctx: ChannelGatewayContext<ResolvedAdemuAccou
     return;
   }
 
-  // --- daemon lease -------------------------------------------------------------------------
-  await sweepPendingOnce(deps, ctx.cfg);
-  let lease: Lease;
+  // --- daemon attachment ------------------------------------------------------------------------
+  let attachment: Attachment;
   try {
-    lease = await deps.daemons.acquire({ identity: account.daemon, server: account.server, role: "runtime", signal: ctx.abortSignal });
+    attachment = await deps.attacher.attach({ identity: account.daemon, role: "runtime", signal: ctx.abortSignal });
   } catch (err) {
     if (err instanceof DaemonAbortedError || ctx.abortSignal.aborted) return;
     const c = classifyError(err);
     setStatus(patchFor(err));
-    log("daemon_acquire_failed", { errorClass: err instanceof Error ? err.name : typeof err, kind: c.kind });
+    log("daemon_attach_failed", { errorClass: err instanceof Error ? err.name : typeof err, kind: c.kind });
     if (c.kind === "blocked") return;
     throw err;
   }
-  log("daemon_acquired", { mode: lease.mode });
+  log("daemon_attached", { reachable: !attachment.unreachable });
 
-  const outcome = await runWithLease(ctx, deps, lease, setStatus, log);
+  const outcome = await runWithLease(ctx, deps, attachment, setStatus, log);
   if (outcome.kind === "restart") throw outcome.error;
 }
 
 async function runWithLease(
   ctx: ChannelGatewayContext<ResolvedAdemuAccount>,
   deps: StartAccountDeps,
-  lease: Lease,
+  lease: Attachment,
   setStatus: (patch: StatusPatch) => void,
   log: StartAccountDeps["log"],
 ): Promise<StartOutcome> {
@@ -135,8 +120,10 @@ async function runWithLease(
 
   try {
     // --- session ---------------------------------------------------------------------------
-    // Owned daemon: the 5th consecutive retry rejects the lifetime with DaemonLostError (restart →
-    // respawn). Foreign: retries are unbounded (`recovering` while the client's own loop probes).
+    // Retries are unbounded (`recovering` while the client's own loop probes). After
+    // REPROBE_AFTER_ATTEMPTS the session path is re-resolved once per streak: a device host that came
+    // back on a different session socket (an adc upgrade that moved it) ends the lifetime → restart →
+    // a fresh attachment on the new path.
     let retriesExceeded!: (err: Error) => void;
     const retriesExceededP = new Promise<never>((_, reject) => {
       retriesExceeded = reject;
@@ -150,8 +137,13 @@ async function runWithLease(
         deps: deps.session,
         onRetry: (info) => {
           setStatus(recoveringPatch(strings.status.reconnecting(info.attempt)));
-          if (lease.mode === "owned" && info.attempt >= OWNED_RETRY_LIMIT) {
-            retriesExceeded(new DaemonLostError(`the Ademú device host did not answer ${info.attempt} reconnect attempts`));
+          if (info.attempt === REPROBE_AFTER_ATTEMPTS) {
+            void deps.attacher
+              .resolveSessionSocket(account.daemon, ctx.abortSignal)
+              .then((path) => {
+                if (path !== lease.info.sessionSocketPath) retriesExceeded(new SessionSocketMovedError());
+              })
+              .catch(() => {});
           }
         },
         onReconnected: () => {
@@ -162,7 +154,9 @@ async function runWithLease(
     } catch (err) {
       if (ctx.abortSignal.aborted) return outcome;
       const c = classifyError(err);
-      setStatus(patchFor(err));
+      // Nothing answered at attach time: name WHY (not installed / disabled / not running / system
+      // down) instead of the connect error's class — the restart loop retries.
+      setStatus(lease.unreachable && c.kind === "recovering" ? recoveringPatch(unreachableCopy(lease.unreachable)) : patchFor(err));
       log("session_open_failed", { errorClass: err instanceof Error ? err.name : typeof err, kind: c.kind });
       outcome = c.kind === "blocked" ? { kind: "blocked", lastError: c.lastError } : { kind: "restart", lastError: c.lastError, error: err };
       return outcome;
@@ -204,13 +198,12 @@ async function runWithLease(
       },
     });
     setStatus(readyPatch());
-    log("account_ready", { mode: lease.mode });
+    log("account_ready", {});
 
     // --- run until something ends it ---------------------------------------------------------
     const ended = await Promise.race<StartOutcome>([
       abortPromise(ctx.abortSignal),
       ingress.lifetime.catch((err: unknown) => toOutcome(err)),
-      lease.lost.catch((err: unknown) => toOutcome(err)),
       retriesExceededP.catch((err: unknown) => toOutcome(err)),
     ]);
     outcome = ended;
@@ -237,7 +230,7 @@ async function runWithLease(
           if (session) await bounded(deps, "session_close", session.close(), Math.max(0, deadline - deps.now() - RELEASE_TAIL_MS), log);
         }
       } finally {
-        // The reserved tail: whatever is left, but at least the release cap the manager itself honours.
+        // The reserved tail: whatever is left, but at least the release cap.
         await bounded(deps, "daemon_release", lease.release(), Math.max(RELEASE_TAIL_MS, deadline - deps.now()), log);
       }
     } finally {

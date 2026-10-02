@@ -1,15 +1,25 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { applyPluginSettings, bundledAdcVersion, DEFAULT_SETTINGS } from "../src/runtime.js";
-
-const ROOT = new URL("..", import.meta.url).pathname;
+import { resolveDaemonIdentity } from "../src/config.js";
+import { DaemonAttacher } from "../src/monitor/attach.js";
+import { applyPluginSettings, DEFAULT_SETTINGS, getDaemonAttacher, setSharedForTests } from "../src/runtime.js";
 
 describe("runtime", () => {
-  it("bundledAdcVersion reads the installed @ademu/adc-bin version and it equals the exact pin", () => {
-    const pkg = JSON.parse(readFileSync(`${ROOT}/package.json`, "utf8")) as { dependencies: Record<string, string> };
-    const v = bundledAdcVersion();
-    expect(v).toMatch(/^\d+\.\d+\.\d+$/);
-    expect(v).toBe(pkg.dependencies["@ademu/adc-bin"]);
+  it("#712: the PRODUCTION attacher is built from real deps and attaches the runtime to a host that is not there without starting anything", async () => {
+    setSharedForTests(undefined);
+    const attacher = getDaemonAttacher(() => {});
+    expect(attacher).toBeInstanceOf(DaemonAttacher);
+    expect(getDaemonAttacher(() => {})).toBe(attacher);
+    // An explicit data dir that is no installed service's: real connectEnroll gets ENOENT, the runtime
+    // attaches on the configured session path and names it as not running — no service manager call.
+    const dataDir = join(mkdtempSync(join(tmpdir(), "ademu-attach-")), "adc");
+    const identity = resolveDaemonIdentity({ dataDir }, process.env, () => false);
+    const a = await attacher.attach({ identity, role: "runtime" });
+    expect(a.info.sessionSocketPath).toBe(join(dataDir, "adc-session.sock"));
+    expect(a.unreachable).toBe("not_running");
+    setSharedForTests(undefined);
   });
 
   it("plugin settings clamp to the manifest schema and default sanely", () => {

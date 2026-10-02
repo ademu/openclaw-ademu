@@ -1,14 +1,10 @@
 // Process-wide runtime slots (plan T10/T14): the host-injected PluginRuntime, the plugin's own
-// manifest config values, and the lazily opened SQLite store + DaemonManager shared by every account.
-import { existsSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+// manifest config values, and the lazily opened SQLite store + DaemonAttacher shared by every account.
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
 import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
 import { CHANNEL_ID } from "./config.js";
-import { DaemonManager, realDaemonDeps } from "./monitor/daemon.js";
+import { DaemonAttacher, realAttachDeps } from "./monitor/attach.js";
 import { AdemuStore } from "./store.js";
 
 const runtimeStore = createPluginRuntimeStore<PluginRuntime>({
@@ -54,61 +50,22 @@ export function getPluginSettings(): AdemuPluginSettings {
   return settings;
 }
 
-function nearestPackageJson(startDir: string, accept: (pkg: Record<string, unknown>) => string | undefined): string | undefined {
-  let dir = startDir;
-  for (let i = 0; i < 8; i++) {
-    const candidate = join(dir, "package.json");
-    if (existsSync(candidate)) {
-      const found = accept(JSON.parse(readFileSync(candidate, "utf8")) as Record<string, unknown>);
-      if (found) return found;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return undefined;
-}
-
-/**
- * The exact daemon version this plugin bundles. `@ademu/adc-bin` does not export its package.json
- * (ERR_PACKAGE_PATH_NOT_EXPORTED at register time — caught by the headless acceptance), so walk up
- * from the resolved entry file to the package's own package.json; fall back to this plugin's exact
- * dependency pin (the versioning gate asserts it is exact).
- */
-export function bundledAdcVersion(): string {
-  const require = createRequire(import.meta.url);
-  let fromInstalled: string | undefined;
-  try {
-    fromInstalled = nearestPackageJson(dirname(require.resolve("@ademu/adc-bin")), (pkg) =>
-      pkg.name === "@ademu/adc-bin" && typeof pkg.version === "string" ? pkg.version : undefined,
-    );
-  } catch {
-    fromInstalled = undefined;
-  }
-  if (fromInstalled) return fromInstalled;
-  const fromPin = nearestPackageJson(dirname(fileURLToPath(import.meta.url)), (pkg) => {
-    const deps = pkg.dependencies as Record<string, string> | undefined;
-    return pkg.name === "@ademu/openclaw-ademu" ? deps?.["@ademu/adc-bin"] : undefined;
-  });
-  if (fromPin) return fromPin;
-  throw new Error("cannot determine the bundled @ademu/adc-bin version");
-}
-
 let sharedStore: AdemuStore | undefined;
-let sharedDaemons: DaemonManager | undefined;
+let sharedAttacher: DaemonAttacher | undefined;
 
 export function getAdemuStore(env: NodeJS.ProcessEnv = process.env): AdemuStore {
   sharedStore ??= AdemuStore.open({ stateDir: resolveStateDir(env) });
   return sharedStore;
 }
 
-export function getDaemonManager(log: (event: string, fields?: Record<string, string | number | boolean>) => void): DaemonManager {
-  sharedDaemons ??= new DaemonManager(realDaemonDeps({ store: getAdemuStore(), bundledVersion: bundledAdcVersion(), log }));
-  return sharedDaemons;
+/** The attacher needs no store: the plugin owns no daemon state (AdemuMLS #712). */
+export function getDaemonAttacher(log: (event: string, fields?: Record<string, string | number | boolean>) => void): DaemonAttacher {
+  sharedAttacher ??= new DaemonAttacher(realAttachDeps({ log }));
+  return sharedAttacher;
 }
 
 /** Test seam: replace the shared singletons. */
-export function setSharedForTests(next: { store?: AdemuStore; daemons?: DaemonManager } | undefined): void {
+export function setSharedForTests(next: { store?: AdemuStore; attacher?: DaemonAttacher } | undefined): void {
   sharedStore = next?.store;
-  sharedDaemons = next?.daemons;
+  sharedAttacher = next?.attacher;
 }

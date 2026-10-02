@@ -1,11 +1,12 @@
-// startAccount lifecycle (plan T10): lease → session → ingress → ready; outcomes; cleanup ordering
-// under the deadline; blocked vs restart contract with the gateway supervisor.
+// startAccount lifecycle (plan T10): attachment → session → ingress → ready; outcomes; cleanup
+// ordering under the deadline; blocked vs restart contract with the gateway supervisor. The plugin
+// never runs a device host (AdemuMLS #712): the runtime attaches once and never starts one.
 import { InvalidTokenError, SessionRejectedError } from "@ademu/adc-client";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ResolvedAdemuAccount } from "../src/config.js";
-import { DaemonLostError, DaemonUnreachableError, DaemonUnsupportedError, type DaemonManager, type Lease } from "../src/monitor/daemon.js";
-import { DRAIN_CAP_MS, RELEASE_TAIL_MS, STOP_DEADLINE_MS, startAccount, type StartAccountDeps } from "../src/monitor/index.js";
+import { DaemonUnreachableError, DaemonUnsupportedError, SessionSocketMovedError, type Attacher, type Attachment, type Unreachable } from "../src/monitor/attach.js";
+import { DRAIN_CAP_MS, RELEASE_TAIL_MS, REPROBE_AFTER_ATTEMPTS, STOP_DEADLINE_MS, startAccount, type StartAccountDeps } from "../src/monitor/index.js";
 import type { RuntimeChannelSurface } from "../src/monitor/ingress.js";
 import { getLiveAccount, resetLiveAccountsForTests } from "../src/outbound.js";
 import { AdemuStore } from "../src/store.js";
@@ -31,33 +32,22 @@ function account(over: Partial<ResolvedAdemuAccount> = {}): ResolvedAdemuAccount
   };
 }
 
-type FakeLease = Lease & { released: number; lose: (err: unknown) => void };
+type FakeAttachment = Attachment & { released: number };
 
-function fakeDaemons(opts: { acquire?: () => Promise<void>; mode?: "owned" | "foreign"; releaseHangs?: boolean } = {}) {
+function fakeAttacher(opts: { acquire?: () => Promise<void>; unreachable?: Unreachable; releaseHangs?: boolean; resolved?: string } = {}) {
   const calls: unknown[] = [];
-  const sweeps: unknown[] = [];
-  let lease: FakeLease | undefined;
-  const daemons = {
-    sweepPendingPublications: async (isReferenced: unknown) => {
-      sweeps.push(isReferenced);
-      return [];
-    },
-    acquire: async (params: unknown) => {
+  const reprobes: unknown[] = [];
+  let lease: FakeAttachment | undefined;
+  const attacher = {
+    attach: async (params: unknown) => {
       calls.push(params);
       await opts.acquire?.();
-      let lose!: (err: unknown) => void;
-      const lost = new Promise<never>((_, reject) => {
-        lose = reject;
-      });
       lease = {
-        mode: opts.mode ?? "owned",
         role: "runtime",
         identity: (params as { identity: unknown }).identity as never,
-        holderId: "h1",
-        info: { controlSocketPath: "/d/adc.sock", sessionSocketPath: "/d/adc-session.sock" },
-        lost,
+        info: { enrollSocketPath: "/d/adc-enroll.sock", sessionSocketPath: "/d/adc-session.sock" },
+        unreachable: opts.unreachable,
         released: 0,
-        lose,
         release: async () => {
           lease!.released++;
           if (opts.releaseHangs) await new Promise(() => {});
@@ -65,8 +55,12 @@ function fakeDaemons(opts: { acquire?: () => Promise<void>; mode?: "owned" | "fo
       };
       return lease;
     },
-  } as unknown as DaemonManager;
-  return { daemons, calls, sweeps, lease: () => lease };
+    resolveSessionSocket: async (identity: unknown) => {
+      reprobes.push(identity);
+      return opts.resolved ?? "/d/adc-session.sock";
+    },
+  } satisfies Attacher;
+  return { attacher, calls, reprobes, lease: () => lease };
 }
 
 function runtimeSurface(): RuntimeChannelSurface {
@@ -80,24 +74,27 @@ function runtimeSurface(): RuntimeChannelSurface {
   };
 }
 
-function world(opts: { platform?: string; connectError?: unknown; acquireError?: unknown; mode?: "owned" | "foreign"; releaseHangs?: boolean } = {}) {
+function world(
+  opts: { platform?: string; connectError?: unknown; acquireError?: unknown; unreachable?: Unreachable; releaseHangs?: boolean; resolved?: string } = {},
+) {
   const client = new FakeAdcClient();
   client.room(ROOM_DM, [member(OWNER, "human", "Marios"), member(AGENT, "agent", "Iris")]);
   const { connect } = fakeConnect(client);
   const statuses: Array<Record<string, unknown>> = [];
   const logs: Array<{ event: string; fields?: Record<string, unknown> | undefined }> = [];
   const ac = new AbortController();
-  const dm = fakeDaemons({
+  const dm = fakeAttacher({
     acquire: async () => {
       if (opts.acquireError) throw opts.acquireError;
     },
-    ...(opts.mode ? { mode: opts.mode } : {}),
+    ...(opts.unreachable ? { unreachable: opts.unreachable } : {}),
     ...(opts.releaseHangs ? { releaseHangs: true } : {}),
+    ...(opts.resolved ? { resolved: opts.resolved } : {}),
   });
   let now = 0;
   const deps: StartAccountDeps = {
     store: AdemuStore.open({ path: ":memory:" }),
-    daemons: dm.daemons,
+    attacher: dm.attacher,
     session: {
       connect: async (o) => {
         if (opts.connectError) throw opts.connectError;
@@ -155,15 +152,11 @@ describe("startAccount: happy path and abort", () => {
 });
 
 describe("startAccount: restart outcomes (throw)", () => {
-  it("an owned daemon loss → recovering + rejects (the supervisor restarts), lease still released", async () => {
-    const w = world();
-    const run = startAccount(w.ctx, w.deps);
-    await settle();
-    w.dm.lease()!.lose(new DaemonLostError("exited"));
-    await expect(run).rejects.toBeInstanceOf(DaemonLostError);
-    expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "recovering" });
+  it("#712: nothing answered at attach → the session open fails → recovering with WHY (not installed), rejects for a restart", async () => {
+    const w = world({ unreachable: "not_installed", connectError: Object.assign(new Error("ENOENT"), { code: "ENOENT" }) });
+    await expect(startAccount(w.ctx, w.deps)).rejects.toBeInstanceOf(Error);
+    expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "recovering", lastError: expect.stringContaining("~/.local/bin/adc service install") });
     expect(w.dm.lease()!.released).toBe(1);
-    expect(w.client.closed).toBe(true);
   });
 
   it("an ingress halt (dispatch rejects before adoption) → recovering + ingressUnavailable + rejects", async () => {
@@ -202,28 +195,32 @@ describe("startAccount: restart outcomes (throw)", () => {
     expect(String(w.statuses.at(-1)!.lastError)).toMatch(/token/i);
   });
 
-  it("owned daemon: the 5th consecutive retry → DaemonLostError (restart); foreign: never", async () => {
-    const owned = world();
-    const run = startAccount(owned.ctx, owned.deps);
+  it("#712: after REPROBE_AFTER_ATTEMPTS retries the session path is re-resolved; a moved socket restarts the account", async () => {
+    const moved = world({ resolved: "/elsewhere/adc-session.sock" });
+    const run = startAccount(moved.ctx, moved.deps);
     await settle();
-    for (let i = 1; i <= 5; i++) owned.client.emit("retry", { attempt: i, delayMs: 10 } as never);
-    await expect(run).rejects.toBeInstanceOf(DaemonLostError);
-
-    const foreign = world({ mode: "foreign" });
-    const run2 = startAccount(foreign.ctx, foreign.deps);
-    await settle();
-    for (let i = 1; i <= 8; i++) foreign.client.emit("retry", { attempt: i, delayMs: 10 } as never);
-    await settle();
-    expect(foreign.statuses.at(-1)).toMatchObject({ lifecycle: "recovering" });
-    foreign.ac.abort();
-    await run2; // still running until abort; never rejected
+    for (let i = 1; i <= REPROBE_AFTER_ATTEMPTS; i++) moved.client.emit("retry", { attempt: i, delayMs: 10 } as never);
+    await expect(run).rejects.toBeInstanceOf(SessionSocketMovedError);
+    expect(moved.dm.reprobes).toHaveLength(1);
   });
 
-  it("daemon unreachable at acquire → recovering + rejects", async () => {
-    const w = world({ acquireError: new DaemonUnreachableError("no socket", "/log") });
+  it("#712: an unmoved session path keeps the retries unbounded (recovering), re-resolved once per streak", async () => {
+    const w = world();
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    for (let i = 1; i <= 8; i++) w.client.emit("retry", { attempt: i, delayMs: 10 } as never);
+    await settle();
+    expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "recovering" });
+    expect(w.dm.reprobes).toHaveLength(1);
+    w.ac.abort();
+    await run; // still running until abort; never rejected
+  });
+
+  it("a device host unreachable at attach → recovering + rejects", async () => {
+    const w = world({ acquireError: new DaemonUnreachableError("Nothing answers at /x/adc-enroll.sock") });
     await expect(startAccount(w.ctx, w.deps)).rejects.toBeInstanceOf(DaemonUnreachableError);
     expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "recovering" });
-    expect(String(w.statuses.at(-1)!.lastError)).toContain("/log");
+    expect(String(w.statuses.at(-1)!.lastError)).toContain("/x/adc-enroll.sock");
   });
 });
 
@@ -277,23 +274,6 @@ describe("startAccount: Codex branch-review folds", () => {
     expect(w.logs.some((l) => l.event === "cleanup_step_timed_out" && l.fields?.step === "daemon_release")).toBe(true);
   });
 
-  it("#10 the pending-publication sweep runs once per daemon manager, before the first acquire", async () => {
-    const w = world();
-    const run1 = startAccount(w.ctx, w.deps);
-    await settle();
-    w.ac.abort();
-    await run1;
-    expect(w.dm.sweeps).toHaveLength(1);
-    // A second account start on the SAME manager (fresh client/session): no second sweep.
-    const w2 = world();
-    w2.deps.daemons = w.deps.daemons;
-    const run2 = startAccount(w2.ctx, w2.deps);
-    await settle();
-    w2.ac.abort();
-    await run2;
-    expect(w.dm.sweeps).toHaveLength(1);
-    expect(w.dm.calls).toHaveLength(2);
-  });
 
   it("#21 a security_notice sets the fixed status copy and posts the fixed room note; the only logged fact is `room`", async () => {
     const w = world();

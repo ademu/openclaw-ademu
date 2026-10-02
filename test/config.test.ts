@@ -14,7 +14,10 @@ import {
   canonicalizePath,
   DEFAULT_SERVER,
   defaultDataDir,
+  ENROLL_SOCKET_FILE,
+  SYSTEM_DATA_DIR,
   inspectAdemuAccount,
+  inspectAdemuAccountForEnrollment,
   listAdemuAccountIds,
   ownerAllowFromEntry,
   resolveAdemuAccount,
@@ -52,7 +55,25 @@ describe("accounts and inheritance", () => {
     expect(iris.daemon.raw.dataDir).toBe(join(tmp, "shared"));
     expect(iris.daemon.raw.controlSocket).toBe(join(tmp, "shared", "adc.sock"));
     expect(iris.daemon.raw.sessionSocket).toBe(join(tmp, "shared", "adc-session.sock"));
-    expect(iris.daemon.explicit).toEqual({ dataDir: true, socketPath: false });
+    expect(iris.daemon.raw.enrollSocket).toBe(join(tmp, "shared", "adc-enroll.sock"));
+    expect(iris.daemon.explicit).toEqual({ dataDir: true, socketPath: false, enrollSocketPath: false });
+    expect(iris.daemon.scope).toBe("user");
+  });
+
+  it("the enrollment socket is derived under dataDir; an explicit enrollSocketPath wins (root or account)", () => {
+    const c = cfg({
+      dataDir: join(tmp, "own"),
+      enrollSocketPath: join(tmp, "run", "adc-enroll.sock"),
+      accounts: { a: { deviceId: "d", token: "t" }, b: { deviceId: "d", token: "t", enrollSocketPath: "~/b-enroll.sock" } },
+    });
+    const a = resolveAdemuAccount(c, "a", ENV);
+    expect(a.daemon.raw.enrollSocket).toBe(join(tmp, "run", "adc-enroll.sock"));
+    expect(a.daemon.explicit.enrollSocketPath).toBe(true);
+    expect(a.daemon.raw.controlSocket).toBe(join(tmp, "own", "adc.sock"));
+    const b = resolveAdemuAccount(c, "b", ENV);
+    expect(b.daemon.raw.enrollSocket.endsWith("/b-enroll.sock")).toBe(true);
+    expect(b.daemon.raw.enrollSocket.startsWith("~")).toBe(false);
+    expect(ENROLL_SOCKET_FILE).toBe("adc-enroll.sock");
   });
 
   it("an account override of dataDir wins and moves the derived sockets", () => {
@@ -156,6 +177,118 @@ describe("daemon identity canonicalization and collisions (R1)", () => {
     expect(a.dataDir).toBe(b.dataDir);
     expect(a.controlSocket).toBe(b.controlSocket);
   });
+
+  it("Codex #2: the enrollment socket may never be the control (or session) socket — a configError, before anything is dialled", () => {
+    const c = cfg({ accounts: { a: { deviceId: "d", token: "t", dataDir: join(tmp, "dr"), enrollSocketPath: join(tmp, "dr", "adc.sock") } } });
+    expect(validateDaemonIdentities(c, ENV).get("a")).toMatch(/must differ from the control and session sockets/);
+    expect(inspectAdemuAccount(c, "a", ENV).configError).toMatch(/enrollment socket/);
+    const c2 = cfg({ accounts: { a: { deviceId: "d", token: "t", dataDir: join(tmp, "dr"), enrollSocketPath: join(tmp, "dr", "adc-session.sock") } } });
+    expect(validateDaemonIdentities(c2, ENV).get("a")).toMatch(/must differ/);
+  });
+
+  it("one enrollment socket shared by two data dirs collides", () => {
+    const c = cfg({
+      accounts: {
+        a: { deviceId: "d", token: "t", dataDir: join(tmp, "e1"), enrollSocketPath: join(tmp, "shared-enroll.sock") },
+        b: { deviceId: "d", token: "t", dataDir: join(tmp, "e2"), enrollSocketPath: join(tmp, "shared-enroll.sock") },
+      },
+    });
+    const errors = validateDaemonIdentities(c, ENV);
+    expect(errors.size).toBe(2);
+    expect(errors.get("a")).toMatch(/enrollment socket .* shared by 2/);
+  });
+
+  it("two accounts naming different enrollment sockets for one data dir collide", () => {
+    const c = cfg({
+      accounts: {
+        a: { deviceId: "d", token: "t", dataDir: join(tmp, "de"), enrollSocketPath: join(tmp, "de", "one-enroll.sock") },
+        b: { deviceId: "d", token: "t", dataDir: join(tmp, "de"), enrollSocketPath: join(tmp, "de", "two-enroll.sock") },
+      },
+    });
+    const errors = validateDaemonIdentities(c, ENV);
+    expect([...errors.keys()].sort()).toEqual(["a", "b"]);
+    expect(errors.get("a")).toMatch(/enrollment sockets/);
+  });
+});
+
+describe("daemon scope: a hardened host (system-scope adc install) is attach-only", () => {
+  const detected = () => true;
+
+  it("with nothing configured and the detector firing, the identity IS the system layout, scope system", () => {
+    const id = resolveDaemonIdentity({}, ENV, detected);
+    expect(id.scope).toBe("system");
+    expect(id.raw).toEqual({
+      dataDir: SYSTEM_DATA_DIR,
+      controlSocket: "/run/adc/adc.sock",
+      sessionSocket: "/run/adc/adc-session.sock",
+      enrollSocket: "/run/adc/adc-enroll.sock",
+    });
+    expect(id.explicit).toEqual({ dataDir: false, socketPath: false, enrollSocketPath: false });
+  });
+
+  it("any explicit key (dataDir, socketPath or enrollSocketPath — root values included) keeps user scope and the configured paths", () => {
+    for (const input of [{ dataDir: join(tmp, "x") }, { socketPath: join(tmp, "x.sock") }, { enrollSocketPath: join(tmp, "x-enroll.sock") }]) {
+      const id = resolveDaemonIdentity(input, ENV, detected);
+      expect(id.scope).toBe("user");
+      expect(id.raw.dataDir).not.toBe(SYSTEM_DATA_DIR);
+    }
+    const c = cfg({ dataDir: join(tmp, "root"), accounts: { a: { deviceId: "d", token: "t" } } });
+    expect(resolveAdemuAccount(c, "a", ENV, detected).daemon.scope).toBe("user");
+  });
+
+  it("every unconfigured account resolves to the one system identity — no collision", () => {
+    const c = cfg({ accounts: { a: { deviceId: "d", token: "t" }, b: { deviceId: "e", token: "t" } } });
+    expect(validateDaemonIdentities(c, ENV, detected).size).toBe(0);
+    expect(inspectAdemuAccount(c, "a", ENV, detected).daemon.scope).toBe("system");
+    expect(inspectAdemuAccount(c, "b", ENV, detected).daemon.dataDir).toBe(inspectAdemuAccount(c, "a", ENV, detected).daemon.dataDir);
+  });
+
+  it("without a system install (the default detector on this host) the default identity stays under the state dir", () => {
+    const id = resolveDaemonIdentity({}, ENV, () => false);
+    expect(id.scope).toBe("user");
+    expect(id.raw.dataDir).toBe(defaultDataDir(ENV));
+  });
+});
+
+describe("the recorded scope (daemonScope): an enrolled account stays on the device host that minted its token", () => {
+  it("recorded user scope + a system install added later → still the default user-scope data dir; the detector is not consulted", () => {
+    let consulted = 0;
+    const id = resolveDaemonIdentity({ enrolledScope: "user" }, ENV, () => (consulted++, true));
+    expect(id).toMatchObject({ scope: "user", scopeSource: "enrolled" });
+    expect(id.raw.dataDir).toBe(defaultDataDir(ENV));
+    expect(consulted).toBe(0);
+  });
+
+  it("recorded system scope + no system install detected (down, or not up yet at boot) → the system layout, never a private daemon", () => {
+    const id = resolveDaemonIdentity({ enrolledScope: "system" }, ENV, () => false);
+    expect(id).toMatchObject({ scope: "system", scopeSource: "enrolled" });
+    expect(id.raw.enrollSocket).toBe("/run/adc/adc-enroll.sock");
+  });
+
+  it("an explicit key beats the recorded scope: an operator who names paths gets exactly those paths", () => {
+    const id = resolveDaemonIdentity({ enrolledScope: "system", dataDir: join(tmp, "named") }, ENV, () => true);
+    expect(id).toMatchObject({ scope: "user", scopeSource: "explicit" });
+    expect(id.raw.dataDir).toBe(join(tmp, "named"));
+  });
+
+  it("nothing recorded or configured → the detector decides (an account enrolled before the key)", () => {
+    expect(resolveDaemonIdentity({}, ENV, () => true)).toMatchObject({ scope: "system", scopeSource: "detected" });
+    expect(resolveDaemonIdentity({}, ENV, () => false)).toMatchObject({ scope: "user", scopeSource: "detected" });
+  });
+
+  it("the key is per account: accepted on an account, refused at the root and for any other value", () => {
+    expect(AdemuChannelSchema.safeParse({ accounts: { a: { daemonScope: "system" } } }).success).toBe(true);
+    expect(AdemuChannelSchema.safeParse({ daemonScope: "system" }).success).toBe(false);
+    expect(AdemuChannelSchema.safeParse({ accounts: { a: { daemonScope: "root" } } }).success).toBe(false);
+  });
+
+  it("account resolution honours the recorded scope; the enrollment doors' resolution ignores it (a re-enrollment lands where the host points now)", () => {
+    const c = cfg({ accounts: { a: { deviceId: "d", token: "t", daemonScope: "user" } } });
+    expect(resolveAdemuAccount(c, "a", ENV, () => true).daemon).toMatchObject({ scope: "user", scopeSource: "enrolled" });
+    expect(inspectAdemuAccount(c, "a", ENV, () => true).daemon).toMatchObject({ scope: "user", scopeSource: "enrolled" });
+    expect(inspectAdemuAccountForEnrollment(c, "a", ENV, () => true).daemon).toMatchObject({ scope: "system", scopeSource: "detected" });
+    expect(inspectAdemuAccountForEnrollment(c, "a", ENV, () => false).daemon).toMatchObject({ scope: "user", scopeSource: "detected" });
+  });
 });
 
 describe("owner authority entry (R3) and account deletion (Rider B)", () => {
@@ -234,6 +367,15 @@ describe("manifest schema parity with the code schema", () => {
       expect(variant.required).toEqual(["source", "provider", "id"]);
       expect(variant.additionalProperties).toBe(false);
     }
+  });
+
+  it("#712: the packaged manifest accepts the account shape the doors write (daemonScope, enrollSocketPath)", () => {
+    const accounts = (manifest.channelConfigs.ademu.schema as {
+      properties: { accounts: { additionalProperties: { additionalProperties: boolean; properties: Record<string, { enum?: string[]; type?: string }> } } };
+    }).properties.accounts.additionalProperties;
+    expect(accounts.additionalProperties).toBe(false);
+    expect(accounts.properties.daemonScope?.enum).toEqual(["user", "system"]);
+    expect(accounts.properties.enrollSocketPath?.type).toBe("string");
   });
 
   it("the token field is marked sensitive in both", () => {

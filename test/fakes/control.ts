@@ -10,12 +10,21 @@ export const WORDS: FourWords = ["alpha", "bravo", "charlie", "delta"];
 
 export class FakeControl implements ControlLike {
   calls: Array<{ op: string; params?: unknown }> = [];
-  devices: Array<{ device_id: string; agent_user_id: string; agent_name: string; state: string }> = [];
-  statusState = "enrolled";
   tokenCount = 0;
   tokenMintImpl?: (params: { device_id: string; label: string; replace?: true }) => Promise<{ token_id: string; label: string; token: string; created_at_ms: number }>;
+  createDeviceImpl?: (params: { agent_name: string }) => Promise<{ device_id: string; agent_user_id: string; state: string; qr_payload: string }>;
   confirmWordsImpl?: (params: { device_id: string; words: FourWords }) => Promise<{ confirmed: boolean; state: string }>;
-  info = { version: "0.2.4 (abc)", key_provider: "k", kek_rung: 1, data_dir: "/d", socket_path: "/d/adc.sock", config_source: "env", started_at_ms: 1, session_socket_path: "/d/adc-session.sock" };
+  info = {
+    version: "0.5.0 (abc)",
+    key_provider: "k",
+    kek_rung: 1,
+    data_dir: "/d",
+    socket_path: "/d/adc.sock",
+    config_source: "env",
+    started_at_ms: 1,
+    session_socket_path: "/d/adc-session.sock",
+    enroll_socket_path: "/d/adc-enroll.sock",
+  };
   closed = 0;
   #onUpdate?: (s: PairingSnapshot) => void;
   #finish?: (s: PairingSnapshot) => void;
@@ -24,15 +33,8 @@ export class FakeControl implements ControlLike {
 
   async createDevice(params: { agent_name: string }) {
     this.calls.push({ op: "create_device", params });
+    if (this.createDeviceImpl) return this.createDeviceImpl(params);
     return { device_id: NEW_DEVICE, agent_user_id: NEW_AGENT, state: "created", qr_payload: QR };
-  }
-  async listDevices() {
-    this.calls.push({ op: "list_devices" });
-    return { devices: this.devices };
-  }
-  async deviceStatus(params: { device_id: string }) {
-    this.calls.push({ op: "device_status", params });
-    return { device_id: params.device_id, state: this.statusState, ws: "connected", attached: false, pending_handoff: 0 };
   }
   async confirmWords(params: { device_id: string; words: FourWords }) {
     this.calls.push({ op: "confirm_words", params });

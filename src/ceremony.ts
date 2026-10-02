@@ -1,19 +1,22 @@
-// The enrollment ceremony (plan T11) shared by both doors (wizard + `ademu_enroll` tool):
+// The enrollment ceremony (plan T11) shared by both doors (wizard + `ademu_enroll` tool), driven over
+// the daemon's ENROLLMENT socket (ADC Phase 3b Phase B — the plugin never opens the control socket):
 //   createDevice → QR → poll (NOT awaited before the words) → four words → human confirm →
-//   confirmWords (the DAEMON's words, never user-typed) → await enrolled → tokenMint →
-//   daemonInfo → identity probe over a short-lived session → { deviceId, agentUserId, ownerUserId, token }.
+//   confirmWords (the DAEMON's words, never user-typed) → await enrolled → daemonInfo → tokenMint
+//   (the first successful mint CLOSES the connection, so daemon_info comes first) → identity probe
+//   over a short-lived session → { deviceId, agentUserId, ownerUserId, token }.
+// The enrollment socket pins the connection to the one device it created, refuses `replace:true`
+// and mints at most one token: a lost mint reply is never retried — the operator mints a fresh
+// label at the CLI and pastes it into the token door (spec M20 b).
 // Privacy: the QR payload, the words and the token are returned to the CALLER's rendering surface
 // only; nothing in this module logs. `ControlError.detail` is never read.
 import { AlreadyAttachedError, type AdcClient, type AdcClientOptions } from "@ademu/adc-client";
-import { ControlError, type AdcControlClient, type FourWords, type PairingSnapshot } from "@ademu/adc-control";
+import { ConnectionClosedError, ControlError, ControlTimeoutError, type AdcControlClient, type FourWords, type PairingSnapshot } from "@ademu/adc-control";
 import { normalizeId } from "./grammar.js";
-import { DaemonAbortedError, type DaemonManager, type Lease } from "./monitor/daemon.js";
+import { DaemonAbortedError, type Attacher, type Attachment } from "./monitor/attach.js";
 import type { DaemonIdentity } from "./config.js";
 
-export type ControlLike = Pick<
-  AdcControlClient,
-  "createDevice" | "listDevices" | "deviceStatus" | "confirmWords" | "cancelPairing" | "tokenMint" | "daemonInfo" | "pollPairing" | "close"
->;
+/** The enrollment socket's op table as the ceremony uses it (no `list_devices`, no `device_status`). */
+export type ControlLike = Pick<AdcControlClient, "createDevice" | "confirmWords" | "cancelPairing" | "tokenMint" | "daemonInfo" | "pollPairing" | "close">;
 
 export type EnrollmentFailure =
   | "aborted"
@@ -21,8 +24,12 @@ export type EnrollmentFailure =
   | "words_mismatch"
   | "revoked"
   | "retired"
-  | "not_enrolled"
+  /** The daemon's enrollment budget is full (`enroll_quota`): no device was created. */
+  | "enroll_quota"
+  /** The account's token label already exists on the device: the enrollment socket cannot rotate it. */
   | "label_exists"
+  /** The mint's reply was lost (connection closed / timed out with `token_mint` in flight): the label is occupied, the token unrecoverable. */
+  | "mint_lost"
   | "device_attached"
   | "identity_mismatch"
   | "daemon_too_old"
@@ -47,6 +54,8 @@ export type EnrollmentResult = {
   /** Plaintext device token — returned once; the caller writes it to config and forgets it. */
   token: string;
   tokenId: string;
+  /** The label the token was minted under (named in the revoke instruction if the config write fails). */
+  tokenLabel: string;
   sessionSocketPath: string;
 };
 
@@ -64,8 +73,6 @@ type Common = {
   /** Authority re-check (host `beforePersistentEffect` / tool signal) before every durable effect. */
   beforeEffect: () => Promise<void>;
   signal: AbortSignal;
-  /** Asked when a token with this account's label already exists. Default: refuse (label_exists). */
-  confirmReplace?: (() => Promise<boolean>) | undefined;
   /** Asked when another mind is attached to the device. Default: refuse (device_attached). */
   confirmTakeover?: (() => Promise<boolean>) | undefined;
 };
@@ -81,21 +88,24 @@ function abortRejection(signal: AbortSignal): Promise<never> {
   });
 }
 
-/** Mint the account's token; on `label_exists` ask once and rotate with `replace: true`. */
-export async function mintAccountToken(params: Common & { deviceId: string }): Promise<{ token: string; tokenId: string }> {
+/**
+ * Mint the account's token — exactly once, never with `replace` (the enrollment socket refuses it and
+ * closes the connection after the first successful mint). A reply lost in flight leaves the label
+ * occupied and the token unrecoverable from here: `mint_lost`, and the caller prints the
+ * mint-a-fresh-label instruction. `label_exists` is the same dead end (nothing can rotate it here).
+ */
+export async function mintAccountToken(params: Common & { deviceId: string }): Promise<{ token: string; tokenId: string; tokenLabel: string }> {
   const label = tokenLabelFor(params.accountId);
   await params.beforeEffect();
   throwIfAborted(params.signal);
   try {
     const minted = await params.control.tokenMint({ device_id: params.deviceId, label });
-    return { token: minted.token, tokenId: minted.token_id };
+    return { token: minted.token, tokenId: minted.token_id, tokenLabel: label };
   } catch (err) {
-    if (!(err instanceof ControlError) || err.code !== "label_exists") throw err;
-    if (!params.confirmReplace || !(await params.confirmReplace())) throw new EnrollmentError("label_exists");
-    await params.beforeEffect();
-    throwIfAborted(params.signal);
-    const minted = await params.control.tokenMint({ device_id: params.deviceId, label, replace: true });
-    return { token: minted.token, tokenId: minted.token_id };
+    if (err instanceof ControlError && err.code === "label_exists") throw new EnrollmentError("label_exists");
+    if (err instanceof ConnectionClosedError && err.op === "token_mint") throw new EnrollmentError("mint_lost");
+    if (err instanceof ControlTimeoutError && err.op === "token_mint") throw new EnrollmentError("mint_lost");
+    throw err;
   }
 }
 
@@ -128,13 +138,46 @@ export async function probeIdentity(params: Common & { deviceId: string; token: 
   }
 }
 
+/**
+ * Identity facts from a PASTED token (the wizard's "I have a device token" door): the same session
+ * probe without an expected device id — the token names the device. Hello and `get_self` must agree.
+ */
+export async function probeTokenIdentity(params: {
+  token: string;
+  sessionSocketPath: string;
+  connectSession: Common["connectSession"];
+  confirmTakeover?: (() => Promise<boolean>) | undefined;
+  signal: AbortSignal;
+}): Promise<{ deviceId: string; agentUserId: string; ownerUserId: string; agentUsername: string; agentDisplayName: string }> {
+  throwIfAborted(params.signal);
+  const open = async (takeover: boolean) =>
+    params.connectSession({ token: params.token, socketPath: params.sessionSocketPath, takeover, reconnect: "never" });
+  let client: AdcClient;
+  try {
+    client = await open(false);
+  } catch (err) {
+    if (!(err instanceof AlreadyAttachedError)) throw err;
+    if (!params.confirmTakeover || !(await params.confirmTakeover())) throw new EnrollmentError("device_attached");
+    client = await open(true);
+  }
+  try {
+    const self = await client.getSelf();
+    if (normalizeId(client.hello.device_id) !== normalizeId(self.device_id)) throw new EnrollmentError("identity_mismatch");
+    if (normalizeId(client.hello.agent_user_id) !== normalizeId(self.user_id)) throw new EnrollmentError("identity_mismatch");
+    return { deviceId: self.device_id, agentUserId: self.user_id, ownerUserId: self.owner_user_id, agentUsername: self.username, agentDisplayName: self.display_name };
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+/** `daemon_info` BEFORE the mint: the first successful mint closes the enrollment connection (M20 a). */
 async function finishWithToken(params: Common & { deviceId: string }): Promise<EnrollmentResult> {
-  const { token, tokenId } = await mintAccountToken(params);
   const info = await params.control.daemonInfo();
   const sessionSocketPath = info.session_socket_path;
   if (!sessionSocketPath) throw new EnrollmentError("daemon_too_old", "the Ademú device host does not report a session socket; upgrade adc");
+  const { token, tokenId, tokenLabel } = await mintAccountToken(params);
   const identity = await probeIdentity({ ...params, token, sessionSocketPath });
-  return { deviceId: params.deviceId, token, tokenId, sessionSocketPath, ...identity };
+  return { deviceId: params.deviceId, token, tokenId, tokenLabel, sessionSocketPath, ...identity };
 }
 
 export type RunEnrollmentParams = Common & {
@@ -158,7 +201,7 @@ export async function runEnrollment(params: RunEnrollmentParams): Promise<Enroll
   const { control, signal } = params;
   await params.beforeEffect();
   throwIfAborted(signal);
-  const created = await control.createDevice({ agent_name: params.agentName });
+  const created = await createDeviceOrRefuse(control, params.agentName);
   const deviceId = created.device_id;
   params.onDevice?.(deviceId);
 
@@ -239,18 +282,19 @@ export async function runEnrollment(params: RunEnrollmentParams): Promise<Enroll
   return finishWithToken({ ...params, deviceId });
 }
 
-/** Reconnect an already-enrolled device: mint this account's token and probe identity. */
-export async function connectExisting(params: Common & { deviceId: string }): Promise<EnrollmentResult> {
-  throwIfAborted(params.signal);
-  const status = await params.control.deviceStatus({ device_id: params.deviceId });
-  if (status.state !== "enrolled") throw new EnrollmentError("not_enrolled", `device is ${status.state}`);
-  return finishWithToken(params);
-}
-
-/** Enrolled devices available for "connect an already-enrolled agent". */
-export async function listEnrolledDevices(control: ControlLike): Promise<Array<{ deviceId: string; agentName: string; agentUserId: string }>> {
-  const { devices } = await control.listDevices();
-  return devices.filter((d) => d.state === "enrolled").map((d) => ({ deviceId: d.device_id, agentName: d.agent_name, agentUserId: d.agent_user_id }));
+/**
+ * `create_device` on the enrollment socket: a full admission budget (`enroll_quota`) is a typed
+ * refusal (nothing was created); an op refused as out of scope (`enroll_scope`) means the other end
+ * is not the enrollment socket we expected — never retried, surfaced as unexpected.
+ */
+export async function createDeviceOrRefuse(control: ControlLike, agentName: string): Promise<{ device_id: string; qr_payload: string }> {
+  try {
+    return await control.createDevice({ agent_name: agentName });
+  } catch (err) {
+    if (err instanceof ControlError && err.code === "enroll_quota") throw new EnrollmentError("enroll_quota");
+    if (err instanceof ControlError && err.code === "enroll_scope") throw new EnrollmentError("unexpected_state", "the device host refused the ceremony op as out of scope");
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -260,7 +304,7 @@ export type EnrollmentLease = {
   readonly id: string;
   readonly accountId: string;
   readonly control: ControlLike;
-  readonly daemonLease: Lease;
+  readonly attachment: Attachment;
   readonly signal: AbortSignal;
   readonly expiresAt: number;
   deviceId?: string;
@@ -271,8 +315,9 @@ export type EnrollmentLease = {
 };
 
 export type EnrollmentLeaseDeps = {
-  daemons: DaemonManager;
-  connectControl: (socketPath: string) => Promise<ControlLike>;
+  attacher: Attacher;
+  /** Opens the ENROLLMENT socket (`connectEnroll`); the ceremony has no control connection at all. */
+  connectEnroll: (socketPath: string) => Promise<ControlLike>;
   now: () => number;
   setTimer: (fn: () => void, ms: number) => unknown;
   clearTimer: (handle: unknown) => void;
@@ -283,12 +328,11 @@ export type EnrollmentLeaseDeps = {
 
 export const ENROLLMENT_TTL_MS = 3 * 60_000;
 
-/** Acquires a SETUP daemon lease (never stops a daemon) and a control connection. */
+/** Attaches to the device host in the SETUP role (may start an installed user service, never runs one) and opens an enrollment-socket connection. */
 export async function createEnrollmentLease(params: {
   deps: EnrollmentLeaseDeps;
   accountId: string;
   identity: DaemonIdentity;
-  server: { restBaseUrl: string; wsUrl: string };
   beforeEffect: () => Promise<void>;
   signal?: AbortSignal | undefined;
   ttlMs?: number | undefined;
@@ -296,28 +340,27 @@ export async function createEnrollmentLease(params: {
   const { deps } = params;
   if (params.signal?.aborted) throw new DaemonAbortedError();
   const abort = new AbortController();
-  // The caller's signal (a tool call's execution signal) governs ONLY the acquisition: a cancelled
-  // call must not leave a daemon spawning for nothing. It is detached the moment the lease exists.
+  // The caller's signal (a tool call's execution signal) governs ONLY the attach: a cancelled call
+  // must not keep waiting for a service it asked to start. It is detached the moment the lease exists.
   // The ceremony then outlives the call by design — the phone scans minutes later — and OpenClaw
   // aborts a tool call's signal when the turn returns (verified 2026-09-18 on 2026.8.2 from Telegram:
   // the pairing poll stopped five seconds after `start`, the scan landed unseen, TTL retired the
   // device). From here on only dispose (any path, TTL included) aborts `lease.signal`.
   const forwardAbort = () => abort.abort();
   params.signal?.addEventListener("abort", forwardAbort, { once: true });
-  let daemonLease: Lease;
+  let attachment: Attachment;
   let control: ControlLike;
   try {
-    daemonLease = await deps.daemons.acquire({
+    attachment = await deps.attacher.attach({
       identity: params.identity,
-      server: params.server,
       role: "setup",
       signal: abort.signal,
       beforeEffect: params.beforeEffect,
     });
     try {
-      control = await deps.connectControl(daemonLease.info.controlSocketPath);
+      control = await deps.connectEnroll(attachment.info.enrollSocketPath);
     } catch (err) {
-      await daemonLease.release().catch(() => {});
+      await attachment.release().catch(() => {});
       throw err;
     }
   } finally {
@@ -328,7 +371,7 @@ export async function createEnrollmentLease(params: {
     id: `${params.accountId}-${deps.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
     accountId: params.accountId,
     control,
-    daemonLease,
+    attachment,
     signal: abort.signal,
     expiresAt: deps.now() + ttl,
     terminal: false,
@@ -357,7 +400,7 @@ export async function createEnrollmentLease(params: {
       try {
         await control.close().catch(() => {});
       } finally {
-        await daemonLease.release().catch(() => {});
+        await attachment.release().catch(() => {});
         deps.onDisposed?.(lease, reason);
       }
     }
