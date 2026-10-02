@@ -25,6 +25,9 @@ export const DRAIN_CAP_MS = 2000;
 /** After this many consecutive reconnect attempts the session path is re-resolved (it may have moved). */
 export const REPROBE_AFTER_ATTEMPTS = 5;
 
+/** `channels.ademu.server` is deprecated and ignored (#712): say so once per process, not per account start. */
+let serverDeprecationLogged = false;
+
 /** Race a cleanup step against the remaining budget; a slow step is logged and abandoned, never awaited past the deadline. */
 async function bounded(deps: StartAccountDeps, label: string, step: Promise<unknown>, budgetMs: number, log: StartAccountDeps["log"]): Promise<void> {
   let timedOut = false;
@@ -84,6 +87,11 @@ export async function startAccount(ctx: ChannelGatewayContext<ResolvedAdemuAccou
   if (blocked) {
     setStatus(blocked);
     return;
+  }
+
+  if (account.serverConfigured && !serverDeprecationLogged) {
+    serverDeprecationLogged = true;
+    log("config_server_deprecated", { ignored: true });
   }
 
   // --- daemon attachment ------------------------------------------------------------------------

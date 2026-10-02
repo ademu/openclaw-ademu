@@ -1,6 +1,7 @@
 // The operator's CLI commands, composed from the daemon identity (never from an error message): a
-// system install is driven with `sudo adc --system`; a user-scope daemon with the plugin's data dir in
-// ADC_DATA_DIR (the CLI's default data dir is NOT the plugin's). Spec M20 (b)–(d): the manual ceremony
+// system install is driven with `sudo adc --system`; the installed user service with a bare `adc`
+// (its config pins the data dir and all three sockets, so the CLI reaches the same daemon — #712); an
+// explicitly configured device host with its paths in ADC_DATA_DIR / ADC_SOCKET_PATH. Spec M20 (b)–(d): the manual ceremony
 // is the fallback on a hardened host, a lost mint reply is answered by minting a fresh label at the
 // CLI, an orphaned token (config write failed after the mint) is revoked by label.
 import type { DaemonIdentity } from "./config.js";
@@ -20,14 +21,16 @@ export function shellQuote(value: string): string {
 }
 
 /**
- * `sudo adc --system` on a system install; for a user-scope daemon `ADC_DATA_DIR` AND `ADC_SOCKET_PATH`
- * (the CLI's own ladder prefers `$XDG_RUNTIME_DIR` over the data dir on Linux, and a configured control
- * socket may live anywhere — the ceremony verbs the operator runs are control-socket ops); bare `adc`
- * when the identity is unknown.
+ * `sudo adc --system` on a system install; bare `adc` for the installed user service (no explicit
+ * path keys: the CLI reads the same pinned config) or an unknown identity; for an explicitly
+ * configured device host `ADC_DATA_DIR` AND `ADC_SOCKET_PATH` (the ceremony verbs the operator runs are
+ * control-socket ops, and a configured control socket may live anywhere).
  */
 export function adcCommandPrefix(identity: DaemonIdentity | undefined): string {
   if (!identity) return "adc";
   if (identity.scope === "system") return "sudo adc --system";
+  const explicit = identity.explicit.dataDir || identity.explicit.socketPath || identity.explicit.enrollSocketPath;
+  if (!explicit) return "adc";
   return `ADC_DATA_DIR=${shellQuote(identity.raw.dataDir)} ADC_SOCKET_PATH=${shellQuote(identity.raw.controlSocket)} adc`;
 }
 

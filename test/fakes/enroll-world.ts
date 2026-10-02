@@ -16,7 +16,12 @@ export function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?:
   let released = 0;
   const attachment: Attachment = {
     role: "setup",
-    identity: { dataDir: "/d", raw: { dataDir: "/d", controlSocket: "/d/adc.sock", sessionSocket: "/d/adc-session.sock", enrollSocket: "/d/adc-enroll.sock" }, scope: "user" } as never,
+    identity: {
+      dataDir: "/d",
+      raw: { dataDir: "/d", controlSocket: "/d/adc.sock", sessionSocket: "/d/adc-session.sock", enrollSocket: "/d/adc-enroll.sock" },
+      explicit: { dataDir: true, socketPath: false, enrollSocketPath: false },
+      scope: "user",
+    } as never,
     info: { enrollSocketPath: "/d/adc-enroll.sock", sessionSocketPath: "/d/adc-session.sock" },
     release: async () => void released++,
   };

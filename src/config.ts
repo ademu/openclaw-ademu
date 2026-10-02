@@ -1,9 +1,12 @@
 // Channel configuration: `channels.ademu` — accounts (one per enrolled Ademú device), the device
-// host (adc daemon) location, the Ademú server endpoints, and room policies. Design entry §2 R1/R3/
-// R5/R11. Accounts only (no single-account root convenience): root-level fields are the inheritance
-// base for `dataDir`/`socketPath`/`server`/`enabled`; tokens and identities live under accounts.
+// host (adc daemon) location, and room policies. Design entry §2 R1/R3/R5. Accounts only (no
+// single-account root convenience): root-level fields are the inheritance base for
+// `dataDir`/`socketPath`/`enabled`; tokens and identities live under accounts. The plugin attaches to
+// an INSTALLED adc (AdemuMLS #712): by default the user service's layout, else a system install; the
+// Ademú server endpoints are the daemon's own config (`~/.config/adc/config.toml`), so
+// `channels.ademu.server` is accepted and ignored (deprecated).
 import { existsSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createAccountListHelpers } from "openclaw/plugin-sdk/account-helpers";
 import { normalizeAccountId, normalizeOptionalAccountId } from "openclaw/plugin-sdk/account-id";
@@ -19,25 +22,20 @@ import {
   resolveSecretInputString,
   type SecretInputStringResolutionMode,
 } from "openclaw/plugin-sdk/secret-input";
-import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
-import { detectSystemInstall, SYSTEM_CONTROL_SOCKET_PATH, SYSTEM_ENROLL_SOCKET_PATH, SYSTEM_SESSION_SOCKET_PATH } from "@ademu/adc-control";
+import { detectSystemInstall, systemLayout, userServiceLayout, type UserServiceLayout } from "@ademu/adc-control";
 import { z } from "zod";
 import { pruneRouteBindings } from "./bindings.js";
 
 export const CHANNEL_ID = "ademu";
 
-/** Ademú production endpoints (R11). Staging/dev override `channels.ademu.server`. */
-export const DEFAULT_SERVER = {
-  restBaseUrl: "https://api.ademu.com",
-  wsUrl: "wss://gateway.ademu.com/v1/ws",
-} as const;
-
 export const CONTROL_SOCKET_FILE = "adc.sock";
 export const SESSION_SOCKET_FILE = "adc-session.sock";
 /** The daemon's ENROLLMENT socket (ADC Phase 3b Phase B): the only socket the ceremony half opens. */
 export const ENROLL_SOCKET_FILE = "adc-enroll.sock";
-/** The system install's state dir (`adc-daemon/src/system_layout.rs` STATE_DIR; not exported by the client). */
-export const SYSTEM_DATA_DIR = "/var/lib/adc";
+/** The system install's state dir per OS (`adc-daemon/src/system_layout.rs`; not exported by the client). */
+export function systemDataDir(platform: string = process.platform): string {
+  return platform === "darwin" ? "/Library/Application Support/adc" : "/var/lib/adc";
+}
 
 // ---------------------------------------------------------------------------------------------
 // Schemas
@@ -112,8 +110,16 @@ export const ADEMU_UI_HINTS = {
   dataDir: { label: "Device host data dir", advanced: true },
   socketPath: { label: "Device host control socket", advanced: true },
   enrollSocketPath: { label: "Device host enrollment socket", advanced: true },
-  "server.restBaseUrl": { label: "Ademú REST base URL", advanced: true },
-  "server.wsUrl": { label: "Ademú WebSocket URL", advanced: true },
+  "server.restBaseUrl": {
+    label: "Ademú REST base URL (deprecated, ignored)",
+    advanced: true,
+    help: "Ignored: the device host's own config (~/.config/adc/config.toml) names the server. Removed in a later release.",
+  },
+  "server.wsUrl": {
+    label: "Ademú WebSocket URL (deprecated, ignored)",
+    advanced: true,
+    help: "Ignored: the device host's own config (~/.config/adc/config.toml) names the server. Removed in a later release.",
+  },
 } as const;
 
 /** The code-level channel config schema (`ChannelPlugin.configSchema`). */
@@ -160,8 +166,12 @@ export type DaemonIdentity = {
 /** The hardened host's detector (seam for tests). */
 export type SystemInstallDetector = () => boolean;
 
-export function defaultDataDir(env: NodeJS.ProcessEnv = process.env): string {
-  return join(resolveStateDir(env), "ademu", "adc");
+/** Where the installed user service lives (`@ademu/adc-control` `userServiceLayout`) — the default identity. */
+export type UserLayoutResolver = () => UserServiceLayout;
+
+/** The user service's layout as seen from `env` (its HOME first: deterministic under a test env). */
+export function defaultUserLayout(env: NodeJS.ProcessEnv = process.env): UserServiceLayout {
+  return userServiceLayout({ env, homedir: () => env.HOME || userInfo().homedir });
 }
 
 function expandHome(p: string): string {
@@ -202,18 +212,20 @@ export type DaemonIdentityInput = {
   enrolledScope?: DaemonScope | undefined;
 };
 
-/** The system layout as an identity: `/var/lib/adc` + the three `/run/adc` sockets, foreign by scope. */
-function systemIdentity(scopeSource: ScopeSource): DaemonIdentity {
+/** The system layout as an identity (Linux `/var/lib/adc` + `/run/adc`; macOS `/private/var/db/adc/run`), foreign by scope. */
+function systemIdentity(scopeSource: ScopeSource, platform: string): DaemonIdentity {
+  const layout = systemLayout(platform);
+  const dataDir = systemDataDir(platform);
   return {
-    dataDir: canonicalizePath(SYSTEM_DATA_DIR),
-    controlSocket: canonicalizePath(SYSTEM_CONTROL_SOCKET_PATH),
-    sessionSocket: canonicalizePath(SYSTEM_SESSION_SOCKET_PATH),
-    enrollSocket: canonicalizePath(SYSTEM_ENROLL_SOCKET_PATH),
+    dataDir: canonicalizePath(dataDir),
+    controlSocket: canonicalizePath(layout.controlSocketPath),
+    sessionSocket: canonicalizePath(layout.sessionSocketPath),
+    enrollSocket: canonicalizePath(layout.enrollSocketPath),
     raw: {
-      dataDir: SYSTEM_DATA_DIR,
-      controlSocket: SYSTEM_CONTROL_SOCKET_PATH,
-      sessionSocket: SYSTEM_SESSION_SOCKET_PATH,
-      enrollSocket: SYSTEM_ENROLL_SOCKET_PATH,
+      dataDir,
+      controlSocket: layout.controlSocketPath,
+      sessionSocket: layout.sessionSocketPath,
+      enrollSocket: layout.enrollSocketPath,
     },
     explicit: { dataDir: false, socketPath: false, enrollSocketPath: false },
     scope: "system",
@@ -236,6 +248,8 @@ export function resolveDaemonIdentity(
   input: DaemonIdentityInput,
   env: NodeJS.ProcessEnv = process.env,
   detect: SystemInstallDetector = () => detectSystemInstall(),
+  layout: UserLayoutResolver = () => defaultUserLayout(env),
+  platform: string = process.platform,
 ): DaemonIdentity {
   const explicit = {
     dataDir: Boolean(input.dataDir?.trim()),
@@ -244,16 +258,19 @@ export function resolveDaemonIdentity(
   };
   const anyExplicit = explicit.dataDir || explicit.socketPath || explicit.enrollSocketPath;
   const scopeSource: ScopeSource = anyExplicit ? "explicit" : input.enrolledScope ? "enrolled" : "detected";
-  if (scopeSource === "enrolled" && input.enrolledScope === "system") return systemIdentity("enrolled");
-  if (scopeSource === "detected" && detect()) return systemIdentity("detected");
-  const rawDataDir = input.dataDir?.trim() ? expandHome(input.dataDir.trim()) : defaultDataDir(env);
+  if (scopeSource === "enrolled" && input.enrolledScope === "system") return systemIdentity("enrolled", platform);
+  if (scopeSource === "detected" && detect()) return systemIdentity("detected", platform);
+  // An explicit data dir keeps every socket under it; otherwise the installed user service's layout
+  // (its unit's --data-dir, all three sockets pinned under it — never $XDG_RUNTIME_DIR).
+  const service = input.dataDir?.trim() ? undefined : layout();
+  const rawDataDir = input.dataDir?.trim() ? expandHome(input.dataDir.trim()) : service!.dataDir;
   const rawControl = input.socketPath?.trim()
     ? expandHome(input.socketPath.trim())
-    : join(rawDataDir, CONTROL_SOCKET_FILE);
-  const rawSession = join(rawDataDir, SESSION_SOCKET_FILE);
+    : service?.controlSocketPath ?? join(rawDataDir, CONTROL_SOCKET_FILE);
+  const rawSession = service?.sessionSocketPath ?? join(rawDataDir, SESSION_SOCKET_FILE);
   const rawEnroll = input.enrollSocketPath?.trim()
     ? expandHome(input.enrollSocketPath.trim())
-    : join(rawDataDir, ENROLL_SOCKET_FILE);
+    : service?.enrollSocketPath ?? join(rawDataDir, ENROLL_SOCKET_FILE);
   return {
     dataDir: canonicalizePath(rawDataDir),
     controlSocket: canonicalizePath(rawControl),
@@ -291,7 +308,8 @@ export type ResolvedAdemuAccount = {
   tokenStatus: TokenStatus;
   tokenSource: "config" | "secretRef" | "none";
   daemon: DaemonIdentity;
-  server: { restBaseUrl: string; wsUrl: string };
+  /** `channels.ademu.server` is set: accepted and IGNORED (deprecated, AdemuMLS #712) — logged once. */
+  serverConfigured: boolean;
   /** Set when this account's daemon identity collides with another account's (R1). */
   configError?: string;
 };
@@ -323,11 +341,8 @@ function tokenPath(accountId: string): string {
   return `channels.${CHANNEL_ID}.accounts.${accountId}.token`;
 }
 
-function resolveServer(channel: AdemuChannelConfig | undefined): { restBaseUrl: string; wsUrl: string } {
-  return {
-    restBaseUrl: channel?.server?.restBaseUrl?.trim() || DEFAULT_SERVER.restBaseUrl,
-    wsUrl: channel?.server?.wsUrl?.trim() || DEFAULT_SERVER.wsUrl,
-  };
+function serverConfigured(channel: AdemuChannelConfig | undefined): boolean {
+  return Boolean(channel?.server?.restBaseUrl?.trim() || channel?.server?.wsUrl?.trim());
 }
 
 function readAccount(
@@ -372,7 +387,7 @@ function readAccount(
     tokenStatus: token.status,
     tokenSource,
     daemon,
-    server: resolveServer(channel),
+    serverConfigured: serverConfigured(channel),
   };
 }
 

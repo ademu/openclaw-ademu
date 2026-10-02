@@ -30,11 +30,13 @@ const system: DaemonIdentity = { ...user, dataDir: "/var/lib/adc", raw: { ...use
 const DEVICE = "aaaaaaaa-1111-4222-8333-444444444444";
 
 describe("operator commands", () => {
-  it("the CLI prefix follows the scope: sudo adc --system on a system install; ADC_DATA_DIR AND ADC_SOCKET_PATH (quoted) at user scope — the CLI's own ladder must not pick another daemon; bare adc when unknown", () => {
+  it("the CLI prefix follows the scope: sudo adc --system on a system install; bare adc for the installed user service (#712) or when unknown; ADC_DATA_DIR AND ADC_SOCKET_PATH (quoted) for an explicitly configured device host", () => {
     expect(adcCommandPrefix(system)).toBe("sudo adc --system");
-    expect(adcCommandPrefix(user)).toBe("ADC_DATA_DIR='/home/me/.openclaw/ademu/adc' ADC_SOCKET_PATH='/home/me/.openclaw/ademu/adc/adc.sock' adc");
+    expect(adcCommandPrefix(user)).toBe("adc");
     expect(adcCommandPrefix(undefined)).toBe("adc");
-    const moved: DaemonIdentity = { ...user, raw: { ...user.raw, dataDir: "/Users/me/Library/Application Support/x", controlSocket: "/tmp/it's.sock" } };
+    const configured: DaemonIdentity = { ...user, explicit: { dataDir: true, socketPath: false, enrollSocketPath: false }, scopeSource: "explicit" };
+    expect(adcCommandPrefix(configured)).toBe("ADC_DATA_DIR='/home/me/.openclaw/ademu/adc' ADC_SOCKET_PATH='/home/me/.openclaw/ademu/adc/adc.sock' adc");
+    const moved: DaemonIdentity = { ...configured, raw: { ...user.raw, dataDir: "/Users/me/Library/Application Support/x", controlSocket: "/tmp/it's.sock" } };
     expect(adcCommandPrefix(moved)).toBe("ADC_DATA_DIR='/Users/me/Library/Application Support/x' ADC_SOCKET_PATH='/tmp/it'\\''s.sock' adc");
   });
 

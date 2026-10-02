@@ -378,12 +378,14 @@
           "advanced": true
         },
         "server.restBaseUrl": {
-          "label": "Ademú REST base URL",
-          "advanced": true
+          "label": "Ademú REST base URL (deprecated, ignored)",
+          "advanced": true,
+          "help": "Ignored: the device host's own config (~/.config/adc/config.toml) names the server. Removed in a later release."
         },
         "server.wsUrl": {
-          "label": "Ademú WebSocket URL",
-          "advanced": true
+          "label": "Ademú WebSocket URL (deprecated, ignored)",
+          "advanced": true,
+          "help": "Ignored: the device host's own config (~/.config/adc/config.toml) names the server. Removed in a later release."
         }
       }
     }

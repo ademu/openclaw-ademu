@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
@@ -12,10 +12,9 @@ import {
   ademuConfigAdapter,
   ademuConfigSchema,
   canonicalizePath,
-  DEFAULT_SERVER,
-  defaultDataDir,
+  defaultUserLayout,
   ENROLL_SOCKET_FILE,
-  SYSTEM_DATA_DIR,
+  systemDataDir,
   inspectAdemuAccount,
   inspectAdemuAccountForEnrollment,
   listAdemuAccountIds,
@@ -29,7 +28,11 @@ const ROOT = new URL("..", import.meta.url).pathname;
 const tmp = mkdtempSync(join(tmpdir(), "ademu-config-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
-const ENV = { ...process.env, OPENCLAW_STATE_DIR: join(tmp, "state") } as NodeJS.ProcessEnv;
+// HOME is the fixture's: the default identity is the installed user service's layout (#712), read
+// from HOME's unit file — never the developer machine's real service.
+const ENV = { ...process.env, OPENCLAW_STATE_DIR: join(tmp, "state"), HOME: join(tmp, "home"), XDG_DATA_HOME: "" } as NodeJS.ProcessEnv;
+const USER_DATA = join(tmp, "home", ".local", "share", "adc");
+const SYSTEM_DATA_DIR = systemDataDir();
 
 function cfg(channel: Record<string, unknown>, extra: Record<string, unknown> = {}): OpenClawConfig {
   return { channels: { ademu: channel }, ...extra } as unknown as OpenClawConfig;
@@ -82,18 +85,42 @@ describe("accounts and inheritance", () => {
     expect(bob.daemon.raw.controlSocket).toBe(join(tmp, "bob", "adc.sock"));
   });
 
-  it("defaults the daemon under the OpenClaw state dir and the endpoints to production (R1/R11)", () => {
+  it("#712: defaults the daemon to the installed user service's layout — all three sockets under its data dir", () => {
     const c = cfg({ accounts: { a: { deviceId: "d", token: "adc1_t" } } });
-    const a = resolveAdemuAccount(c, "a", ENV);
-    expect(a.daemon.raw.dataDir).toBe(join(tmp, "state", "ademu", "adc"));
-    expect(defaultDataDir(ENV)).toBe(join(tmp, "state", "ademu", "adc"));
-    expect(a.server).toEqual(DEFAULT_SERVER);
-    expect(a.server.wsUrl.endsWith("/v1/ws")).toBe(true);
+    const a = resolveAdemuAccount(c, "a", ENV, () => false);
+    expect(defaultUserLayout(ENV).dataDir).toBe(USER_DATA);
+    expect(a.daemon.raw).toEqual({
+      dataDir: USER_DATA,
+      controlSocket: join(USER_DATA, "adc.sock"),
+      sessionSocket: join(USER_DATA, "adc-session.sock"),
+      enrollSocket: join(USER_DATA, "adc-enroll.sock"),
+    });
+    expect(a.daemon.raw.dataDir.includes(join("state", "ademu"))).toBe(false);
   });
 
-  it("server overrides apply channel-wide", () => {
+  it("#712: the installed unit's --data-dir is the default data dir", () => {
+    const home = join(tmp, "home-unit");
+    const unit = join(home, process.platform === "darwin" ? "Library/LaunchAgents/com.ademu.adc.plist" : ".config/systemd/user/adc.service");
+    mkdirSync(join(unit, ".."), { recursive: true });
+    const data = join(tmp, "svc-data");
+    const body =
+      process.platform === "darwin"
+        ? `<plist><dict><key>ProgramArguments</key><array><string>/x/adc</string><string>daemon</string><string>run</string><string>--data-dir</string><string>${data}</string></array></dict></plist>`
+        : `[Service]\nExecStart=/x/adc daemon run --data-dir ${data} --no-env\n`;
+    writeFileSync(unit, body);
+    const env = { ...ENV, HOME: home } as NodeJS.ProcessEnv;
+    const id = resolveDaemonIdentity({}, env, () => false);
+    expect(id.raw.dataDir).toBe(data);
+    expect(id.raw.enrollSocket).toBe(join(data, "adc-enroll.sock"));
+  });
+
+  it("#712: channels.ademu.server is accepted (no config error) and ignored", () => {
     const c = cfg({ server: { wsUrl: "wss://staging.example/v1/ws" }, accounts: { a: { deviceId: "d", token: "t" } } });
-    expect(resolveAdemuAccount(c, "a", ENV).server).toEqual({ restBaseUrl: DEFAULT_SERVER.restBaseUrl, wsUrl: "wss://staging.example/v1/ws" });
+    expect(AdemuChannelSchema.safeParse(c.channels!.ademu).success).toBe(true);
+    const a = resolveAdemuAccount(c, "a", ENV, () => false);
+    expect(a.serverConfigured).toBe(true);
+    expect(a.daemon.raw.dataDir).toBe(USER_DATA);
+    expect(resolveAdemuAccount(cfg({ accounts: { a: { deviceId: "d", token: "t" } } }), "a", ENV, () => false).serverConfigured).toBe(false);
   });
 
   it("slugs an agent name into a normalized account id", () => {
@@ -217,11 +244,12 @@ describe("daemon scope: a hardened host (system-scope adc install) is attach-onl
   it("with nothing configured and the detector firing, the identity IS the system layout, scope system", () => {
     const id = resolveDaemonIdentity({}, ENV, detected);
     expect(id.scope).toBe("system");
+    const run = process.platform === "darwin" ? "/private/var/db/adc/run" : "/run/adc";
     expect(id.raw).toEqual({
       dataDir: SYSTEM_DATA_DIR,
-      controlSocket: "/run/adc/adc.sock",
-      sessionSocket: "/run/adc/adc-session.sock",
-      enrollSocket: "/run/adc/adc-enroll.sock",
+      controlSocket: `${run}/adc.sock`,
+      sessionSocket: `${run}/adc-session.sock`,
+      enrollSocket: `${run}/adc-enroll.sock`,
     });
     expect(id.explicit).toEqual({ dataDir: false, socketPath: false, enrollSocketPath: false });
   });
@@ -243,10 +271,19 @@ describe("daemon scope: a hardened host (system-scope adc install) is attach-onl
     expect(inspectAdemuAccount(c, "b", ENV, detected).daemon.dataDir).toBe(inspectAdemuAccount(c, "a", ENV, detected).daemon.dataDir);
   });
 
-  it("without a system install (the default detector on this host) the default identity stays under the state dir", () => {
+  it("without a system install the default identity is the user service's layout", () => {
     const id = resolveDaemonIdentity({}, ENV, () => false);
     expect(id.scope).toBe("user");
-    expect(id.raw.dataDir).toBe(defaultDataDir(ENV));
+    expect(id.raw.dataDir).toBe(USER_DATA);
+  });
+
+  it("#712: the macOS system install is its own layout (/private/var/db/adc/run), not the Linux one", () => {
+    const mac = resolveDaemonIdentity({}, ENV, () => true, undefined, "darwin");
+    expect(mac.raw.enrollSocket).toBe("/private/var/db/adc/run/adc-enroll.sock");
+    expect(mac.raw.dataDir).toBe("/Library/Application Support/adc");
+    const linux = resolveDaemonIdentity({}, ENV, () => true, undefined, "linux");
+    expect(linux.raw.enrollSocket).toBe("/run/adc/adc-enroll.sock");
+    expect(linux.raw.dataDir).toBe("/var/lib/adc");
   });
 });
 
@@ -255,12 +292,12 @@ describe("the recorded scope (daemonScope): an enrolled account stays on the dev
     let consulted = 0;
     const id = resolveDaemonIdentity({ enrolledScope: "user" }, ENV, () => (consulted++, true));
     expect(id).toMatchObject({ scope: "user", scopeSource: "enrolled" });
-    expect(id.raw.dataDir).toBe(defaultDataDir(ENV));
+    expect(id.raw.dataDir).toBe(USER_DATA);
     expect(consulted).toBe(0);
   });
 
   it("recorded system scope + no system install detected (down, or not up yet at boot) → the system layout, never a private daemon", () => {
-    const id = resolveDaemonIdentity({ enrolledScope: "system" }, ENV, () => false);
+    const id = resolveDaemonIdentity({ enrolledScope: "system" }, ENV, () => false, undefined, "linux");
     expect(id).toMatchObject({ scope: "system", scopeSource: "enrolled" });
     expect(id.raw.enrollSocket).toBe("/run/adc/adc-enroll.sock");
   });

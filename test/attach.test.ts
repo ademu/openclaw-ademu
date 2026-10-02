@@ -115,7 +115,8 @@ function world(over: { layout?: UserServiceLayout; platform?: string } = {}): Wo
 }
 
 const userIdentity = (): DaemonIdentity => resolveDaemonIdentity({ dataDir: DATA }, process.env, () => false);
-const systemIdentity = (): DaemonIdentity => resolveDaemonIdentity({ enrolledScope: "system" }, process.env, () => true);
+// The Linux system layout, pinned (the macOS one lives under /private/var/db/adc/run).
+const systemIdentity = (): DaemonIdentity => resolveDaemonIdentity({ enrolledScope: "system" }, process.env, () => true, undefined, "linux");
 
 describe("runtime role: probe once, never start, never wait", () => {
   it("a reachable daemon's reported session socket is the authority, even a custom one", async () => {

@@ -27,7 +27,7 @@ function account(over: Partial<ResolvedAdemuAccount> = {}): ResolvedAdemuAccount
     tokenStatus: "available",
     tokenSource: "config",
     daemon: { dataDir: "/d", controlSocket: "/d/adc.sock", sessionSocket: "/d/adc-session.sock", raw: {}, explicit: {} } as never,
-    server: { restBaseUrl: "https://api.example", wsUrl: "wss://gw.example/v1/ws" },
+    serverConfigured: false,
     ...over,
   };
 }
