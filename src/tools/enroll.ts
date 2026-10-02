@@ -73,6 +73,8 @@ export type EnrollToolDeps = {
   writeConfig: (mutate: (draft: OpenClawConfig) => OpenClawConfig) => Promise<void>;
   /** Launches the gateway host's browser at `url`; resolves whether the launcher was spawned. */
   openUrl: (url: string) => Promise<boolean>;
+  /** Whether the gateway accepts connections at the page's origin (`pageOriginListening`). */
+  pageListening: (baseUrl: string) => Promise<boolean>;
 };
 
 /** The account id already exists in the CURRENT config draft (created while the enrollment ran). */
@@ -371,6 +373,11 @@ async function startEnrollment(p: {
   // lease), then admission.
   if (!p.registry.reserve(p.sessionKey)) return text(strings.enroll.toolLeaseMismatch, { ok: false, state: "busy" });
   try {
+    // A loopback URL is not yet a page: the gateway must actually listen there (bind "tailnet" puts
+    // it on the Tailscale IP only). Asked before any device exists.
+    if (!(await p.deps.pageListening(enrollmentPageBaseUrl(cfg)))) {
+      return text(strings.enroll.toolPageUnreachable, { ok: false, state: "page_unreachable" });
+    }
     await p.beforeEffect();
     return await admitAndStart({ ...p, cfg, agentName, accountId });
   } finally {

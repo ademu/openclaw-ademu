@@ -21,6 +21,7 @@
 // and the words are secrets.
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { createConnection } from "node:net";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { type OpenClawPluginApi, resolveGatewayPort } from "openclaw/plugin-sdk/core";
 import { renderEnrollmentPageHtml } from "./enrollment-page-html.js";
@@ -45,6 +46,35 @@ export function enrollmentPageBaseUrl(cfg: OpenClawConfig, env: NodeJS.ProcessEn
   const scheme = gateway?.tls?.enabled ? "https" : "http";
   const host = gateway?.bind === "custom" && gateway.customBindHost?.trim() ? gateway.customBindHost.trim() : "127.0.0.1";
   return `${scheme}://${host}:${resolveGatewayPort(cfg, env)}`;
+}
+
+/**
+ * Whether anything accepts a connection at the page's origin — asked of the system, not derived from
+ * the bind setting: `bind: "tailnet"` (and a custom or auto bind) may leave loopback without a
+ * listener, and the host's own bind resolution is not a public SDK surface.
+ */
+export function pageOriginListening(baseUrl: string, timeoutMs = 1_000): Promise<boolean> {
+  let host: string;
+  let port: number;
+  try {
+    const u = new URL(baseUrl);
+    host = u.hostname.replace(/^\[|\]$/g, "");
+    port = Number(u.port) || (u.protocol === "https:" ? 443 : 80);
+  } catch {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const socket = createConnection({ host, port });
+    const done = (ok: boolean) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    timer.unref?.();
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
 }
 
 export function enrollmentPageUrl(cfg: OpenClawConfig, pageToken: string, env: NodeJS.ProcessEnv = process.env): string {
@@ -135,8 +165,12 @@ function isLoopbackAddress(addr: string | undefined): boolean {
   return isLoopbackHostname(addr.startsWith("::ffff:") ? addr.slice("::ffff:".length) : addr);
 }
 
-/** Headers a reverse proxy adds: a request carrying any of them did not come from a local browser. */
-const FORWARDING_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip", "via"] as const;
+/** Headers a reverse proxy adds (the whole `x-forwarded-*` and `tailscale-*` families included). */
+const FORWARDING_HEADERS = new Set(["forwarded", "via", "x-real-ip", "x-client-ip", "true-client-ip", "cf-connecting-ip"]);
+
+function isForwarded(req: IncomingMessage): boolean {
+  return Object.keys(req.headers).some((h) => FORWARDING_HEADERS.has(h) || h.startsWith("x-forwarded-") || h.startsWith("tailscale-"));
+}
 
 /**
  * A local client is a loopback socket peer that no proxy forwarded, addressed to a loopback Host (the
@@ -145,7 +179,7 @@ const FORWARDING_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", 
  */
 function isLocalClient(req: IncomingMessage, addr: string | undefined): boolean {
   if (!isLoopbackAddress(addr)) return false;
-  if (FORWARDING_HEADERS.some((h) => req.headers[h] !== undefined)) return false;
+  if (isForwarded(req)) return false;
   const host = req.headers.host;
   if (!host) return false;
   try {
@@ -248,15 +282,16 @@ export function registerEnrollmentPage(api: OpenClawPluginApi, deps: EnrollmentP
       send(res, 404, "text/plain; charset=utf-8", "Not found");
       return true;
     }
-    const key = addr ?? "unknown";
-    if ((isPost ? limiters.confirm : limiters.poll).isRateLimited(key)) {
+    // Budgets: a live token's poll / confirm budget is its own, so token-less traffic (which a
+    // header-stripping local proxy could still make look local) draws only on the guessing budget
+    // and can never starve the human's browser.
+    const active = ENROLLMENT_PAGE_TOKEN_RE.test(token) ? deps.registry.findByPageToken(token) : undefined;
+    if (active && (isPost ? limiters.confirm : limiters.poll).isRateLimited(token)) {
       sendJson(res, 429, { error: "rate-limited" });
       return true;
     }
-
-    const active = ENROLLMENT_PAGE_TOKEN_RE.test(token) ? deps.registry.findByPageToken(token) : undefined;
     if (!active) {
-      if (limiters.unknownToken.isRateLimited(key)) {
+      if (limiters.unknownToken.isRateLimited(addr ?? "unknown")) {
         sendJson(res, 429, { error: "rate-limited" });
         return true;
       }

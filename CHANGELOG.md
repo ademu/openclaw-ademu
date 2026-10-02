@@ -33,7 +33,9 @@ Tested with `@ademu/adc-bin` **0.3.0**.
   plugin opens. `start` no longer returns the URL, the QR image or the `ademu://` link — its result says
   the page opened and nothing else. If no browser ever fetched the page, `status` opens it again itself
   (after a 5 s grace) instead of handing the model a link to relay. A gateway bound to a non-loopback
-  address has no page to show: `start` refuses before creating a device and names the wizard. A browser
+  address, or one that does not actually listen on loopback (`bind: "tailnet"` puts it on the
+  Tailscale IP; checked with a connect to the page's origin), has no page to show: `start` refuses
+  before creating a device and names the wizard. A browser
   launcher that cannot spawn is a failed start: the lease is disposed, nothing is written, and the
   wizard is named. Removed with this: `channels.ademu.enrollmentPage.autoOpen` and
   `channels.ademu.enrollmentPage.baseUrl`, the `gateway.publicOrigin` fallback, and the remote-client
@@ -51,7 +53,8 @@ Tested with `@ademu/adc-bin` **0.3.0**.
   that shows the QR, then the four safety words with **Yes — the words match** and **No — they differ**.
   The tool opens it in the gateway machine's browser, so a TUI user (no image rendering there) still
   only asks, scans, and clicks. The route answers local clients only: a loopback peer with a loopback
-  `Host` and no forwarding headers (a local reverse proxy or a DNS-rebinding page gets 404).
+  `Host` and no forwarding headers (a local reverse proxy or a DNS-rebinding page gets 404). A live
+  token's poll and confirm budget is its own, so requests without the token cannot starve the page.
 
 ### Fixed
 

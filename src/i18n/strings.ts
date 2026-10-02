@@ -90,7 +90,7 @@ export const strings = {
     toolStartAlreadyRunning:
       "An enrollment is already in progress in this conversation, so nothing new was created; the user finishes or cancels it on the enrollment page (Cancel before scanning, No after), or it expires after three minutes.",
     toolPageUnreachable:
-      "Enrollment cannot start from here: the enrollment page can only be shown in a browser on the gateway machine, and this gateway is not bound to a loopback address, so no such page exists. Nothing was created. Tell the user to run `openclaw channels add --channel ademu` in a terminal on the gateway machine.",
+      "Enrollment cannot start from here: the enrollment page can only be shown in a browser on the gateway machine, and this gateway does not listen on a loopback address, so no such page exists. Nothing was created. Tell the user to run `openclaw channels add --channel ademu` in a terminal on the gateway machine.",
     toolPageOpenFailed:
       "Enrollment was cancelled before anything was written: the enrollment page could not be opened in a browser on the gateway machine (no desktop session or no browser opener there). Tell the user to run `openclaw channels add --channel ademu` in a terminal on the gateway machine.",
     // ----- the browser enrollment page (src/enrollment-page-html.ts) -----

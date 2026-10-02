@@ -4,7 +4,7 @@ import { connect as connectSessionReal } from "@ademu/adc-client";
 import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
 import { ademuPlugin, realEnrollmentLeaseDeps } from "./src/channel.js";
 import { ademuConfigSchema, CHANNEL_ID } from "./src/config.js";
-import { openInBrowser, registerEnrollmentPage } from "./src/enrollment-page.js";
+import { openInBrowser, pageOriginListening, registerEnrollmentPage } from "./src/enrollment-page.js";
 import { strings } from "./src/i18n/strings.js";
 import { createQr } from "./src/qr.js";
 import { applyPluginSettings, setAdemuRuntime } from "./src/runtime.js";
@@ -25,6 +25,7 @@ export default defineChannelPluginEntry({
       connectSession: connectSessionReal,
       qr,
       openUrl: openInBrowser,
+      pageListening: pageOriginListening,
       writeConfig: async (mutate) => {
         await api.runtime.config.mutateConfigFile({
           base: "runtime",

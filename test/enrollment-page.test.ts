@@ -12,6 +12,7 @@ import {
   type EnrollmentPageDeps,
   FixedWindowLimiter,
   isLoopbackEnrollmentPageUrl,
+  pageOriginListening,
   registerEnrollmentPage,
 } from "../src/enrollment-page.js";
 import { cancelByHuman, confirmByHuman } from "../src/tools/enroll.js";
@@ -97,6 +98,34 @@ describe("enrollment page: the tool's start result", () => {
     expect(w.control.calls).toEqual([]);
     expect(w.acquires).toEqual([]);
     expect(w.opens).toEqual([]);
+  });
+
+  it("a gateway that does not listen on the loopback origin (bind tailnet → the Tailscale IP) has no page either: refused BEFORE any device or lease (Codex branch pass 2, #712 PR-a)", async () => {
+    const w = world({ gateway: { port: 4321, bind: "tailnet" } } as unknown as OpenClawConfig);
+    const probed: string[] = [];
+    w.deps.pageListening = async (base) => {
+      probed.push(base);
+      return false;
+    };
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(probed).toEqual(["http://127.0.0.1:4321"]);
+    expect(r.details).toMatchObject({ ok: false, state: "page_unreachable" });
+    expect(r.content[0]!.text).toContain("openclaw channels add --channel ademu");
+    expect(w.control.calls).toEqual([]);
+    expect(w.acquires).toEqual([]);
+    expect(w.opens).toEqual([]);
+    // the conversation is not left reserved: a later start (listener back) proceeds
+    w.deps.pageListening = async () => true;
+    expect((await w.call({ action: "start", agentName: "Iris" })).details).toMatchObject({ ok: true });
+  });
+
+  it("pageOriginListening asks the system: a listener on the origin → true, a closed port → false", async () => {
+    const server = http.createServer();
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const { port } = server.address() as AddressInfo;
+    expect(await pageOriginListening(`http://127.0.0.1:${port}`)).toBe(true);
+    await new Promise<void>((r) => server.close(() => r()));
+    expect(await pageOriginListening(`http://127.0.0.1:${port}`)).toBe(false);
   });
 
   it("a browser launcher that throws or returns false FAILS the start: lease disposed once, pairing cancelled, nothing written, no URL offered", async () => {
@@ -267,6 +296,11 @@ describe("enrollment page: the route", () => {
     const s = await serve(w, { limiters: { poll: one, confirm: open, unknownToken: open } });
     const port = new URL(s.base).port;
     for (const headers of [
+      { "x-forwarded-port": "443" },
+      { "x-forwarded-server": "proxy" },
+      { "tailscale-user-login": "someone@example.com" },
+      { "cf-connecting-ip": "203.0.113.9" },
+      { "true-client-ip": "203.0.113.9" },
       { "x-forwarded-for": "203.0.113.9" },
       { forwarded: "for=203.0.113.9;proto=https" },
       { "x-real-ip": "203.0.113.9" },
@@ -282,6 +316,19 @@ describe("enrollment page: the route", () => {
     expect((await raw(s.page(token, "/state"), { host: `localhost:${port}` })).status).toBe(200);
     const s2 = await serve(w);
     expect((await raw(s2.page(token, "/state"), { host: `[::1]:${new URL(s2.base).port}` })).status).toBe(200);
+  });
+
+  it("token-less traffic cannot spend the human's budget: unknown tokens draw only on the guessing budget, a live token has its own (Codex branch pass 2, #712 PR-a)", async () => {
+    // A header-stripping local proxy looks local; the bearer token is then the only boundary, and it
+    // must not be possible to starve the token holder without it.
+    const w = world();
+    const { token } = await started(w);
+    const s = await serve(w, { limiters: { poll: new FixedWindowLimiter(60_000, 2), confirm: new FixedWindowLimiter(60_000, 2), unknownToken: new FixedWindowLimiter(60_000, 1000) } });
+    for (let i = 0; i < 5; i++) {
+      expect((await fetch(s.page(UNKNOWN, "/state"))).status).toBe(404);
+      expect((await confirmPost(s.page(UNKNOWN, "/confirm"))).status).toBe(404);
+    }
+    expect((await fetch(s.page(token, "/state"))).status).toBe(200);
   });
 
   it("rate limits answer 429 (poll, confirm, and unknown-token guessing)", async () => {

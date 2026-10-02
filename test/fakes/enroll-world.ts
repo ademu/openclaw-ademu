@@ -70,6 +70,7 @@ export function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?:
       opens.push(url);
       return true;
     },
+    pageListening: async () => true,
   };
   const registry = new EnrollmentRegistry();
   const ctx = (over: Partial<OpenClawPluginToolContext> = {}): OpenClawPluginToolContext => ({
