@@ -2,11 +2,12 @@
 
 All notable changes to `@ademu/openclaw-ademu` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow semver from 0.1.0.
-Each release pins the exact `@ademu/adc-bin` (Ademú device daemon) version it was tested with.
+Each release names the minimum adc (the installed Ademú device host) it needs; since AdemuMLS #712 the
+plugin bundles no daemon. Releases up to 0.1.0 pinned the exact `@ademu/adc-bin` they were tested with.
 
 ## [Unreleased]
 
-Tested with `@ademu/adc-bin` **0.3.0**.
+Requires adc ≥ **0.6.0** (the installed device host; the plugin bundles none).
 
 ### Changed
 
