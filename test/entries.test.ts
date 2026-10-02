@@ -19,7 +19,7 @@ function fakeApi(mode: string, stateDir: string) {
       pluginConfig: { typingKeepaliveMs: 2500, mentionAliases: ["iris"] },
       runtime: {
         logging: { getChildLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) },
-        config: { mutateConfigFile: async () => ({}) },
+        config: { mutateConfigFile: async () => ({}), current: () => ({}) },
         channel: {},
         media: {},
         stateDir,
@@ -28,6 +28,10 @@ function fakeApi(mode: string, stateDir: string) {
       registerChannel: (r: { plugin: { id: string } }) => calls.push(["registerChannel", r.plugin.id]),
       registerTool: (_t: unknown, o: unknown) => calls.push(["registerTool", o]),
       registerService: (s: { id: string }) => calls.push(["registerService", s.id]),
+      registerHttpRoute: (r: { path: string; auth: string; match?: string; replaceExisting?: boolean }) =>
+        calls.push(["registerHttpRoute", { path: r.path, auth: r.auth, match: r.match, replaceExisting: r.replaceExisting }]),
+      registerInteractiveHandler: (r: { channel: string; namespace: string }) => calls.push(["registerInteractiveHandler", `${r.channel}:${r.namespace}`]),
+      on: (name: string, _h: unknown, opts: unknown) => calls.push(["on", { name, opts }]),
     } as never,
   };
 }
@@ -63,6 +67,13 @@ describe("entries", () => {
       fullEntry.register(api);
       expect(calls.some((c) => c[0] === "registerTool" && (c[1] as { name: string }).name === "ademu_enroll")).toBe(true);
       expect(calls.some((c) => c[0] === "registerService" && c[1] === "ademu-enroll-leases")).toBe(true);
+      // The enrollment page route registers in BOTH passes, replacing itself (the route table is process-wide).
+      expect(calls.filter((c) => c[0] === "registerHttpRoute").map((c) => c[1])).toEqual([
+        { path: "/plugins/ademu", auth: "plugin", match: "prefix", replaceExisting: true },
+      ]);
+      // Page-only ceremony: no channel button handlers and no inbound hooks are registered.
+      expect(calls.filter((c) => c[0] === "registerInteractiveHandler")).toEqual([]);
+      expect(calls.filter((c) => c[0] === "on")).toEqual([]);
       if (mode === "full") expect(calls.some((c) => c[0] === "registerChannel" && c[1] === "ademu")).toBe(true);
     }
     // No SQLite database and no daemon dir were created by registering.

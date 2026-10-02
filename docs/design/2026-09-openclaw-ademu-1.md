@@ -44,6 +44,33 @@ confirms → `confirm_words` with the **daemon's** words (never user- or model-t
 `enrolled` → mint a device token labelled `openclaw-<accountId>` → read the identity facts from the
 session's `get_self`. The token is returned exactly once and written straight into config.
 
+**Enrollment effort — a non-negotiable requirement (owner, recorded 2026-09-17).** Whichever door is
+used, the user's actions are exactly three: (1) ask OpenClaw to connect to Ademú (or run
+`openclaw channels add --channel ademu`), (2) scan the QR shown by the agent device with the Ademú app,
+(3) confirm that the four safety words match. No further command, copy-paste, file, or setting may be
+asked of the user. The wizard meets it with the terminal QR. The chat door meets it with the markdown
+data-URL image where the client renders images (the web UI) and, everywhere else — OpenClaw's **TUI
+renders no images** — with the **enrollment page** (implemented 2026-09-17, `src/enrollment-page.ts`,
+`src/enrollment-page-html.ts`; the design is the field-proven one from the earlier harness plugin):
+a page served by the plugin on the gateway's own HTTP server via `api.registerHttpRoute({ path:
+"/plugins/ademu", match: "prefix", auth: "plugin", replaceExisting: true })` — a data-free HTML shell at
+`/plugins/ademu/enroll/<pageToken>`, a polled `/state` JSON (the QR as a data URL, then the daemon's
+words, then the outcome) and a `/confirm` POST for the host-captured yes, which runs the tool's own
+confirm path (`confirmFromPage`: the daemon's words, the token mint, the config write with the routing
+binding). `start` **auto-opens** the page in the gateway host's browser (`open` / `xdg-open` /
+`cmd /c start`, detached) when its URL is loopback — exactly when the TUI user is on that machine —
+and returns the URL in any case (a pointer may transit the model; payloads never; a mangled URL fails
+safe to 404). The page token is a 160-bit ceremony-scoped bearer capability held in memory; the
+anti-substitution property still rests entirely on the human comparing the words with the phone. The
+route answers 404 to non-loopback clients unless `channels.ademu.enrollmentPage.baseUrl` or
+`gateway.publicOrigin` is set (then it never auto-opens: the browser is elsewhere);
+`enrollmentPage.autoOpen: false` opts out. Registration happens in `registerFull`, which OpenClaw runs
+in both the "full" and the per-tool-execution "tool-discovery" passes, so the registry the route reads
+is a `globalThis` singleton (`sharedEnrollmentRegistry`) and the route replaces itself. Finished
+enrollments stay readable (bounded `#recent`) so the page renders its outcome and a chat `status`/`wait`
+after a page-side yes says "done" instead of "nothing in progress". The wizard's hosted path keeps
+using the SDK's own hook for this idea, `prompter.openUrl` (V22).
+
 **Instruct-only install.** If the bundled binary is missing for a platform, the plugin says so and
 stops; it never downloads or installs anything on its own.
 
@@ -51,6 +78,146 @@ stops; it never downloads or installs anything on its own.
 `openclaw@beta` nightly (informational). Footnote, owner-ratified: the *derived* floor (2026.8.1)
 exceeds OpenClaw's `extended-stable` line (2026.6.34); extended-stable users can install once that line
 passes 2026.8.1. The README states the minimum host plainly.
+
+**Reshaped the same day (owner decisions, 2026-09-17 later): the model never confirms or cancels.**
+The four-word check only defends the ceremony if a human — and only a human — presses yes; a model
+relaying consent can be talked into it, and the lease token it had to carry was lost the same day
+(OpenClaw shows the model only a tool result's `content`, never `details`). So `ademu_enroll` now has
+exactly two actions, **`start`** and **`status`**: no `wait` (the words never enter the model context),
+no `confirm`, no `replace_token`, no `cancel`, and no lease token (follow-ups are bound by session key +
+sender + agent, all read-only). The human's yes / no arrive through **`confirmByHuman` /
+`cancelByHuman`** from two surfaces: the enrollment page (Yes + a new **No — they differ** button,
+`/cancel`) and, on media channels, **Yes / No buttons pushed into the conversation** by the plugin
+(`src/enrollment-channel.ts`: `sendDurableMessageBatch` from the public `channel-outbound` subpath
+sends the QR image + exact link at `start`, the words + buttons when the daemon reports them, and one
+outcome line; `registerInteractiveHandler` under the `ademu` namespace receives the click — only from
+the requester, only when the host vouches for the sender — on **telegram, slack, discord**, the only
+channels that dispatch plugin interactive handlers in 2026.9.1). The lane is decided BEFORE any device
+exists: gateway surfaces → page; button channels → push with buttons; other channels → push with the
+page link only if the page is remotely reachable (`enrollmentPage.baseUrl` / `gateway.publicOrigin`),
+otherwise `start` refuses with the wizard and the setting as the way out, and nothing is created. A
+duplicate token label on the device this ceremony created can only be our own earlier attempt (labels
+are unique per device and `start` always creates a fresh device), so it is replaced without asking; the
+wizard's reconnect path keeps its explicit question. Known gaps, recorded in the README's table: a TUI
+over SSH or a remote web UI without `enrollmentPage.baseUrl` cannot reach the page; a phone-only user
+must tap the `ademu://` link, which Telegram does not linkify (an https universal link on the Ademú side
+is the follow-up); group chats on button channels show the words to the group. The Round 3–5 hardening
+notes below that mention a chat `cancel` / `confirm` describe the removed actions; their invariants
+(a NO landing during a YES wins, `committing` refuses the NO, duplicate decisions are serialized) now hold
+for the human surfaces and are pinned by `test/enroll-tool.test.ts` and `test/enrollment-channel.test.ts`.
+
+**Reply-to-confirm (owner decision, 2026-09-18).** On channels without plugin buttons the human's
+yes / no is a **quoted reply to the plugin's own words message** (`src/enrollment-reply.ts`). A bare
+"yes" in the conversation was rejected as a decision surface: for three minutes it would change the
+meaning of ordinary conversation. Mechanism: the typed hook `api.on("before_dispatch", handler,
+{ priority: 100 })` (the legacy `api.registerHook` never fires for typed hook names) runs on every
+inbound agent-bound message after admission and command handling and before the model; the first
+handler returning `{ handled: true }` wins and its `text` is delivered through the normal final-reply
+path. The handler claims a message only when ALL hold: the text is exactly one of `yes`/`y`/`no`/`n`
+(trailing `.`/`!` tolerated); it quotes the words message — matched by the platform id the batch sender
+returned when the words were pushed (`receipt.primaryPlatformMessageId`, else the first
+`results[].messageId`, stored as `wordsMessageId`), or, where a channel's inbound and outbound ids
+differ, by a quoted body carrying all four words of a live words-phase enrollment of the same session;
+the session matches; the sender is the starter (`requesterSenderId`). Anything else — including an
+unquoted yes — returns `handled: false` and flows to the model untouched; a quoted reply from someone
+else or after the outcome is answered ("only the person who started…" / the status), never acted on.
+`REPLY_CAPABLE_CHANNELS` (fail closed, verified against 2026.9.1 extension sources): whatsapp, signal,
+telegram, slack, discord, matrix, mattermost, googlechat. Unverified (quoted id seen on the outbound side
+only) and therefore refused at `start` unless the page is reachable: imessage, irc, nextcloud-talk,
+feishu, buzz, tlon, clickclack, msteams (quoted id for channel posts only). No quoting at all: line, sms,
+nostr, synology-chat, twitch, zalo, zalouser, a2a, raft. The refusal travels in the tool result and the
+model relays it (no host push for the refusal). The hook registers in every registration pass: the
+per-tool-execution tool-discovery registry is separate and inert, and registering there keeps
+`openclaw plugins inspect --runtime` (which loads plugins in that mode) reporting `hookCount: 1` —
+verified on the owner's OpenClaw 2026.8.2 host on 2026-09-18. Pinned by `test/enrollment-reply.test.ts`.
+
+**Push lane withdrawn from this branch (owner decision, 2026-09-23).** The chat-channel lane described
+in the two paragraphs above and the live finding below — `src/enrollment-channel.ts` (QR + words + Yes /
+No buttons pushed through `sendDurableMessageBatch`, `registerInteractiveHandler` on telegram / slack /
+discord), `src/enrollment-reply.ts` (quoted-reply decisions via `before_dispatch`), the lane selection in
+`start`, and their tests — is NOT part of this branch any more. Two reasons. First, the product
+assumption for this release is that the user has direct access to the gateway machine: every `start`,
+from any chat, opens the enrollment page there, and a user on a VPS runs the terminal wizard. Second,
+the Codex review of 2026-09-23 found two High issues that lived only in that lane (a button click
+authorised by any host-vouched sender when the ceremony had no `requesterSenderId`; a quoted "no"
+ignored once the phase left `words_shown`) and one that it made worse (the page token, a bearer
+credential for `/confirm` and `/cancel`, travelling in tool results in both lanes). The code was moved
+verbatim to the `feature/outbound-mirror` branch together with the outbound-mirror work, so the
+paragraphs above remain accurate for that branch. On this branch the ceremony has one surface, the
+page, and the tool result no longer reports a `lane`. Pinned by `test/enroll-tool.test.ts` (registration
+test: no interactive handlers, no hooks) and `test/entries.test.ts`.
+
+**The page token never reaches the model (Codex 2026-09-23 High #1, owner decision the same day).** The
+page URL's token is the bearer credential for `/state`, `/confirm` and `/cancel`; the tool result used to
+print it (with an instruction to paste it) and carry it in `details`, so an agent with any HTTP tool could
+read the words and post the yes — "you cannot confirm" was an instruction, not an enforcement. Since
+the product assumption is that the user sits at the gateway machine, the model is a courier nobody needs.
+Now: (1) `start` checks BEFORE creating a device that the gateway's own origin is loopback
+(`isLoopbackEnrollmentPageUrl(enrollmentPageBaseUrl(cfg))`); otherwise `page_unreachable`, nothing created,
+wizard named. (2) After the device exists the launcher is called; `false` or a throw is
+`PageOpenFailedError` → `admitAndStart` disposes the lease (pairing cancelled) → `page_open_failed`, wizard
+named — the URL is never offered as a fallback. (3) The `start` result is a fixed string ("the page has
+OPENED … you were given no link, no code and no words") with `details` `{ok, state, deviceId, accountId,
+pageOpened: true}`; the QR data URL and the `ademu://` payload left the result with the URL (they are on
+the page). (4) The route sets `active.pageServed` on a `GET` of the shell (not `HEAD`); `status` in
+`scanning` with `pageServed === false` and ≥ `PAGE_REOPEN_GRACE_MS` (5 s, `deps.lease.now()` clock) since
+the last launch calls the launcher again and appends a "opened it again" sentence, `details.pageReopened:
+true` — the plugin's own fallback for a launcher that spawned but showed nothing. (5) Removed:
+`channels.ademu.enrollmentPage.{autoOpen,baseUrl}` (zod schema, manifest, uiHints, `resolveEnrollmentPage`),
+the `gateway.publicOrigin` fallback and the `config-contracts` import, `shouldAutoOpenEnrollmentPage`, the
+`remoteAllowed` exception in the route (loopback clients only, unconditionally) and `EnrollmentPageDeps.cfg`.
+Accepted residue: the loopback route still answers any local process holding the token, so a model with a
+local HTTP tool AND the token could act — but the token now exists only in the registry and the launcher's
+argv; the earlier README sentence "the page URL is then a bearer link" described the remote setting and
+went with it. Pinned by `test/enrollment-page.test.ts` ("the tool's start result": no URL / token / QR in
+text or details; non-loopback bind refuses before the device; launcher failure disposes; re-open after
+grace, not after a served GET, not after HEAD) and `test/enroll-tool.test.ts` (#14 retargeted at the
+launcher).
+
+**`start` never disposes a live ceremony (Codex 2026-09-23 High #2, owner decision the same day).** The
+supersede-on-start rule ("the same creator tuple may restart") predates the 2026-09-17 removal of the
+model's `cancel`; with no cancel action left, a `start` that disposed the in-progress ceremony was that
+action in disguise — and it is the model that calls `start`. Now `admitAndStart` never disposes: the same
+creator tuple gets `reportStatus(previous, { alreadyRunning: true })` — the phase, `ok: false` (nothing was
+started), `alreadyRunning: true`, the page re-opened if no browser ever fetched it, no URL — and a stranger
+sharing the session key is still refused with `busy` and learns nothing. A new ceremony is admitted only
+once the previous one is terminal (done / failed / cancelled / expired; `forSession` prunes disposed
+leases). Because the page's **No** lives on the words screen, a ceremony in `scanning` would otherwise have
+had no human exit before the TTL, so the scan screen gained **Cancel this enrollment** (`#cancel-scan`,
+same `/cancel` endpoint, same `cancelByHuman`; the cancelled screen's body no longer presumes "the words
+differ"). Tests that pinned supersession flipped: the TTL test, R2#8 (same creator → status, `released()`
+stays 0) and R6#3 (a start during the host mutation reports `confirming`, the yes completes, the write
+happens once). Pinned by `test/enroll-tool.test.ts` ("a `start` while a ceremony is live NEVER disposes it")
+and `test/enrollment-page.test.ts` ("cancel before the scan").
+
+**Live finding, Telegram (owner's OpenClaw 2026.8.2, 2026-09-18): outbound media refuses `data:` URLs.**
+The first two chat-door attempts from Telegram ended in the plugin's own "could not deliver the QR"
+refusal (nothing created). Reproduced with the host's `openclaw message send`: text delivers; a
+`data:image/png;base64,…` media URL is rejected by the host with "data: URLs are not supported for
+media. Use buffer instead." (`src/agents/sandbox-paths.ts`). Fix: `pushQr` writes the PNG to a private
+file (`<state dir>/ademu/enrollment-qr/enroll-<random>.png`, dir 0700, file 0600), sends it as a local
+`mediaUrl` with a `mediaAccess.localRoots` grant for that directory (the earlier harness plugin's
+lane), and the registry removes the file when the ceremony leaves the live set (`#remember`, and
+`disposeAll` on plugin stop). If the image is refused anyway, the caption with the exact link is sent
+alone and the tool result says so (`qrImageSent: false`). The push failure reason (host status / stage /
+error class, never payload text) now travels in the tool result so the model can relay it to the user —
+the silent `false` cost a debugging round-trip. Also found on the way: the tool was invisible from
+Telegram until `commands.ownerAllowFrom` gained `telegram:<user id>` — the owner gate is the host's, and
+the README should say so (follow-up).
+
+**Live finding, Telegram (2026-09-18, second attempt): the ceremony died with the tool call's turn.**
+Daemon log: device created 15:21:56, `get_pairing_display` polled once a second until 15:22:01 and then
+never again; the phone scanned at 15:23:16 ("owner certificate verified, confirmation words ready");
+the 3-minute TTL cancelled the device at 15:24:56. The plugin had reported "scanning" throughout. Cause:
+`createEnrollmentLease` forwarded the tool call's AbortSignal into the lease's own controller for the
+lease's whole life, and OpenClaw 2026.8.2 aborts that signal when the `start` turn returns (the web UI
+did not, which is why the page flow worked earlier the same day; the 2026-09-16 field note had already
+recorded this class of failure as "lease dies at turn end"). The poll rejection handler then correctly
+treated an aborted signal as "our own dispose" and left the entry untouched — so nothing was written,
+nothing announced, and the scan was lost. Fix: the caller's signal governs only the daemon acquisition
+(a cancelled call must not leave a daemon spawning); it is detached once the lease exists, and from
+then on only dispose (any path, TTL included) aborts `lease.signal`. Pinned by the tool test "the tool
+call's signal aborting AFTER start … leaves the ceremony alive".
 
 ## 3. The ingress design — Option B (owner decision, 2026-09-04)
 
@@ -107,18 +274,60 @@ B is valid in both tiers. Two asks: a terminal disposition on `ChannelTurnResult
 ## 4. The daemon — ownership, identity, lifecycle
 
 **Identity.** A daemon is identified by the canonicalized pair `(dataDir, controlSocket)` (realpath of
-the deepest existing ancestor + verbatim tail, because Ademú joins paths verbatim). Cross-axis
-collisions across accounts (one data dir with two sockets, one socket for two data dirs) are a config
-validation error that blocks `startAccount`. The **session** socket is what `daemon_info`
-reports whenever a daemon is reachable — never re-derived then (a squatter on a derived path would
-receive the bearer token); only an *unreachable* foreign acquisition keeps the deterministic configured
-path, and its session connect then fails until the daemon answers.
+the deepest existing ancestor + verbatim tail, because Ademú joins paths verbatim), plus — since ADC
+Phase 3b Phase B (2026-09-30, openclaw-ademu#12) — its **enrollment socket** (`<dataDir>/adc-enroll.sock`
+or `enrollSocketPath`) and a **scope**. Cross-axis collisions across accounts (one data dir with two
+control sockets or two enrollment sockets, one control or enrollment socket for two data dirs) and a
+socket-role error (the enrollment socket naming the control or session socket — the plugin would drive
+the ceremony with ambient operator authority) are config validation errors that block `startAccount`
+and the doors. The bundled daemon must be at least `MIN_BUNDLED_ADC_VERSION` (0.5.0, the first with an
+enrollment socket): an older bundle is refused before any spawn. The **session** socket is what `daemon_info` reports whenever a
+daemon is reachable — never re-derived then (a squatter on a derived path would receive the bearer
+token); only an *unreachable* foreign acquisition keeps the deterministic configured path, and its
+session connect then fails until the daemon answers.
+
+**The plugin never opens the control socket (Phase B).** The broker probes `daemon_info` over the
+ENROLLMENT socket (`@ademu/adc-control` `connectEnroll`); the ceremony half opens only that socket
+(the seven ceremony ops, pinned to the device the connection created, one terminal mint); the runtime
+half opens only the session socket with the token. `PrivilegeError` (EACCES/EPERM) from the probe is
+"a daemon exists that this uid may not open" — propagated typed, never read as absent, never a spawn;
+`remedyFor` turns it into the operator ceremony for the wizard and the tool, `classifyError` into
+`blocked` for the runtime. **Scope `system`**: with nothing configured and the client's
+`detectSystemInstall()` firing (a root-owned regular `/etc/adc/config.toml` AND a socket at
+`/run/adc/adc-enroll.sock` — never `/run/adc`'s owner, which is the service user), the identity IS the
+system layout (`/var/lib/adc`, the three `/run/adc` sockets) and `acquire` returns a foreign lease
+before any ownership row is read: zero claims, zero spawns (the coexistence gap, AdemuMLS#642). A
+refused enrollment socket still yields that lease — the session socket is the runtime's door and the
+ceremony half meets the refusal itself. Any explicit `dataDir`/`socketPath`/`enrollSocketPath` keeps
+user scope.
+
+**The recorded scope (`daemonScope`).** A token belongs to the daemon that minted it, so both doors
+record the scope they enrolled at under the account (`applyEnrollment`; per account, never inherited
+from the root). `resolveDaemonIdentity` applies, in order: an explicit key → user scope at those paths
+(`scopeSource: "explicit"`); the recorded scope → that scope whatever the host looks like now
+(`"enrolled"` — a system-scope account waits for a down or not-yet-started system daemon instead of
+spawning a private one, a user-scope account is not moved onto a system install added later); nothing
+→ the detector (`"detected"`, also every account enrolled before the key). The doors resolve with the
+recorded scope ignored (`inspectAdemuAccountForEnrollment`), so re-enrolling is how an agent moves. In
+the broker, a user-scope identity whose source is `explicit` or `enrolled` is checked against the
+client's detector before any spawn: on a system install it is never spawned beside it —
+`DaemonScopeError`, `blocked`, our own copy naming the keys to remove or the re-enrollment (the client's
+own refusal inside `ensureDaemon` is a `PrivilegeError` with the same code as a plain EACCES, so it
+cannot say why). The same check runs before an upgrade claims its stop (Codex scope review #1): a
+reachable outdated daemon is kept on its version, a pre-0.5.0 one is refused without being stopped —
+a running daemon is never killed for a replacement that could not start. With no ownership row, a
+non-empty data dir and nothing answering, the recorded user scope is refused too (#2: the plugin's own
+dir after a lost record, which would otherwise retry forever); an explicit key there keeps the
+unreachable foreign lease, since the operator's own daemon may come back. A daemon already answering
+at those paths is attached as before; a `detected` user scope keeps the client's refusal as the
+backstop for a system install that appears mid-flight.
 
 **Default isolation (approval rider R2).** Default `dataDir` = `<OPENCLAW_STATE_DIR>/ademu/adc`,
-control socket `<dataDir>/adc.sock`, session socket `<dataDir>/adc-session.sock`. Every owned spawn
-receives `ADC_DATA_DIR`, `ADC_SOCKET_PATH`, `ADC_SESSION_SOCKET_PATH` (all three — the Linux
-`$XDG_RUNTIME_DIR` rungs would otherwise collide with an operator daemon) plus `ADC_REST_BASE_URL` /
-`ADC_WS_URL` from `channels.ademu.server` (defaults = Ademú production; **R11** — a fresh plugin data
+control socket `<dataDir>/adc.sock`, session socket `<dataDir>/adc-session.sock`, enrollment socket
+`<dataDir>/adc-enroll.sock`. Every owned spawn receives `ADC_DATA_DIR`, `ADC_SOCKET_PATH`,
+`ADC_SESSION_SOCKET_PATH`, `ADC_ENROLL_SOCKET_PATH` (all four — the Linux `$XDG_RUNTIME_DIR` rungs
+would otherwise collide with an operator daemon) plus `ADC_REST_BASE_URL` / `ADC_WS_URL` from
+`channels.ademu.server` (defaults = Ademú production; **R11** — a fresh plugin data
 dir has no `config.toml` and the daemon refuses to start without endpoints). An operator's own `adc`
 (e.g. `~/.local/share/adc`) is reached only by explicit config.
 
@@ -139,16 +348,22 @@ through an **atomic shutdown fence**: one transaction sweeps stale holders and, 
 `bound → stopping`; acquisitions fail while `stopping`. Setup leases (wizard, tool) may spawn but never
 stop — an idle owned daemon is harmless and is adopted by the runtime later (`pending-publication →
 bound` promotion by the runtime's acquire; a 1 h sweep for never-published ones, through the same
-fence). Stop sequence: control `shutdown` op (the daemon's own verb; it is daemon-global, acceptable
-only because an owned data dir hosts nothing but this plugin's devices) → SIGTERM → SIGKILL, hard-capped
-at 2500 ms; still alive at the cap → `stale`.
+fence). Stop sequence (Phase B): verified-pid SIGTERM (2 s grace) → SIGKILL, hard-capped at 2500 ms;
+still alive at the cap → `stale`. The control `shutdown` op is gone with the control connection: a
+signal targets the pid whose start time and `adc daemon run` command the row recorded at spawn,
+re-verified with the `stopping` generation immediately before each signal, so an impostor on the
+socket path is neither shielded nor endangered. A row without a pid can only be observed gone.
 
 **Signal divergence, recorded.** Signal's plugin owns its daemon unconditionally; we attach-if-running
 (adc is single-instance per socket) and decide owned/foreign before ever calling `ensureDaemon`.
 
 **Upgrade.** Bundled `@ademu/adc-bin` version ≠ the bound daemon's parsed leading semver
 (`"0.2.4 (abc)"` → `0.2.4`; unparsable → never) → stop through the fence → respawn under a new
-generation. Runtime role only.
+generation. Runtime role only. A bound daemon that is silent on its enrollment socket but whose
+recorded process is verified alive and whose recorded version differs from the bundled one is a daemon
+from before the enrollment socket (< 0.5.0): it takes the same fenced stop-and-respawn; a same-version
+silent daemon is still never touched (it may be slow), and a null recorded version fails closed
+(documented manual stop).
 
 ## 5. The account lifecycle (`startAccount`)
 
@@ -192,7 +407,7 @@ daemon relays each tick as one frame (adc 0.3.0, AdemuMLS#621); no heartbeat typ
 
 ## 7. Configuration, secrets, owner authority
 
-- `channels.ademu` — root-level `dataDir`/`socketPath`/`server` inherited by accounts; `groups.<id>`
+- `channels.ademu` — root-level `dataDir`/`socketPath`/`enrollSocketPath`/`server` inherited by accounts; `groups.<id>`
   (`requireMention`, `toolsBySender`, …); `accounts.<id>` with `agentName`, `deviceId`, `agentUserId`,
   `ownerUserId`, `token` (plain string by default — the wizard writes it — or a SecretRef;
   `uiHints` marks it sensitive). Schema built with `buildMultiAccountChannelSchema`, hybrid config
@@ -206,9 +421,41 @@ daemon relays each tick as one frame (adc 0.3.0, AdemuMLS#621); no heartbeat typ
   other than you"); the tool grants automatically (its initiator is owner-by-scope and confirmed the
   words from the same phone). *Rider B:* removing the account (`config.deleteAccount`) or logging it
   out (`gateway.logoutAccount`) prunes the entry when no other Ademú account shares that owner.
+- **Routing binding (2026-09-17, owner-ratified).** The third enrollment write, chat door only: the
+  tool's config mutation also appends `bindings: [{ agentId, match: { channel: "ademu", accountId } }]`
+  for the *enrolling* agent — `ctx.agentId`, which must name a configured agent (`listAgentIds`); there
+  is **no fallback to a default agent**. Refusals happen at `start`, before any device exists, and are
+  re-checked inside the write: no configured agent for the conversation → refused; the account's route
+  already owned by another agent → refused, never overwritten. The wizard door is unchanged (OpenClaw's
+  own `channels add` flow asks "Route these channel accounts to agents now?"). *Rider B, extended:*
+  `config.deleteAccount` prunes the account's own route row (wildcard/peer-scoped rows and other channels
+  stay); logout keeps the account block and therefore its binding. Implementation: `src/bindings.ts`
+  mirrors the host's private `applyAgentBindings` (not importable from any public plugin-sdk subpath);
+  one recorded divergence — the host "upgrades" a same-agent channel-wide row in place, the plugin
+  appends an account-scoped row instead (a chat tool never edits a binding it did not write);
+  `test/gates/binding-shape.test.ts` pins the host shape. Why: verified 2026-09-16 on OpenClaw 2026.8.2
+  that an unbound account under `agents.ownership: "explicit"` makes the router throw
+  `AGENT_SELECTION_REQUIRED` → ingress halts before adoption → the account restart-loops with gray
+  ticks and no reply; with implicit ownership the message reaches the default agent instead.
 - No `auth.login`: OpenClaw's login path may not mutate channel config. Reconnecting an enrolled device
-  is the wizard's "Connect an already-enrolled agent" (mints a new token under the same label; an
-  existing label asks for explicit replace consent → `replace: true`).
+  is the wizard's **"I have a device token"** (Phase B, 2026-09-30): an operator mints the token at the
+  CLI (`adc [--system] token mint <device_id> --label openclaw-<accountId>`), the wizard takes it as a
+  sensitive text before any daemon lease, checks it over the session socket (`get_self`; hello and self
+  must agree), and writes the account. No `list_devices`, no mint over the control socket, no replace
+  consent: the enrollment socket mints at most one token per device and refuses `replace`. The three
+  failure dispositions the plugin owes (spec M20): `daemon_info` is read before the mint (the mint
+  closes the connection); a lost mint reply or a taken label ends as `mint_lost` with the
+  mint-a-fresh-label instruction, never a `replace` retry; a config write that fails after the mint
+  names the label to revoke (the chat door returns `commit_failed`, and the page's failed screen shows
+  the same instruction; a wizard failure past the mint shows it whatever the error; the host's own
+  save of the returned config happens after `finalize` and is outside the plugin — a documented
+  residual); a hardened host with no ceremony possible (refused socket, full quota, an absent or silent
+  enrollment socket) prints the operator ceremony. The token door ignores an enrollment-socket refusal
+  at acquisition and probes the identity's own session socket without a lease. All copy is composed
+  from the daemon identity in `src/operator.ts` — `sudo adc --system` or `ADC_DATA_DIR` +
+  `ADC_SOCKET_PATH`, paths and names single-quoted — never from the client's message. On a detected
+  system install the broker keeps a refused enrollment socket from blocking a running account (the
+  session socket is its door; the refusal is logged); at user scope it is `blocked`.
 - Windows: guarded before any socket resolver (`process.geteuid` is absent there) → `blocked`.
 
 ## 8. Privacy
@@ -255,7 +502,7 @@ bait-tree self-test).
 SDK durable ingress queue (trust-gated; Tier C note); Control UI QR parity (`loginWithQrStart/Wait`
 has no words step); `auth.login`; `accountScopedRestart`; ambient `room_event` injection; a proper
 icon (the shipped one is generated); npm/ClawHub publishing (launch calendar); Windows; media, threads,
-edit/unsend; residual R10 (at-most-once for callback-free zero-output completions).
+edit/unsend; residual R10 (at-most-once for callback-free zero-output completions). Using the enrollment page from the wizard's hosted (Control UI) path; an https universal link for the enrollment payload (Ademú side) so phone-only users on Telegram can tap it; nothing typed by the user beyond that.
 
 ## 11. Versioning
 
@@ -438,6 +685,14 @@ says green.
 **Repo gates (T21):** ruleset "main gate" id 22259787 (PR required / 0 reviews, no force-push or
 deletion, required check `ci-gate`, admin bypass); Issues enabled. **Monorepo pointer PR (T22):**
 ademu/AdemuMLS#221.
+
+**Enrollment page (2026-09-17).** The three-action requirement (§2) was found unmet on the TUI (no image
+rendering → only the `ademu://` text). Shipped the gateway-served enrollment page + loopback auto-open
+described in §2, sharing the tool's registry and confirm path; `test/enrollment-page.test.ts` drives the
+real route on a loopback `http.Server` against enrollments the real tool created (shell without ceremony
+data + nonce CSP, token and exposure gates, method guards, rate limits, scan → words → Yes → enrolled with
+exactly one `confirm_words`, mismatch, cancel-from-chat, confirm-from-chat, `label_exists`). New SDK
+symbols: `core → resolveGatewayPort`, `config-contracts → resolveGatewayPublicOrigin` (floor unchanged).
 
 ## 13. Close-out (2026-09-08)
 

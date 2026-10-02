@@ -7,12 +7,17 @@
 //               never spawn, never stop, never upgrade.
 //   holders   = cross-process leases (`daemon_holders`, heartbeat 30 s). Only the gateway RUNTIME
 //               role may stop a daemon, and only through the atomic fence: sweep stale holders → no
-//               other live holder → CAS bound→stopping (new generation) → shutdown op → kill fallback.
-//               Setup leases (wizard, chat tool) may spawn but NEVER stop anything.
-//   spawn     = `ensureDaemon` from @ademu/adc-control with OUR `spawnFn`, which injects the five
-//               env vars (ADC_DATA_DIR, ADC_SOCKET_PATH, ADC_SESSION_SOCKET_PATH, ADC_REST_BASE_URL,
-//               ADC_WS_URL), re-checks abort synchronously, and persists the CHILD pid/start facts
-//               into the `starting` row before returning (daemon_info carries no pid).
+//               other live holder → CAS bound→stopping (new generation) → verified-pid SIGTERM →
+//               SIGKILL. Setup leases (wizard, chat tool) may spawn but NEVER stop anything.
+//   spawn     = `ensureDaemon` from @ademu/adc-control with OUR `spawnFn`, which injects the six
+//               env vars (ADC_DATA_DIR, ADC_SOCKET_PATH, ADC_SESSION_SOCKET_PATH, ADC_ENROLL_SOCKET_PATH,
+//               ADC_REST_BASE_URL, ADC_WS_URL), re-checks abort synchronously, and persists the CHILD
+//               pid/start facts into the `starting` row before returning (daemon_info carries no pid).
+//   sockets   = ADC Phase 3b Phase B: the plugin NEVER opens the control socket. The probe dials the
+//               ENROLLMENT socket (`daemon_info` is in its op table); `PrivilegeError` there means "a
+//               daemon exists but this uid may not open it" — never "nothing listening", never a
+//               spawn. A system-scope install (identity.scope === "system") is attach-only: a foreign
+//               lease at the system layout, zero claims, zero spawns (the coexistence gap, #642).
 //
 // Every timing constant is a named export; every process/fs/net effect goes through `DaemonDeps`
 // so the state machine is testable with fakes.
@@ -22,8 +27,15 @@ import type { Duplex } from "node:stream";
 import { chmodSync, existsSync, lstatSync, readdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { PlatformPackageMissingError, resolveAdcBinaryPath, UnsupportedPlatformError } from "@ademu/adc-bin";
-import { connect as connectControlReal, ensureDaemon as ensureDaemonReal, type ChildLike, type DaemonInfoResult } from "@ademu/adc-control";
-import { canonicalizePath, type DaemonIdentity } from "../config.js";
+import {
+  connectEnroll as connectEnrollReal,
+  detectSystemInstall as detectSystemInstallReal,
+  ensureDaemon as ensureDaemonReal,
+  PrivilegeError,
+  type ChildLike,
+  type DaemonInfoResult,
+} from "@ademu/adc-control";
+import { canonicalizePath, ENROLL_SOCKET_FILE, type DaemonIdentity } from "../config.js";
 import { strings } from "../i18n/strings.js";
 import type { AdemuStore, OwnershipRow, OwnershipState } from "../store.js";
 
@@ -33,12 +45,33 @@ export const WAIT_POLL_MS = 250;
 export const WAIT_FOR_BOUND_MS = 20_000;
 export const WAIT_WHILE_STOPPING_MS = 15_000;
 export const RELEASE_CAP_MS = 2_500;
-export const SHUTDOWN_OP_MS = 1_500;
-export const SIGTERM_GRACE_MS = 500;
+/** SIGTERM is the graceful stop (the daemon's foreground loop ends on it); SIGKILL lands inside the cap. */
+export const SIGTERM_GRACE_MS = 2_000;
 export const HEARTBEAT_MS = 30_000;
 export const PENDING_PUBLICATION_SWEEP_MS = 3_600_000;
 /** Bound on ensureDaemon's pre-spawn bare probe (its `connectFn` seam; the package sets none). */
 export const PROBE_CONNECT_MS = 1_000;
+/** The first adc that binds the enrollment socket; an older bundled daemon can never become ready here. */
+export const MIN_BUNDLED_ADC_VERSION = "0.5.0";
+
+/** `a >= b` on parsed `x.y.z` versions; an unparsable side is "not at least" (fail closed). */
+export function versionAtLeast(a: string | undefined, b: string): boolean {
+  const pa = parseAdcVersion(a);
+  const pb = parseAdcVersion(b);
+  if (!pa || !pb) return false;
+  const [a1, a2, a3] = pa.split(".").map(Number) as [number, number, number];
+  const [b1, b2, b3] = pb.split(".").map(Number) as [number, number, number];
+  return a1 !== b1 ? a1 > b1 : a2 !== b2 ? a2 > b2 : a3 >= b3;
+}
+
+/** The explicit config keys behind a user-scope identity, in config order (for the operator's copy). */
+function explicitKeys(identity: DaemonIdentity): string[] {
+  const keys: string[] = [];
+  if (identity.explicit.dataDir) keys.push("dataDir");
+  if (identity.explicit.socketPath) keys.push("socketPath");
+  if (identity.explicit.enrollSocketPath) keys.push("enrollSocketPath");
+  return keys;
+}
 
 export type Role = "runtime" | "setup";
 /** Whether a `starting` generation came from a never-bound fresh claim or from existing ownership. */
@@ -49,9 +82,9 @@ export type ServerEndpoints = { restBaseUrl: string; wsUrl: string };
 
 export type ProcessFacts = { alive: boolean; startedAt?: string; command?: string };
 
-export type ControlLike = {
+/** What the broker needs from an ENROLLMENT-socket connection: `daemon_info` and nothing else (no verb can stop a daemon). */
+export type EnrollLike = {
   daemonInfo(): Promise<DaemonInfoResult>;
-  request<R>(op: string, params?: object, options?: { timeoutMs?: number }): Promise<R>;
   close(): Promise<void>;
 };
 
@@ -64,7 +97,7 @@ export type DaemonDeps = {
   selfPidStartedAt: string;
   spawn: (cmd: string, argv: string[], opts: object) => ChildLike & { pid?: number | undefined };
   ensureDaemon: typeof ensureDaemonReal;
-  connectControl: (socketPath: string) => Promise<ControlLike>;
+  connectEnroll: (socketPath: string) => Promise<EnrollLike>;
   resolveBinaryPath: () => string;
   kill: (pid: number, signal: NodeJS.Signals) => void;
   isDirAbsentOrEmpty: (dir: string) => boolean;
@@ -74,6 +107,8 @@ export type DaemonDeps = {
   probeConnect: (path: string) => Duplex;
   bundledVersion: string;
   platform: string;
+  /** The client's system-install detector (two stats, no connect), consulted before a user-scope spawn. */
+  detectSystemInstall: () => boolean;
   /** Closed-allowlist structured log: never a path with secrets, never `.detail`. */
   log: (event: string, fields?: Record<string, string | number | boolean>) => void;
 };
@@ -82,6 +117,18 @@ export class DaemonUnsupportedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "DaemonUnsupportedError";
+  }
+}
+/**
+ * A user-scope identity that an explicit key or the account's recorded scope holds in place, on a host
+ * where a system-scope daemon is installed: the broker never spawns beside it (AdemuMLS#642). The
+ * message is our own copy naming why and what to do — the client's own refusal inside `ensureDaemon`
+ * cannot, as its `PrivilegeError` is the same type and code as a plain EACCES.
+ */
+export class DaemonScopeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DaemonScopeError";
   }
 }
 export class DaemonBusyError extends Error {
@@ -127,7 +174,8 @@ export type Lease = {
   identity: DaemonIdentity;
   holderId: string;
   info: {
-    controlSocketPath: string;
+    /** The enrollment socket the ceremony half dials (never the control socket). */
+    enrollSocketPath: string;
     sessionSocketPath: string;
     daemonVersion?: string | undefined;
     generation?: number | undefined;
@@ -150,6 +198,7 @@ export function daemonEnv(identity: DaemonIdentity, server: ServerEndpoints, bas
     ADC_DATA_DIR: identity.raw.dataDir,
     ADC_SOCKET_PATH: identity.raw.controlSocket,
     ADC_SESSION_SOCKET_PATH: identity.raw.sessionSocket,
+    ADC_ENROLL_SOCKET_PATH: identity.raw.enrollSocket,
     ADC_REST_BASE_URL: server.restBaseUrl,
     ADC_WS_URL: server.wsUrl,
   };
@@ -181,37 +230,29 @@ export function realDaemonDeps(params: { store: AdemuStore; bundledVersion: stri
     selfPidStartedAt: self.startedAt ?? "",
     spawn: (cmd, argv, opts) => realSpawn(cmd, argv, opts as never) as unknown as ChildLike & { pid?: number },
     ensureDaemon: ensureDaemonReal,
-    connectControl: async (socketPath) => (await connectControlReal({ socketPath })) as unknown as ControlLike,
+    connectEnroll: async (socketPath) => (await connectEnrollReal({ socketPath })) as unknown as EnrollLike,
     resolveBinaryPath: resolveAdcBinaryPath,
     kill: (pid, signal) => process.kill(pid, signal),
-    isDirAbsentOrEmpty: (dir) => !existsSync(dir) || readdirSync(dir).length === 0,
+    // An unreadable dir (e.g. an explicit dataDir pointing at /var/lib/adc, 0700 adc) is "not ours to
+    // spawn into" — foreign, never a raw EACCES out of acquire.
+    isDirAbsentOrEmpty: (dir) => {
+      if (!existsSync(dir)) return true;
+      try {
+        return readdirSync(dir).length === 0;
+      } catch {
+        return false;
+      }
+    },
     secureEmptyDir: realSecureEmptyDir,
     probeConnect: boundedProbeConnect,
     bundledVersion: params.bundledVersion,
     platform: process.platform,
+    detectSystemInstall: () => detectSystemInstallReal(),
     log: params.log ?? (() => {}),
   };
 }
 
 type Probe = { info: DaemonInfoResult; matches: boolean };
-
-/** Real-clock bound for a control-plane round trip (the fake clock in tests never reaches it). */
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("control round trip timed out")), Math.max(1, ms));
-    t.unref?.();
-    p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      (e: unknown) => {
-        clearTimeout(t);
-        reject(e);
-      },
-    );
-  });
-}
 
 /**
  * A unix-socket connect that cannot hang: if neither `connect` nor an error arrives within
@@ -253,12 +294,19 @@ export function realSecureEmptyDir(dir: string): "absent" | "ok" | "unsafe" {
   return "ok";
 }
 
-/** True when the daemon at the other end is exactly the identity we own (all three paths). */
+/** True when the daemon at the other end is exactly the identity we own (every path it reports). */
 export function infoMatchesIdentity(info: DaemonInfoResult, identity: DaemonIdentity): boolean {
   const dataDir = info.data_dir ? canonicalizePath(info.data_dir) : "";
   const control = info.socket_path ? canonicalizePath(info.socket_path) : "";
   const session = info.session_socket_path ? canonicalizePath(info.session_socket_path) : "";
-  return dataDir === identity.dataDir && control === identity.controlSocket && (!session || session === identity.sessionSocket);
+  // `enroll_socket_path` is "" from a daemon older than Phase B: absent is not a mismatch.
+  const enroll = info.enroll_socket_path ? canonicalizePath(info.enroll_socket_path) : "";
+  return (
+    dataDir === identity.dataDir &&
+    control === identity.controlSocket &&
+    (!session || session === identity.sessionSocket) &&
+    (!enroll || enroll === identity.enrollSocket)
+  );
 }
 
 export class DaemonManager {
@@ -278,13 +326,15 @@ export class DaemonManager {
   // ------------------------------------------------------------------ probing
 
   /**
-   * Probe the control socket. Every stage is raced against the acquisition signal: an abort during
-   * a slow hello / daemon_info throws DaemonAbortedError at once (a late connection is closed), so
-   * an account stop is never held past its budget by an unresponsive daemon.
+   * Probe the ENROLLMENT socket (`daemon_info` is in its op table). Every stage is raced against the
+   * acquisition signal: an abort during a slow hello / daemon_info throws DaemonAbortedError at once
+   * (a late connection is closed), so an account stop is never held past its budget by an
+   * unresponsive daemon. `undefined` = nothing listening. A `PrivilegeError` (EACCES/EPERM: a daemon
+   * exists, this uid may not open it) is RETHROWN — it is never "absent" and never leads to a spawn.
    */
-  async #probe(controlSocket: string, identity: DaemonIdentity, signal?: AbortSignal): Promise<Probe | undefined> {
+  async #probe(enrollSocket: string, identity: DaemonIdentity, signal?: AbortSignal): Promise<Probe | undefined> {
     if (signal?.aborted) throw new DaemonAbortedError();
-    let control: ControlLike | undefined;
+    let control: EnrollLike | undefined;
     let onAbort: (() => void) | undefined;
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => reject(new DaemonAbortedError());
@@ -293,7 +343,7 @@ export class DaemonManager {
     aborted.catch(() => {});
     let abortWon = false;
     try {
-      const connecting = this.#deps.connectControl(controlSocket);
+      const connecting = this.#deps.connectEnroll(enrollSocket);
       // Late-success containment: a connection that resolves after abort won is closed, once.
       connecting
         .then((c) => {
@@ -310,7 +360,7 @@ export class DaemonManager {
       const info = await Promise.race([control.daemonInfo(), aborted]);
       return { info, matches: infoMatchesIdentity(info, identity) };
     } catch (err) {
-      if (err instanceof DaemonAbortedError) throw err;
+      if (err instanceof DaemonAbortedError || err instanceof PrivilegeError) throw err;
       return undefined;
     } finally {
       if (onAbort) signal?.removeEventListener("abort", onAbort);
@@ -453,7 +503,24 @@ export class DaemonManager {
    * row is `stale` (we no longer own what listens there). Never `bound` on a path match alone.
    */
   async #recoverOrphanedStopping(row: OwnershipRow, identity: DaemonIdentity, signal?: AbortSignal): Promise<void> {
-    const probe = await this.#probe(identity.raw.controlSocket, identity, signal);
+    let probe: Probe | undefined;
+    try {
+      probe = await this.#probe(identity.raw.enrollSocket, identity, signal);
+    } catch (err) {
+      if (err instanceof PrivilegeError) {
+        // A `stopping` row must not block every future holder: whatever answers there is no longer
+        // provably ours (we cannot even open its socket) → stale, and the refusal propagates typed.
+        this.#deps.store.cas({
+          dataDir: identity.dataDir,
+          from: ["stopping"],
+          to: "stale",
+          expectedGeneration: row.generation,
+          set: { ownerPid: null, ownerPidStartedAt: null, deadlineMs: null, reason: "orphaned stop: the enrollment socket refused this uid" },
+        });
+        this.#deps.log("daemon_stopping_recovered", { dataDir: identity.dataDir, to: "stale" });
+      }
+      throw err;
+    }
     let to: OwnershipState;
     let reason: string;
     if (!probe) {
@@ -477,19 +544,80 @@ export class DaemonManager {
     this.#deps.log("daemon_stopping_recovered", { dataDir: identity.dataDir, to });
   }
 
+  /**
+   * A system-scope daemon on this host (identity.scope === "system"): attach-only. The probe's
+   * outcome only decides the session socket path (a reachable daemon's own report, else the fixed
+   * system layout); a refusal on the enrollment socket (an operator's group-gated posture) still
+   * yields the lease — the runtime half needs only the 0666 session socket (a working runtime must
+   * not turn `blocked` because enrollment is gated), and the ceremony half meets the same
+   * PrivilegeError itself on connectEnroll and prints the operator copy. The refusal is logged
+   * (`daemon_enroll_privilege_denied`). No row, no claim, no spawn.
+   */
+  async #systemLease(params: AcquireParams, holderId: string): Promise<Lease> {
+    const { identity } = params;
+    let probe: Probe | undefined;
+    try {
+      probe = await this.#probe(identity.raw.enrollSocket, identity, params.signal);
+    } catch (err) {
+      if (!(err instanceof PrivilegeError)) throw err;
+      this.#deps.log("daemon_enroll_privilege_denied", { dataDir: identity.dataDir, scope: "system" });
+      probe = undefined;
+    }
+    this.#deps.log("daemon_system_scope", { dataDir: identity.dataDir, reachable: Boolean(probe) });
+    return this.#foreignLease(params, holderId, probe?.info);
+  }
+
+  /**
+   * A bound daemon that does not answer on its enrollment socket but whose recorded process is
+   * verified alive and whose recorded version differs from the bundled binary: a daemon from before
+   * the enrollment socket existed (< 0.5.0). Runtime only; the same fence and the same kill
+   * authority as a reachable upgrade. A same-version silent daemon is never touched (it may be slow).
+   */
+  /**
+   * A user-scope identity held in place by an explicit key or the recorded scope, on a host where a
+   * system-scope daemon is installed: no daemon may be started for it (AdemuMLS#642). Checked before
+   * every spawn AND before an upgrade claims its stop, so a running daemon is never killed for a
+   * replacement that could not be started. A `detected` user scope is not checked here — the detector
+   * said no a moment ago, and the client's own detector inside ensureDaemon is the backstop for that race.
+   */
+  #spawnForbiddenBesideSystem(identity: DaemonIdentity): boolean {
+    return identity.scope === "user" && identity.scopeSource !== "detected" && this.#deps.detectSystemInstall();
+  }
+
+  #scopeRefusal(identity: DaemonIdentity, at: string): DaemonScopeError {
+    this.#deps.log("daemon_system_install_beside", { dataDir: identity.dataDir, scopeSource: identity.scopeSource, at });
+    return new DaemonScopeError(strings.status.systemInstallBeside(explicitKeys(identity)));
+  }
+
+  #legacyUpgradeCandidate(params: AcquireParams, row: OwnershipRow): boolean {
+    if (params.role !== "runtime") return false;
+    if (!this.#daemonProcessVerified(row)) return false;
+    const recorded = parseAdcVersion(row.adcVersion ?? undefined);
+    return recorded !== undefined && recorded !== this.#deps.bundledVersion;
+  }
+
   async #acquireInner(params: AcquireParams, holderId: string): Promise<Lease> {
     const { identity } = params;
     const store = this.#deps.store;
     const deadline = this.#deps.now() + WAIT_FOR_BOUND_MS;
+
+    if (identity.scope === "system") return await this.#systemLease(params, holderId);
 
     for (;;) {
       if (params.signal?.aborted) throw new DaemonAbortedError();
       const row = store.getOwnership(identity.dataDir);
 
       if (!row) {
-        const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
+        const probe = await this.#probe(identity.raw.enrollSocket, identity, params.signal);
         if (probe) return this.#foreignLease(params, holderId, probe.info);
-        if (!this.#deps.isDirAbsentOrEmpty(identity.raw.dataDir)) return this.#foreignLease(params, holderId, undefined);
+        if (!this.#deps.isDirAbsentOrEmpty(identity.raw.dataDir)) {
+          // The plugin's own data dir (the recorded user scope), nothing answering, no ownership row (the
+          // record was lost): beside a system install no daemon will ever be started here, so refuse with
+          // the re-enrollment copy instead of an unreachable lease that retries forever. An explicit key
+          // names the operator's own daemon, which the plugin never starts either way: it may come back.
+          if (identity.scopeSource === "enrolled" && this.#spawnForbiddenBesideSystem(identity)) throw this.#scopeRefusal(identity, "unreachable");
+          return this.#foreignLease(params, holderId, undefined);
+        }
         // An EXISTING empty dir must be ours and private before we put a daemon's state in it
         // (ensureDaemon only applies 0700 to a dir it creates): symlink / other owner → refuse.
         if (this.#deps.secureEmptyDir(identity.raw.dataDir) === "unsafe") {
@@ -514,7 +642,7 @@ export class DaemonManager {
       switch (row.state) {
         case "bound":
         case "pending-publication": {
-          const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
+          const probe = await this.#probe(identity.raw.enrollSocket, identity, params.signal);
           if (probe?.matches && !this.#verifyOwnedInstance(row, probe.info)) {
             // Paths match but the instance facts do not: a replacement daemon on our sockets. Attach
             // only — never stop, never upgrade. The row keeps the last facts we could prove.
@@ -530,8 +658,24 @@ export class DaemonManager {
             return await this.#ownedLease(params, holderId, current, probe.info, undefined);
           }
           if (probe && !probe.matches) return this.#foreignLease(params, holderId, probe.info);
-          // Unreachable: a healthy-but-slow daemon must never get a sibling — only a recorded child
-          // that is proven gone (or its pid proven reused) may be respawned (Codex branch round 14 #1).
+          // Unreachable on the enrollment socket. A verified pre-Phase-B daemon of ours (recorded
+          // version ≠ bundled) has no such socket: replace it through the fence, by pid.
+          if (this.#legacyUpgradeCandidate(params, row)) {
+            // Its replacement could never be started beside a system install: refuse BEFORE the stop and
+            // leave the old daemon alone (it cannot serve this plugin, but it is not ours to kill for nothing).
+            if (this.#spawnForbiddenBesideSystem(identity)) throw this.#scopeRefusal(identity, "legacy-upgrade");
+            const replaced = await this.#stopAndRespawn(params, holderId, row, "upgrade: the device host predates the enrollment socket");
+            if ("mode" in replaced) return replaced;
+            if (replaced.kind === "failed") {
+              throw new DaemonUnreachableError(
+                `the Ademú device host could not be replaced and does not answer on its enrollment socket; check the daemon log at ${identity.raw.dataDir}/daemon.log`,
+                `${identity.raw.dataDir}/daemon.log`,
+              );
+            }
+            // deferred (another live holder): fall through — never a sibling beside it.
+          }
+          // A healthy-but-slow daemon must never get a sibling — only a recorded child that is
+          // proven gone (or its pid proven reused) may be respawned (Codex branch round 14 #1).
           if (this.#recordedChildMayBeAlive(row)) this.#refuseSiblingSpawn(identity, row);
           // Our daemon is dead: respawn under a new generation.
           const starting = this.#toStarting(identity, [row.state], row.generation);
@@ -551,7 +695,7 @@ export class DaemonManager {
           //   2. no listener but the recorded child is ALIVE → `stale` with its pid facts, nothing spawns
           //      beside it until it exits (Codex branch round 13 #1);
           //   3. otherwise reclaim by exact-generation CAS and spawn.
-          const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
+          const probe = await this.#probe(identity.raw.enrollSocket, identity, params.signal);
           if (probe) {
             store.deleteOwnership({ dataDir: identity.dataDir, state: row.state, generation: row.generation });
             this.#deps.log("daemon_orphan_listener_foreign", { dataDir: identity.dataDir });
@@ -574,13 +718,20 @@ export class DaemonManager {
         }
         case "stopped":
         case "stale": {
-          const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
+          const probe = await this.#probe(identity.raw.enrollSocket, identity, params.signal);
           if (probe?.matches && this.#verifyOwnedInstance(row, probe.info)) {
             const bound = store.cas({ dataDir: identity.dataDir, from: [row.state], to: "bound", expectedGeneration: row.generation });
             if (bound) return await this.#ownedLease(params, holderId, bound, probe.info, undefined);
             continue;
           }
           if (probe) return this.#foreignLease(params, holderId, probe.info);
+          // A `stale` row left by #refuseSiblingSpawn over a verified pre-Phase-B child of ours (a setup
+          // acquisition, or a deferred fence, saw it silent on the enrollment socket): take it back to
+          // `bound` under the same generation so the bound branch replaces it through the fence.
+          if (row.state === "stale" && this.#legacyUpgradeCandidate(params, row)) {
+            const rebound = store.cas({ dataDir: identity.dataDir, from: ["stale"], to: "bound", expectedGeneration: row.generation, set: { reason: null } });
+            if (rebound) continue;
+          }
           // Our recorded child MAY be alive but not listening (a spawn that never came up, or slow):
           // never start a second daemon beside it — retry once it has exited (rounds 11 #2 / 14 #2).
           if (this.#recordedChildMayBeAlive(row)) this.#refuseSiblingSpawn(identity, row);
@@ -666,6 +817,17 @@ export class DaemonManager {
     // stop and forbids a second spawn beside it). Without a child the origin rule applies.
     const abandon = (to: "stopped" | "stale", reason: string) =>
       child ? this.#abandonStarting(identity, starting, "existing", "stale", reason) : this.#abandonStarting(identity, starting, origin, to, reason);
+    // Never spawn beside a system install (the same check runs before an upgrade claims its stop).
+    if (this.#spawnForbiddenBesideSystem(identity)) {
+      abandon("stopped", "a system-scope daemon is installed; never spawn beside it");
+      throw this.#scopeRefusal(identity, "spawn");
+    }
+    // The bundled daemon must bind the enrollment socket (the only socket this broker ever probes):
+    // an older bundle would spawn a child that can never answer here and leave every row `stale`.
+    if (!versionAtLeast(this.#deps.bundledVersion, MIN_BUNDLED_ADC_VERSION)) {
+      abandon("stopped", "bundled daemon predates the enrollment socket");
+      throw new DaemonUnsupportedError(strings.status.bundledDaemonTooOld(this.#deps.bundledVersion, MIN_BUNDLED_ADC_VERSION));
+    }
     let binaryPath: string;
     try {
       binaryPath = this.#deps.resolveBinaryPath();
@@ -735,7 +897,9 @@ export class DaemonManager {
       return c;
     };
 
-    const ensure = this.#deps.ensureDaemon({ binaryPath, env, spawnFn, connectFn: this.#deps.probeConnect });
+    // Both of ensureDaemon's probes dial the ENROLLMENT socket (the only door we open); the client's
+    // own system-install detector and its EACCES mapping reject with PrivilegeError before any spawn.
+    const ensure = this.#deps.ensureDaemon({ binaryPath, env, spawnFn, connectFn: this.#deps.probeConnect, probeSocketPath: identity.raw.enrollSocket });
     const abortP = new Promise<never>((_, reject) => {
       if (!params.signal) return;
       const onAbort = () => reject(new DaemonAbortedError());
@@ -759,7 +923,7 @@ export class DaemonManager {
             }
             let probe: Probe | undefined;
             try {
-              probe = await this.#probe(identity.raw.controlSocket, identity);
+              probe = await this.#probe(identity.raw.enrollSocket, identity);
             } catch {
               probe = undefined;
             }
@@ -782,6 +946,12 @@ export class DaemonManager {
           });
         throw err;
       }
+      if (err instanceof PrivilegeError) {
+        // The client refused to spawn (a system install is present, or the enrollment socket refused
+        // this uid). No child exists here, so the origin rule applies; the refusal propagates typed.
+        abandon("stopped", "spawn refused: a system-scope daemon is installed or the enrollment socket refused this uid");
+        throw err;
+      }
       abandon("stopped", "daemon did not start");
       throw new DaemonUnreachableError(
         `the Ademú device host did not start; check channels.ademu.server and the daemon log at ${identity.raw.dataDir}/daemon.log`,
@@ -792,20 +962,20 @@ export class DaemonManager {
     if (!result.spawned) {
       // A listener won the probe-then-spawn race: it is not ours.
       abandon("stale", "a listener won the probe-then-spawn race");
-      const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
+      const probe = await this.#probe(identity.raw.enrollSocket, identity, params.signal);
       return this.#foreignLease(params, holderId, probe?.info);
     }
 
     let probe: Probe | undefined;
     try {
-      probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
+      probe = await this.#probe(identity.raw.enrollSocket, identity, params.signal);
     } catch (err) {
-      abandon("stale", "aborted while verifying the spawned child");
+      abandon("stale", "probe failed while verifying the spawned child");
       throw err;
     }
     if (!probe) {
       abandon("stale", "spawned child did not answer");
-      throw new DaemonUnreachableError(`the Ademú device host started but its control socket did not answer; see ${result.logPath}`, result.logPath);
+      throw new DaemonUnreachableError(`the Ademú device host started but its enrollment socket did not answer; see ${result.logPath}`, result.logPath);
     }
     if (!probe.matches) {
       abandon("stale", "the listener after spawn is not the identity we started");
@@ -836,7 +1006,7 @@ export class DaemonManager {
       identity,
       holderId,
       info: {
-        controlSocketPath: identity.raw.controlSocket,
+        enrollSocketPath: identity.raw.enrollSocket,
         // A REACHABLE daemon's reported session socket is authoritative and must never be
         // re-derived (PROTOCOL.md: a squatter on a derived path would receive the bearer token).
         // Only an UNREACHABLE foreign daemon keeps the configured path (the session connect then
@@ -865,13 +1035,18 @@ export class DaemonManager {
     // Upgrade (runtime only, through the fence): the bound daemon's version ≠ the bundled one.
     if (role === "runtime") {
       const running = parseAdcVersion(info.version);
-      if (running && running !== this.#deps.bundledVersion) {
+      const outdated = Boolean(running) && running !== this.#deps.bundledVersion;
+      if (outdated && this.#spawnForbiddenBesideSystem(identity)) {
+        // Its replacement could never be started beside a system install: keep the running, verified
+        // instance (as a deferred upgrade does) rather than stop it and refuse.
+        this.#deps.log("daemon_upgrade_skipped_system_install", { dataDir: identity.dataDir, scopeSource: identity.scopeSource });
+      } else if (outdated) {
         const upgraded = await this.#tryUpgrade(params, holderId, row);
         if ("mode" in upgraded) return upgraded;
         if (upgraded.kind === "failed") {
           // We claimed the stop and it did not complete: the row is `stale` and whatever answers on
           // the socket is no longer proven ours — attach foreign, or fail recoverably if nothing answers.
-          const probe = await this.#probe(identity.raw.controlSocket, identity, params.signal);
+          const probe = await this.#probe(identity.raw.enrollSocket, identity, params.signal);
           if (probe) return this.#foreignLease(params, holderId, probe.info);
           throw new DaemonUnreachableError("the Ademú device host could not be upgraded and no longer answers; check the daemon log", undefined);
         }
@@ -891,7 +1066,7 @@ export class DaemonManager {
       identity,
       holderId,
       info: {
-        controlSocketPath: identity.raw.controlSocket,
+        enrollSocketPath: identity.raw.enrollSocket,
         sessionSocketPath: requireSessionSocket(info),
         daemonVersion: parseAdcVersion(info.version),
         generation: row.generation,
@@ -992,41 +1167,20 @@ export class DaemonManager {
     return true;
   }
 
-  /** shutdown op (bounded) → observe exit → SIGTERM → SIGKILL, capped at RELEASE_CAP_MS. */
+  /**
+   * Verified-pid SIGTERM → SIGKILL, capped at RELEASE_CAP_MS. Dials NOTHING (Phase B: the plugin has
+   * no control verb, so there is no daemon-global op to guard). Signals target a pid whose start time
+   * and `adc daemon run` command we recorded when we spawned it, re-verified immediately before each
+   * signal together with our `stopping` generation: an impostor on our socket path is neither
+   * shielded nor endangered — our verified pid is stopped, the impostor is untouched.
+   */
   async #terminate(identity: DaemonIdentity, row: OwnershipRow): Promise<boolean> {
     const start = this.#deps.now();
     const remaining = () => Math.max(0, RELEASE_CAP_MS - (this.#deps.now() - start));
     const pid = row.daemonPid;
     const verified = pid != null && this.#daemonProcessVerified(row);
-    const gone = () => (pid == null ? !existsSync(identity.raw.controlSocket) : !this.#deps.processFacts(pid).alive);
-
-    let control: ControlLike | undefined;
-    let connectTimedOut = false;
-    try {
-      const connecting = this.#deps.connectControl(identity.raw.controlSocket);
-      connecting.then((c) => (connectTimedOut ? void c.close().catch(() => {}) : undefined)).catch(() => {});
-      try {
-        control = await withTimeout(connecting, Math.min(SHUTDOWN_OP_MS, remaining()));
-      } catch (err) {
-        connectTimedOut = true;
-        throw err;
-      }
-      // Last look immediately BEFORE the daemon-global shutdown op: the row must still be OUR
-      // `stopping` generation and the listener must still be the bound instance (a replacement
-      // that slipped onto the socket between the fence and this connect is never shut down).
-      const info = await withTimeout(control.daemonInfo(), Math.min(SHUTDOWN_OP_MS, remaining()));
-      const current = this.#deps.store.getOwnership(identity.dataDir);
-      if (!current || current.state !== "stopping" || current.generation !== row.generation || !this.#verifyOwnedInstance(row, info)) {
-        this.#deps.log("daemon_shutdown_withheld", { dataDir: identity.dataDir });
-        return false;
-      }
-      await control.request("shutdown", {}, { timeoutMs: Math.min(SHUTDOWN_OP_MS, remaining()) });
-    } catch {
-      /* unreachable or slow: fall through to the (verified-pid-only) signals */
-    } finally {
-      if (control) await withTimeout(control.close(), Math.max(1, remaining())).catch(() => {});
-    }
-    while (!gone() && this.#deps.now() - start < SHUTDOWN_OP_MS && remaining() > 0) await this.#deps.sleep(100);
+    // A row without a pid can only be observed gone (its sockets unlinked), never signalled.
+    const gone = () => (pid == null ? !existsSync(identity.raw.enrollSocket) : !this.#deps.processFacts(pid).alive);
     if (gone()) return true;
     if (!verified) return false; // never signal a pid we cannot prove is ours
     // Immediately before EACH signal: the row must still be our `stopping` generation and the pid
@@ -1055,7 +1209,12 @@ export class DaemonManager {
     return gone();
   }
 
-  async #tryUpgrade(params: AcquireParams, holderId: string, row: OwnershipRow): Promise<Lease | { kind: "deferred" | "failed" }> {
+  #tryUpgrade(params: AcquireParams, holderId: string, row: OwnershipRow): Promise<Lease | { kind: "deferred" | "failed" }> {
+    return this.#stopAndRespawn(params, holderId, row, `upgrade to ${this.#deps.bundledVersion}`);
+  }
+
+  /** The fenced stop of a bound instance followed by a respawn under a new generation (upgrades). */
+  async #stopAndRespawn(params: AcquireParams, holderId: string, row: OwnershipRow, reason: string): Promise<Lease | { kind: "deferred" | "failed" }> {
     const { identity } = params;
     const store = this.#deps.store;
     const claimed = store.tryClaimShutdown({
@@ -1065,7 +1224,7 @@ export class DaemonManager {
       stopperPid: this.#deps.selfPid,
       stopperPidStartedAt: this.#deps.selfPidStartedAt,
       deadlineMs: this.#deps.now() + STOPPING_DEADLINE_MS,
-      reason: `upgrade to ${this.#deps.bundledVersion}`,
+      reason,
       isProcessAlive: this.#isProcessAlive,
     });
     if (!claimed) {
@@ -1099,8 +1258,11 @@ export class DaemonManager {
         dataDir: row.dataDir,
         controlSocket: row.controlSocket,
         sessionSocket: row.sessionSocket,
-        raw: { dataDir: row.dataDir, controlSocket: row.controlSocket, sessionSocket: row.sessionSocket },
-        explicit: { dataDir: true, socketPath: true },
+        enrollSocket: `${row.dataDir}/${ENROLL_SOCKET_FILE}`,
+        raw: { dataDir: row.dataDir, controlSocket: row.controlSocket, sessionSocket: row.sessionSocket, enrollSocket: `${row.dataDir}/${ENROLL_SOCKET_FILE}` },
+        explicit: { dataDir: true, socketPath: true, enrollSocketPath: false },
+        scope: "user",
+        scopeSource: "explicit",
       };
       const holderId = `runtime:${this.#deps.selfPid}:sweep:${randomUUID()}`;
       if (!this.#deps.store.addHolder({ holderId, dataDir: row.dataDir, role: "runtime", pid: this.#deps.selfPid, pidStartedAt: this.#deps.selfPidStartedAt, heartbeatMs: this.#deps.now() })) continue;

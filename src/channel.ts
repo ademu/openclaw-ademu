@@ -2,7 +2,7 @@
 // actions/heartbeat + security posture report + the setup wizard (T12). Host runtime pieces are
 // pulled lazily from the runtime store so this module can be imported by tests without a gateway.
 import { connect as connectSessionReal } from "@ademu/adc-client";
-import { connect as connectControlReal } from "@ademu/adc-control";
+import { connectEnroll as connectEnrollReal } from "@ademu/adc-control";
 import type { ChannelPlugin } from "openclaw/plugin-sdk/channel-core";
 import { createChatChannelPlugin } from "openclaw/plugin-sdk/channel-core";
 import { ademuMessageActions } from "./actions.js";
@@ -46,7 +46,7 @@ export function realEnrollmentLeaseDeps(): EnrollmentLeaseDeps {
     get daemons() {
       return getDaemonManager(hostLog);
     },
-    connectControl: async (socketPath) => (await connectControlReal({ socketPath })) as unknown as ControlLike,
+    connectEnroll: async (socketPath) => (await connectEnrollReal({ socketPath })) as unknown as ControlLike,
     now: () => Date.now(),
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),

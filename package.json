@@ -33,8 +33,8 @@
   },
   "dependencies": {
     "@ademu/adc-bin": "0.3.0",
-    "@ademu/adc-client": "^0.1.1",
-    "@ademu/adc-control": "^0.1.1",
+    "@ademu/adc-client": "^0.2.0",
+    "@ademu/adc-control": "^0.2.0",
     "typebox": "^1.3.17",
     "zod": "4.4.3"
   },

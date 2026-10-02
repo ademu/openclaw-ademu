@@ -1,24 +1,29 @@
 // DaemonManager against a fake world: fake processes, fake daemons behind fake control sockets, a
 // fake `ensureDaemon` with the real probe-then-spawn shape, a manual clock, and the real in-memory
 // store. Every path of the T5 state machine that the plan lists is exercised here.
-import type { ChildLike, DaemonInfoResult, EnsureDaemonDeps, EnsureDaemonResult } from "@ademu/adc-control";
+import { PrivilegeError, SYSTEM_ENROLL_SOCKET_PATH, SYSTEM_SESSION_SOCKET_PATH, type ChildLike, type DaemonInfoResult, type EnsureDaemonDeps, type EnsureDaemonResult } from "@ademu/adc-control";
 import { describe, expect, it } from "vitest";
 import type { DaemonIdentity } from "../src/config.js";
 import {
   DaemonAbortedError,
   DaemonBusyError,
   DaemonManager,
+  DaemonScopeError,
   DaemonUnreachableError,
   DaemonUnsupportedError,
+  MIN_BUNDLED_ADC_VERSION,
   boundedProbeConnect,
   daemonEnv,
+  infoMatchesIdentity,
   parseAdcVersion,
+  versionAtLeast,
   PROBE_CONNECT_MS,
   RELEASE_CAP_MS,
   STARTING_DEADLINE_MS,
-  type ControlLike,
+  type EnrollLike,
   type DaemonDeps,
 } from "../src/monitor/daemon.js";
+import { SYSTEM_DATA_DIR } from "../src/config.js";
 import { AdemuStore } from "../src/store.js";
 
 const SERVER = { restBaseUrl: "https://api.ademu.com", wsUrl: "wss://gateway.ademu.com/v1/ws" };
@@ -28,8 +33,25 @@ function identityFor(dir: string): DaemonIdentity {
     dataDir: dir,
     controlSocket: `${dir}/adc.sock`,
     sessionSocket: `${dir}/adc-session.sock`,
-    raw: { dataDir: dir, controlSocket: `${dir}/adc.sock`, sessionSocket: `${dir}/adc-session.sock` },
-    explicit: { dataDir: true, socketPath: false },
+    enrollSocket: `${dir}/adc-enroll.sock`,
+    raw: { dataDir: dir, controlSocket: `${dir}/adc.sock`, sessionSocket: `${dir}/adc-session.sock`, enrollSocket: `${dir}/adc-enroll.sock` },
+    explicit: { dataDir: true, socketPath: false, enrollSocketPath: false },
+    scope: "user",
+    scopeSource: "explicit",
+  };
+}
+
+/** The hardened host: the system layout, nothing configured (what resolveDaemonIdentity yields there). */
+function systemIdentity(): DaemonIdentity {
+  return {
+    dataDir: SYSTEM_DATA_DIR,
+    controlSocket: "/run/adc/adc.sock",
+    sessionSocket: SYSTEM_SESSION_SOCKET_PATH,
+    enrollSocket: SYSTEM_ENROLL_SOCKET_PATH,
+    raw: { dataDir: SYSTEM_DATA_DIR, controlSocket: "/run/adc/adc.sock", sessionSocket: SYSTEM_SESSION_SOCKET_PATH, enrollSocket: SYSTEM_ENROLL_SOCKET_PATH },
+    explicit: { dataDir: false, socketPath: false, enrollSocketPath: false },
+    scope: "system",
+    scopeSource: "detected",
   };
 }
 
@@ -37,8 +59,7 @@ type FakeDaemon = {
   pid: number;
   info: DaemonInfoResult;
   alive: boolean;
-  /** When false the daemon ignores the shutdown op (and SIGTERM). */
-  honoursShutdown: boolean;
+  /** When false the daemon ignores SIGTERM (only SIGKILL ends it). */
   honoursSigterm: boolean;
   child?: FakeChild;
 };
@@ -64,9 +85,16 @@ class World {
   clock = 1_000_000;
   nextPid = 5000;
   processes = new Map<number, { alive: boolean; startedAt: string; command: string }>();
-  daemons = new Map<string, FakeDaemon>(); // by control socket path
+  daemons = new Map<string, FakeDaemon>(); // by ENROLLMENT socket path (a legacy daemon sits under its control path: never dialled)
   spawns: Array<{ cmd: string; argv: string[]; env: NodeJS.ProcessEnv }> = [];
-  shutdownRequests: string[] = [];
+  /** Every socket path the broker dialled (connectEnroll). */
+  dialled: string[] = [];
+  /** Enrollment socket paths that answer EACCES (a group-gated posture). */
+  privilegeDenied = new Set<string>();
+  /** The client's own system-install detector fires inside ensureDaemon (explicit config on a hardened host). */
+  systemInstall = false;
+  /** Every `probeSocketPath` handed to the fake ensureDaemon. */
+  ensureProbePaths: Array<string | undefined> = [];
   kills: Array<{ pid: number; signal: string }> = [];
   dirs = new Map<string, "absent" | "empty" | "nonempty">();
   secured: string[] = [];
@@ -87,20 +115,24 @@ class World {
     throw new Error("the fake ensureDaemon never dials");
   };
   platform = "darwin";
-  bundledVersion = "0.2.4";
+  bundledVersion = "0.5.0";
   selfPid = 100;
 
   constructor() {
     this.processes.set(this.selfPid, { alive: true, startedAt: "self-start", command: "node openclaw" });
   }
 
-  addDaemon(dir: string, opts: Partial<FakeDaemon> & { version?: string | undefined; sessionSocket?: string | undefined } = {}): FakeDaemon {
+  /** `enrollSocket: false` = a daemon from before the enrollment socket (alive, reachable by nobody here). */
+  addDaemon(
+    dir: string,
+    opts: Partial<FakeDaemon> & { version?: string | undefined; sessionSocket?: string | undefined; enrollSocket?: string | false | undefined } = {},
+  ): FakeDaemon {
     const pid = this.nextPid++;
     this.processes.set(pid, { alive: true, startedAt: `start-${pid}`, command: "/x/adc daemon run" });
+    const enroll = opts.enrollSocket === false ? undefined : (opts.enrollSocket ?? `${dir}/adc-enroll.sock`);
     const d: FakeDaemon = {
       pid,
       alive: true,
-      honoursShutdown: opts.honoursShutdown ?? true,
       honoursSigterm: opts.honoursSigterm ?? true,
       info: {
         version: `${opts.version ?? this.bundledVersion} (fake)`,
@@ -112,9 +144,10 @@ class World {
         started_at_ms: this.clock,
         attach_policy: "takeover",
         session_socket_path: opts.sessionSocket ?? `${dir}/adc-session.sock`,
+        ...(enroll ? { enroll_socket_path: enroll } : {}),
       },
     };
-    this.daemons.set(`${dir}/adc.sock`, d);
+    this.daemons.set(enroll ?? `${dir}/adc.sock`, d);
     this.dirs.set(dir, "nonempty");
     return d;
   }
@@ -147,7 +180,7 @@ class World {
         const child = new FakeChild(pid);
         this.processes.set(pid, { alive: true, startedAt: `start-${pid}`, command: `${cmd} daemon run` });
         if (!this.spawnFailsToListen) {
-          const d = this.addDaemon(dir, { sessionSocket: env.ADC_SESSION_SOCKET_PATH });
+          const d = this.addDaemon(dir, { sessionSocket: env.ADC_SESSION_SOCKET_PATH, enrollSocket: env.ADC_ENROLL_SOCKET_PATH });
           // the spawned process IS the daemon
           this.processes.delete(d.pid);
           d.pid = pid;
@@ -158,37 +191,38 @@ class World {
       },
       ensureDaemon: async (deps: EnsureDaemonDeps = {}): Promise<EnsureDaemonResult> => {
         this.ensureConnectFns.push(deps.connectFn);
+        this.ensureProbePaths.push(deps.probeSocketPath);
         const dir = deps.env!.ADC_DATA_DIR!;
         const socket = deps.env!.ADC_SOCKET_PATH!;
-        const base = { socketPath: socket, dataDir: dir, logPath: `${dir}/daemon.log` };
-        if (this.daemons.get(socket)?.alive) return { spawned: false, ...base };
+        const enroll = deps.env!.ADC_ENROLL_SOCKET_PATH!;
+        const probe = deps.probeSocketPath ?? socket;
+        const base = { socketPath: socket, enrollSocketPath: enroll, dataDir: dir, logPath: `${dir}/daemon.log` };
+        // The client's step 0 (detector) and its bare probe's EACCES mapping: PrivilegeError, no spawn.
+        if (this.systemInstall) throw new PrivilegeError("a system-scope ADC daemon is installed on this host", "permission_denied");
+        if (this.privilegeDenied.has(probe)) throw new PrivilegeError("permission denied opening the enrollment socket", "permission_denied");
+        if (this.daemons.get(probe)?.alive) return { spawned: false, ...base };
         if (this.preSpawnGate) await this.preSpawnGate;
         const child = deps.spawnFn!(deps.binaryPath ?? "adc", ["daemon", "run"], { detached: true, stdio: ["ignore", 1, 1] });
         if (this.ensureGate) await this.ensureGate;
         if (this.ensureRejectsAfterSpawn) throw new Error("hello never arrived");
         return { spawned: true, pid: child.pid ?? undefined, ...base };
       },
-      connectControl: async (socketPath): Promise<ControlLike> => {
+      connectEnroll: async (socketPath): Promise<EnrollLike> => {
+        this.dialled.push(socketPath);
+        if (this.privilegeDenied.has(socketPath)) throw new PrivilegeError("permission denied opening the enrollment socket", "permission_denied");
         const d = this.daemons.get(socketPath);
         if (!d?.alive) throw new Error("ECONNREFUSED");
-        return {
-          daemonInfo: async () => d.info,
-          request: async <R>(op: string) => {
-            if (op === "shutdown") {
-              this.shutdownRequests.push(socketPath);
-              if (d.honoursShutdown) this.killDaemon(d);
-              return { ok: true } as R;
-            }
-            throw new Error(`unexpected op ${op}`);
-          },
-          close: async () => {},
-        };
+        return { daemonInfo: async () => d.info, close: async () => {} };
       },
       resolveBinaryPath: () => "/bundled/adc",
       kill: (pid, signal) => {
         this.kills.push({ pid, signal });
         const d = [...this.daemons.values()].find((x) => x.pid === pid);
-        if (!d) return;
+        if (!d) {
+          const p = this.processes.get(pid);
+          if (p) p.alive = false;
+          return;
+        }
         if (signal === "SIGKILL" || (signal === "SIGTERM" && d.honoursSigterm)) this.killDaemon(d);
       },
       probeConnect: this.probeConnect,
@@ -200,6 +234,7 @@ class World {
       },
       bundledVersion: this.bundledVersion,
       platform: this.platform,
+      detectSystemInstall: () => this.systemInstall,
       log: (event, fields) => {
         this.logs.push({ event, fields });
       },
@@ -210,7 +245,7 @@ class World {
 const DIR = "/state/ademu/adc";
 
 describe("fresh spawn (runtime) and env injection", () => {
-  it("claims before spawning, injects all five env vars, binds with the child pid, and the lease is owned", async () => {
+  it("claims before spawning, injects all six env vars, binds with the child pid, and the lease is owned", async () => {
     const w = new World();
     const m = new DaemonManager(w.deps());
     const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
@@ -220,20 +255,22 @@ describe("fresh spawn (runtime) and env injection", () => {
     expect(env.ADC_DATA_DIR).toBe(DIR);
     expect(env.ADC_SOCKET_PATH).toBe(`${DIR}/adc.sock`);
     expect(env.ADC_SESSION_SOCKET_PATH).toBe(`${DIR}/adc-session.sock`);
+    expect(env.ADC_ENROLL_SOCKET_PATH).toBe(`${DIR}/adc-enroll.sock`);
     expect(env.ADC_REST_BASE_URL).toBe(SERVER.restBaseUrl);
     expect(env.ADC_WS_URL).toBe(SERVER.wsUrl);
     const row = w.store.getOwnership(DIR)!;
     expect(row.state).toBe("bound");
     expect(row.generation).toBe(1);
-    expect(row.daemonPid).toBe(w.daemons.get(`${DIR}/adc.sock`)!.pid);
-    expect(row.adcVersion).toBe("0.2.4");
+    expect(row.daemonPid).toBe(w.daemons.get(`${DIR}/adc-enroll.sock`)!.pid);
+    expect(row.adcVersion).toBe("0.5.0");
     expect(lease.info.sessionSocketPath).toBe(`${DIR}/adc-session.sock`);
+    expect(lease.info.enrollSocketPath).toBe(`${DIR}/adc-enroll.sock`);
     expect(w.store.listHolders(DIR)).toHaveLength(1);
   });
 
-  it("daemonEnv is exactly the five variables on top of the base env", () => {
+  it("daemonEnv is exactly the six variables on top of the base env", () => {
     const env = daemonEnv(identityFor(DIR), SERVER, { PATH: "/bin" });
-    expect(Object.keys(env).sort()).toEqual(["ADC_DATA_DIR", "ADC_REST_BASE_URL", "ADC_SESSION_SOCKET_PATH", "ADC_SOCKET_PATH", "ADC_WS_URL", "PATH"]);
+    expect(Object.keys(env).sort()).toEqual(["ADC_DATA_DIR", "ADC_ENROLL_SOCKET_PATH", "ADC_REST_BASE_URL", "ADC_SESSION_SOCKET_PATH", "ADC_SOCKET_PATH", "ADC_WS_URL", "PATH"]);
   });
 
   it("refuses Windows before touching any resolver", async () => {
@@ -252,14 +289,14 @@ describe("roles: setup never stops; runtime promotes and releases through the fe
     const setup = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "setup" });
     expect(w.store.getOwnership(DIR)!.state).toBe("pending-publication");
     await setup.release();
-    expect(w.daemons.get(`${DIR}/adc.sock`)!.alive).toBe(true);
-    expect(w.shutdownRequests).toEqual([]);
+    expect(w.daemons.get(`${DIR}/adc-enroll.sock`)!.alive).toBe(true);
+    expect(w.kills).toEqual([]);
     const runtime = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
     expect(runtime.mode).toBe("owned");
     expect(w.spawns).toHaveLength(1);
     expect(w.store.getOwnership(DIR)!.state).toBe("bound");
     await runtime.release();
-    expect(w.shutdownRequests).toHaveLength(1);
+    expect(w.kills.map((k) => k.signal)).toEqual(["SIGTERM"]);
     expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
   });
 
@@ -270,10 +307,10 @@ describe("roles: setup never stops; runtime promotes and releases through the fe
     const b = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
     expect(w.spawns).toHaveLength(1);
     await a.release();
-    expect(w.daemons.get(`${DIR}/adc.sock`)!.alive).toBe(true);
+    expect(w.daemons.get(`${DIR}/adc-enroll.sock`)!.alive).toBe(true);
     expect(w.store.listHolders(DIR)).toHaveLength(1);
     await b.release();
-    expect(w.daemons.get(`${DIR}/adc.sock`)!.alive).toBe(false);
+    expect(w.daemons.get(`${DIR}/adc-enroll.sock`)!.alive).toBe(false);
     expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
     expect(w.store.listHolders(DIR)).toHaveLength(0);
   });
@@ -285,7 +322,7 @@ describe("roles: setup never stops; runtime promotes and releases through the fe
     w.processes.set(777, { alive: true, startedAt: "cli", command: "node openclaw channels add" });
     w.store.addHolder({ holderId: "setup:777:x", dataDir: DIR, role: "setup", pid: 777, pidStartedAt: "cli", heartbeatMs: w.clock });
     await rt.release();
-    expect(w.daemons.get(`${DIR}/adc.sock`)!.alive).toBe(true);
+    expect(w.daemons.get(`${DIR}/adc-enroll.sock`)!.alive).toBe(true);
     expect(w.store.getOwnership(DIR)!.state).toBe("bound");
     expect(w.logs.some((l) => l.event === "daemon_stop_deferred")).toBe(true);
   });
@@ -313,8 +350,8 @@ describe("foreign mode", () => {
     expect(lease.info.daemonVersion).toBe("0.2.3");
     expect(w.spawns).toHaveLength(0);
     await lease.release();
-    expect(w.shutdownRequests).toEqual([]);
-    expect(w.daemons.get(`${prod}/adc.sock`)!.alive).toBe(true);
+    expect(w.kills).toEqual([]);
+    expect(w.daemons.get(`${prod}/adc-enroll.sock`)!.alive).toBe(true);
     expect(w.store.getOwnership(prod)).toBeUndefined();
   });
 
@@ -367,7 +404,7 @@ describe("abort, orphans and recovery", () => {
     release();
     await new Promise((r) => setTimeout(r, 10));
     expect(w.store.getOwnership(DIR)!.state).toBe("pending-publication");
-    expect(w.daemons.get(`${DIR}/adc.sock`)!.alive).toBe(true);
+    expect(w.daemons.get(`${DIR}/adc-enroll.sock`)!.alive).toBe(true);
   });
 
   it("late success after abort (runtime): bound, then released through the fence (stopped)", async () => {
@@ -383,7 +420,7 @@ describe("abort, orphans and recovery", () => {
     release();
     await new Promise((r) => setTimeout(r, 10));
     expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
-    expect(w.daemons.get(`${DIR}/adc.sock`)!.alive).toBe(false);
+    expect(w.daemons.get(`${DIR}/adc-enroll.sock`)!.alive).toBe(false);
   });
 
   it("an orphaned `starting` row (dead starter) is reclaimed by generation CAS and the daemon spawned", async () => {
@@ -431,7 +468,7 @@ describe("abort, orphans and recovery", () => {
     const w = new World();
     const m = new DaemonManager(w.deps());
     const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    const d = w.daemons.get(`${DIR}/adc.sock`)!;
+    const d = w.daemons.get(`${DIR}/adc-enroll.sock`)!;
     const lost = lease.lost.catch((e: Error) => e);
     w.killDaemon(d);
     const err = await lost;
@@ -440,16 +477,16 @@ describe("abort, orphans and recovery", () => {
 });
 
 describe("stop escalation and upgrade", () => {
-  it("shutdown op ignored → SIGTERM ignored → SIGKILL → stopped", async () => {
+  it("SIGTERM ignored → SIGKILL → stopped, inside the release cap; nothing is dialled to stop", async () => {
     const w = new World();
     const m = new DaemonManager(w.deps());
     const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    const d = w.daemons.get(`${DIR}/adc.sock`)!;
-    d.honoursShutdown = false;
+    const d = w.daemons.get(`${DIR}/adc-enroll.sock`)!;
     d.honoursSigterm = false;
     const t0 = w.clock;
+    const dialledBefore = w.dialled.length;
     await lease.release();
-    expect(w.shutdownRequests).toHaveLength(1);
+    expect(w.dialled).toHaveLength(dialledBefore);
     expect(w.kills.map((k) => k.signal)).toEqual(["SIGTERM", "SIGKILL"]);
     expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
     expect(w.clock - t0).toBeLessThanOrEqual(RELEASE_CAP_MS + 200);
@@ -459,8 +496,7 @@ describe("stop escalation and upgrade", () => {
     const w = new World();
     const m = new DaemonManager(w.deps());
     const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    const d = w.daemons.get(`${DIR}/adc.sock`)!;
-    d.honoursShutdown = false;
+    const d = w.daemons.get(`${DIR}/adc-enroll.sock`)!;
     d.honoursSigterm = false;
     w.deps; // (kill for SIGKILL still kills in the fake) → simulate an immortal daemon:
     const deps = w.deps();
@@ -475,15 +511,15 @@ describe("stop escalation and upgrade", () => {
 
   it("runtime upgrades a bound daemon whose version differs from the bundled one (through the fence)", async () => {
     const w = new World();
-    w.bundledVersion = "0.2.5";
-    const old = w.addDaemon(DIR, { version: "0.2.4" });
+    w.bundledVersion = "0.5.1";
+    const old = w.addDaemon(DIR, { version: "0.5.0" });
     w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
     w.store.cas({ dataDir: DIR, from: ["claimed"], to: "starting", bumpGeneration: true });
-    w.store.cas({ dataDir: DIR, from: ["starting"], to: "bound", expectedGeneration: 1, set: { daemonPid: old.pid, daemonPidStartedAt: `start-${old.pid}`, daemonStartedAtMs: old.info.started_at_ms, adcVersion: "0.2.4" } });
+    w.store.cas({ dataDir: DIR, from: ["starting"], to: "bound", expectedGeneration: 1, set: { daemonPid: old.pid, daemonPidStartedAt: `start-${old.pid}`, daemonStartedAtMs: old.info.started_at_ms, adcVersion: "0.5.0" } });
     const m = new DaemonManager(w.deps());
     const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
     expect(lease.mode).toBe("owned");
-    expect(w.shutdownRequests).toHaveLength(1);
+    expect(w.kills.map((k) => k.signal)).toEqual(["SIGTERM"]);
     expect(w.spawns).toHaveLength(1);
     expect(w.store.getOwnership(DIR)!).toMatchObject({ state: "bound", generation: 3 }); // bound → stopping → stopped → starting → bound
     expect(w.logs.some((l) => l.event === "daemon_upgrading")).toBe(true);
@@ -491,8 +527,8 @@ describe("stop escalation and upgrade", () => {
 
   it("the upgrade is deferred while another holder is live", async () => {
     const w = new World();
-    w.bundledVersion = "0.2.5";
-    const old = w.addDaemon(DIR, { version: "0.2.4" });
+    w.bundledVersion = "0.5.1";
+    const old = w.addDaemon(DIR, { version: "0.5.0" });
     w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
     w.store.cas({ dataDir: DIR, from: ["claimed"], to: "starting", bumpGeneration: true });
     w.store.cas({ dataDir: DIR, from: ["starting"], to: "bound", expectedGeneration: 1, set: { daemonPid: old.pid, daemonPidStartedAt: `start-${old.pid}`, daemonStartedAtMs: old.info.started_at_ms } });
@@ -500,7 +536,7 @@ describe("stop escalation and upgrade", () => {
     w.store.addHolder({ holderId: "setup:777:y", dataDir: DIR, role: "setup", pid: 777, pidStartedAt: "cli", heartbeatMs: w.clock });
     const m = new DaemonManager(w.deps());
     const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    expect(lease.info.daemonVersion).toBe("0.2.4");
+    expect(lease.info.daemonVersion).toBe("0.5.0");
     expect(w.spawns).toHaveLength(0);
     expect(w.logs.some((l) => l.event === "daemon_upgrade_deferred")).toBe(true);
   });
@@ -590,7 +626,6 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(lease.mode).toBe("foreign");
     expect(w.logs.some((l) => l.event === "daemon_unverified_foreign")).toBe(true);
     await lease.release();
-    expect(w.shutdownRequests).toHaveLength(0);
     expect(w.kills).toHaveLength(0);
     expect(d.alive).toBe(true);
   });
@@ -604,21 +639,22 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(lease.mode).toBe("foreign");
   });
 
-  it("#7 a listener replaced between the fence and the shutdown connect is NOT shut down; the row goes stale", async () => {
+  it("#7 an impostor that took over our socket path never diverts the stop: only OUR verified pid is signalled, the impostor stays alive", async () => {
     const w = new World();
     const m = new DaemonManager(w.deps());
     const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    const ours = w.daemons.get(`${DIR}/adc.sock`)!;
+    const ours = w.daemons.get(`${DIR}/adc-enroll.sock`)!;
     // Someone else's daemon takes over our socket path (different start time / pid).
     w.clock += 10;
     const impostor = w.addDaemon(DIR);
     expect(impostor.pid).not.toBe(ours.pid);
+    const dialledBefore = w.dialled.length;
     await lease.release();
-    expect(w.shutdownRequests).toHaveLength(0);
-    expect(w.kills).toHaveLength(0);
+    expect(w.dialled).toHaveLength(dialledBefore); // nothing is dialled to stop
+    expect(w.kills.map((k) => k.pid)).toEqual([ours.pid]);
+    expect(w.processes.get(ours.pid)!.alive).toBe(false);
     expect(impostor.alive).toBe(true);
-    expect(w.store.getOwnership(DIR)!.state).toBe("stale");
-    expect(w.logs.some((l) => l.event === "daemon_shutdown_withheld")).toBe(true);
+    expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
   });
 
   it("R2#1 a reachable daemon that reports no session socket is refused (never a derived path) — owned spawn and foreign attach", async () => {
@@ -659,36 +695,28 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(lease.mode).toBe("foreign");
     expect(w.store.getOwnership(DIR)).toBeUndefined();
     await lease.release();
-    expect(w.shutdownRequests).toHaveLength(0);
     expect(w.kills).toHaveLength(0);
     expect(listener.alive).toBe(true);
   });
 
-  it("R2#3 a pid reused after the daemon exited during the shutdown wait is never signalled", async () => {
+  it("R2#3 a pid reused after the daemon exited before the stop is never signalled", async () => {
     const w = new World();
     const m = new DaemonManager(w.deps());
     const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    const d = w.daemons.get(`${DIR}/adc.sock`)!;
-    d.honoursShutdown = false;
+    const d = w.daemons.get(`${DIR}/adc-enroll.sock`)!;
     d.honoursSigterm = false;
-    // The daemon ignores shutdown; meanwhile the pid is reused by an unrelated process.
+    // The moment the fence claims `stopping`, the daemon has exited and its pid is reused by an unrelated process.
     const proc = w.processes.get(d.pid)!;
     const deps = w.deps();
     const m2 = new DaemonManager({
       ...deps,
       kill: (pid, signal) => w.kills.push({ pid, signal }),
-      connectControl: async (socketPath) => {
-        const c = await deps.connectControl(socketPath);
-        return {
-          ...c,
-          request: async <R>(op: string, params?: object, options?: { timeoutMs?: number }) => {
-            const r = await c.request<R>(op, params, options);
-            // right after the shutdown op is accepted, the pid is reused
-            proc.startedAt = "reused-much-later";
-            proc.command = "python3 unrelated.py";
-            return r;
-          },
-        };
+      processFacts: (pid) => {
+        if (pid === d.pid && w.store.getOwnership(DIR)?.state === "stopping") {
+          proc.startedAt = "reused-much-later";
+          proc.command = "python3 unrelated.py";
+        }
+        return deps.processFacts(pid);
       },
     });
     const lease2 = await m2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
@@ -703,8 +731,7 @@ describe("Codex branch-review folds (daemon)", () => {
     const a = new World();
     const ma = new DaemonManager(a.deps());
     const la = await ma.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    const da = a.daemons.get(`${DIR}/adc.sock`)!;
-    da.honoursShutdown = false;
+    const da = a.daemons.get(`${DIR}/adc-enroll.sock`)!;
     da.honoursSigterm = false;
     const procA = a.processes.get(da.pid)!;
     const depsA = a.deps();
@@ -727,8 +754,7 @@ describe("Codex branch-review folds (daemon)", () => {
     const b = new World();
     const mb = new DaemonManager(b.deps());
     const lb = await mb.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    const db = b.daemons.get(`${DIR}/adc.sock`)!;
-    db.honoursShutdown = false;
+    const db = b.daemons.get(`${DIR}/adc-enroll.sock`)!;
     db.honoursSigterm = false;
     const depsB = b.deps();
     const mb2 = new DaemonManager({
@@ -746,8 +772,8 @@ describe("Codex branch-review folds (daemon)", () => {
 
   it("R3#4 a claimed upgrade whose stop fails leaves `stale` and yields a FOREIGN lease (never 'owned' over an unproven instance)", async () => {
     const w = new World();
-    w.bundledVersion = "0.2.5";
-    const old = w.addDaemon(DIR, { version: "0.2.4", honoursShutdown: false, honoursSigterm: false });
+    w.bundledVersion = "0.5.1";
+    const old = w.addDaemon(DIR, { version: "0.5.0", honoursSigterm: false });
     bindLive(w, old);
     const deps = w.deps();
     const m = new DaemonManager({ ...deps, kill: (pid, signal) => w.kills.push({ pid, signal }) });
@@ -760,19 +786,19 @@ describe("Codex branch-review folds (daemon)", () => {
 
   it("R4#4 a claimed upgrade whose stop fails AND whose listener then vanishes → DaemonUnreachableError, holder removed, no owned lease", async () => {
     const w = new World();
-    w.bundledVersion = "0.2.5";
-    const old = w.addDaemon(DIR, { version: "0.2.4", honoursShutdown: false, honoursSigterm: false });
+    w.bundledVersion = "0.5.1";
+    const old = w.addDaemon(DIR, { version: "0.5.0", honoursSigterm: false });
     bindLive(w, old);
     const deps = w.deps();
-    let controlCalls = 0;
+    let enrollCalls = 0;
     const m = new DaemonManager({
       ...deps,
       kill: (pid, signal) => w.kills.push({ pid, signal }),
-      connectControl: async (socketPath) => {
-        controlCalls++;
-        // 1 = the acquire probe, 2 = the shutdown attempt; afterwards the listener is gone
-        if (controlCalls > 2) throw new Error("ECONNREFUSED");
-        return deps.connectControl(socketPath);
+      connectEnroll: async (socketPath) => {
+        enrollCalls++;
+        // 1 = the acquire probe (the stop dials nothing); afterwards the listener is gone
+        if (enrollCalls > 1) throw new Error("ECONNREFUSED");
+        return deps.connectEnroll(socketPath);
       },
     });
     await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
@@ -788,8 +814,8 @@ describe("Codex branch-review folds (daemon)", () => {
     let closes = 0;
     const m = new DaemonManager({
       ...deps,
-      connectControl: async (socketPath) => {
-        const c = await deps.connectControl(socketPath);
+      connectEnroll: async (socketPath) => {
+        const c = await deps.connectEnroll(socketPath);
         return { ...c, daemonInfo: () => new Promise(() => {}), close: async () => void closes++ };
       },
     });
@@ -811,8 +837,8 @@ describe("Codex branch-review folds (daemon)", () => {
     const deps = w.deps();
     const m = new DaemonManager({
       ...deps,
-      connectControl: async (socketPath) => {
-        const c = await deps.connectControl(socketPath);
+      connectEnroll: async (socketPath) => {
+        const c = await deps.connectEnroll(socketPath);
         return { ...c, daemonInfo: () => new Promise(() => {}) };
       },
     });
@@ -825,7 +851,7 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(w.spawns).toHaveLength(0);
   });
 
-  it("R8#2 a control connection that resolves only AFTER the probe was aborted is closed exactly once", async () => {
+  it("R8#2 an enrollment connection that resolves only AFTER the probe was aborted is closed exactly once", async () => {
     const w = new World();
     w.addDaemon(DIR);
     const deps = w.deps();
@@ -836,9 +862,9 @@ describe("Codex branch-review folds (daemon)", () => {
     let closes = 0;
     const m = new DaemonManager({
       ...deps,
-      connectControl: async (socketPath) => {
+      connectEnroll: async (socketPath) => {
         await gate;
-        const c = await deps.connectControl(socketPath);
+        const c = await deps.connectEnroll(socketPath);
         return { ...c, close: async () => void closes++ };
       },
     });
@@ -982,41 +1008,6 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(w.ensureConnectFns).toEqual([w.probeConnect]);
   });
 
-  it("R10#6 a control connection resolving after the shutdown connect timed out is closed once", async () => {
-    const w = new World();
-    const m = new DaemonManager(w.deps());
-    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    const d = w.daemons.get(`${DIR}/adc.sock`)!;
-    let releaseConnect!: () => void;
-    const gate = new Promise<void>((r) => {
-      releaseConnect = r;
-    });
-    let closes = 0;
-    let gateActive = false;
-    const deps = w.deps();
-    const m2 = new DaemonManager({
-      ...deps,
-      connectControl: async (socketPath) => {
-        if (gateActive) await gate;
-        const c = await deps.connectControl(socketPath);
-        return { ...c, close: async () => void closes++ };
-      },
-      kill: (pid, signal) => {
-        w.kills.push({ pid, signal });
-        if (signal === "SIGTERM") w.killDaemon(d);
-      },
-    });
-    const lease2 = await m2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    await lease.release();
-    gateActive = true;
-    const releasing = lease2.release(); // the shutdown connect hangs → real-clock timeout → signals
-    await releasing;
-    expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
-    releaseConnect();
-    await new Promise((r) => setTimeout(r, 5));
-    expect(closes).toBe(1);
-  }, 10_000);
-
   it("R11#1 post-spawn probe failures abandon the generation (stale, pid facts kept) on fresh AND existing origins", async () => {
     // (a) fresh: the spawned child never answers → stale with the child's pid, not deleted
     const a = new World();
@@ -1106,7 +1097,7 @@ describe("Codex branch-review folds (daemon)", () => {
       bindLive(w, d);
       if (state === "pending-publication") w.store.cas({ dataDir: DIR, from: ["bound"], to: "pending-publication", expectedGeneration: 1 });
       // the daemon stops answering its control socket but its process is alive
-      w.daemons.get(`${DIR}/adc.sock`)!.alive = false;
+      w.daemons.get(`${DIR}/adc-enroll.sock`)!.alive = false;
       const m = new DaemonManager(w.deps());
       await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
       expect(w.spawns).toHaveLength(0);
@@ -1145,7 +1136,7 @@ describe("Codex branch-review folds (daemon)", () => {
     const d = b.addDaemon(DIR);
     bindLive(b, d);
     b.store.cas({ dataDir: DIR, from: ["bound"], to: "stale", expectedGeneration: 1 });
-    b.daemons.get(`${DIR}/adc.sock`)!.alive = false;
+    b.daemons.get(`${DIR}/adc-enroll.sock`)!.alive = false;
     b.processes.set(d.pid, { alive: true, startedAt: "", command: "" });
     const m2 = new DaemonManager(b.deps());
     await expect(m2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
@@ -1201,35 +1192,15 @@ describe("Codex branch-review folds (daemon)", () => {
     expect(w.store.getOwnership(DIR)!.state).toBe("bound"); // the winner's row is untouched
   });
 
-  it("R10#6 (bounded close) a shutdown connection whose close() never resolves cannot hold the release past the cap", async () => {
-    const w = new World();
-    const m = new DaemonManager(w.deps());
-    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    const deps = w.deps();
-    const m2 = new DaemonManager({
-      ...deps,
-      connectControl: async (socketPath) => {
-        const c = await deps.connectControl(socketPath);
-        return { ...c, close: () => new Promise<void>(() => {}) };
-      },
-    });
-    const lease2 = await m2.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    await lease.release();
-    const t0 = Date.now();
-    await lease2.release();
-    expect(Date.now() - t0).toBeLessThan(RELEASE_CAP_MS + 1500);
-    expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
-  }, 15_000);
-
   it("#9 an orphaned `stopping` row is recovered when the stopper is dead OR its deadline passed; our live instance has its stop RESUMED", async () => {
-    // (a) live stopper, expired deadline → recovered, stop resumed (shutdown op sent), then respawn
+    // (a) live stopper, expired deadline → recovered, stop resumed (SIGTERM by verified pid), then respawn
     const a = new World();
     const da = a.addDaemon(DIR);
     bindLive(a, da);
     a.store.cas({ dataDir: DIR, from: ["bound"], to: "stopping", expectedGeneration: 1, bumpGeneration: true, set: { ownerPid: a.selfPid, ownerPidStartedAt: "self-start", deadlineMs: a.clock - 1 } });
     const ma = new DaemonManager(a.deps());
     const la = await ma.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
-    expect(a.shutdownRequests).toHaveLength(1);
+    expect(a.kills.map((k) => k.signal)).toEqual(["SIGTERM"]);
     expect(la.mode).toBe("owned");
     expect(a.spawns).toHaveLength(1);
     expect(a.logs.find((l) => l.event === "daemon_stopping_recovered")?.fields).toMatchObject({ to: "stopped" });
@@ -1252,7 +1223,332 @@ describe("Codex branch-review folds (daemon)", () => {
     const mc = new DaemonManager(c.deps());
     const lc = await mc.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
     expect(lc.mode).toBe("foreign");
-    expect(c.shutdownRequests).toHaveLength(0);
+    expect(c.kills).toHaveLength(0);
     expect(c.logs.find((l) => l.event === "daemon_stopping_recovered")?.fields).toMatchObject({ to: "stale" });
+  });
+});
+
+describe("Phase B: the enrollment socket, the hardened host (spec A38 / M20)", () => {
+  function bindLegacy(w: World, d: FakeDaemon, adcVersion: string | null) {
+    w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
+    w.store.cas({ dataDir: DIR, from: ["claimed"], to: "starting", bumpGeneration: true });
+    w.store.cas({
+      dataDir: DIR,
+      from: ["starting"],
+      to: "bound",
+      expectedGeneration: 1,
+      set: { daemonPid: d.pid, daemonPidStartedAt: `start-${d.pid}`, daemonStartedAtMs: d.info.started_at_ms, adcVersion },
+    });
+  }
+
+  it("system scope with no socket config → a foreign lease at the system layout: zero spawns, zero ownership rows (reachable, unreachable, refused)", async () => {
+    // (a) reachable: the daemon's own session socket report is the authority
+    const a = new World();
+    a.addDaemon(SYSTEM_DATA_DIR, { version: "0.5.0", enrollSocket: SYSTEM_ENROLL_SOCKET_PATH, sessionSocket: "/run/adc/custom-session.sock" });
+    const ma = new DaemonManager(a.deps());
+    const la = await ma.acquire({ identity: systemIdentity(), server: SERVER, role: "runtime" });
+    expect(la.mode).toBe("foreign");
+    expect(la.identity.scope).toBe("system");
+    expect(la.info.enrollSocketPath).toBe(SYSTEM_ENROLL_SOCKET_PATH);
+    expect(la.info.sessionSocketPath).toBe("/run/adc/custom-session.sock");
+    expect(la.info.daemonVersion).toBe("0.5.0");
+    expect(a.spawns).toHaveLength(0);
+    expect(a.store.listOwnership()).toHaveLength(0);
+    expect(a.dialled).toEqual([SYSTEM_ENROLL_SOCKET_PATH]);
+    await la.release();
+    expect(a.kills).toEqual([]);
+    expect(a.store.listHolders(SYSTEM_DATA_DIR)).toHaveLength(0);
+
+    // (b) unreachable (daemon down for the moment): still foreign, the fixed system session socket
+    const b = new World();
+    const mb = new DaemonManager(b.deps());
+    const lb = await mb.acquire({ identity: systemIdentity(), server: SERVER, role: "setup" });
+    expect(lb.mode).toBe("foreign");
+    expect(lb.info.sessionSocketPath).toBe(SYSTEM_SESSION_SOCKET_PATH);
+    expect(b.spawns).toHaveLength(0);
+    expect(b.store.listOwnership()).toHaveLength(0);
+
+    // (c) the enrollment socket refuses this uid (group-gated posture): still foreign — the session socket is the runtime's door
+    const c = new World();
+    c.privilegeDenied.add(SYSTEM_ENROLL_SOCKET_PATH);
+    const mc = new DaemonManager(c.deps());
+    const lc = await mc.acquire({ identity: systemIdentity(), server: SERVER, role: "runtime" });
+    expect(lc.mode).toBe("foreign");
+    expect(c.spawns).toHaveLength(0);
+    expect(c.store.listOwnership()).toHaveLength(0);
+    expect(c.logs.some((l) => l.event === "daemon_enroll_privilege_denied")).toBe(true);
+  });
+
+  it("PrivilegeError on the enrollment probe is not 'absent': no spawn, no claim, the holder is removed and the typed error propagates (fresh, bound, stale)", async () => {
+    // fresh (no row)
+    const a = new World();
+    a.privilegeDenied.add(`${DIR}/adc-enroll.sock`);
+    const ma = new DaemonManager(a.deps());
+    await expect(ma.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(PrivilegeError);
+    expect(a.spawns).toHaveLength(0);
+    expect(a.store.getOwnership(DIR)).toBeUndefined();
+    expect(a.store.listHolders(DIR)).toHaveLength(0);
+    expect(ma.activeLeases).toBe(0);
+
+    // bound: the row is left exactly as it was (permissions are an environment fault)
+    const b = new World();
+    const d = b.addDaemon(DIR);
+    bindLegacy(b, d, "0.2.4");
+    const before = b.store.getOwnership(DIR)!;
+    b.privilegeDenied.add(`${DIR}/adc-enroll.sock`);
+    const mb = new DaemonManager(b.deps());
+    await expect(mb.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(PrivilegeError);
+    expect(b.spawns).toHaveLength(0);
+    expect(b.kills).toEqual([]);
+    expect(b.store.getOwnership(DIR)).toEqual(before);
+
+    // stale
+    const c = new World();
+    c.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
+    c.store.cas({ dataDir: DIR, from: ["claimed"], to: "stale", bumpGeneration: true });
+    c.privilegeDenied.add(`${DIR}/adc-enroll.sock`);
+    const mc = new DaemonManager(c.deps());
+    await expect(mc.acquire({ identity: identityFor(DIR), server: SERVER, role: "setup" })).rejects.toBeInstanceOf(PrivilegeError);
+    expect(c.spawns).toHaveLength(0);
+    expect(c.store.getOwnership(DIR)!.state).toBe("stale");
+  });
+
+  it("an explicit dataDir on a hardened host: DaemonScopeError names the key and the way to the system device host; no spawn, no claim left, ensureDaemon never called", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    const m = new DaemonManager(w.deps());
+    const err = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonScopeError);
+    expect(err).not.toBeInstanceOf(PrivilegeError);
+    expect((err as Error).message).toContain("channels.ademu dataDir");
+    expect((err as Error).message).toContain("remove that key");
+    expect((err as Error).message).toContain("openclaw channels add --channel ademu");
+    expect(w.spawns).toHaveLength(0);
+    expect(w.ensureProbePaths).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)).toBeUndefined();
+    expect(w.store.listHolders(DIR)).toHaveLength(0);
+    expect(w.logs.some((l) => l.event === "daemon_system_install_beside" && l.fields?.scopeSource === "explicit")).toBe(true);
+  });
+
+  it("an account recorded at user scope, a system install added later: DaemonScopeError says it was enrolled on this user's own device host and to enroll it again", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    const m = new DaemonManager(w.deps());
+    const identity: DaemonIdentity = { ...identityFor(DIR), explicit: { dataDir: false, socketPath: false, enrollSocketPath: false }, scopeSource: "enrolled" };
+    const err = await m.acquire({ identity, server: SERVER, role: "runtime" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonScopeError);
+    expect((err as Error).message).toContain("enrolled on this user's own Ademú device host");
+    expect((err as Error).message).not.toContain("channels.ademu dataDir");
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)).toBeUndefined();
+  });
+
+  it("the private daemon of a user-scope account still answering beside a system install is attached, never refused (only a spawn is)", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    w.addDaemon(DIR);
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("foreign");
+    expect(w.spawns).toHaveLength(0);
+    await lease.release();
+  });
+
+  const recordedUser = (dir: string): DaemonIdentity => ({ ...identityFor(dir), explicit: { dataDir: false, socketPath: false, enrollSocketPath: false }, scopeSource: "enrolled" });
+
+  it("Codex scope #1: a reachable upgrade beside a system install is skipped — the running, verified daemon is kept (owned, old version), never killed, no spawn", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    w.bundledVersion = "0.5.1";
+    const old = w.addDaemon(DIR, { version: "0.5.0" });
+    w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
+    w.store.cas({ dataDir: DIR, from: ["claimed"], to: "starting", bumpGeneration: true });
+    w.store.cas({ dataDir: DIR, from: ["starting"], to: "bound", expectedGeneration: 1, set: { daemonPid: old.pid, daemonPidStartedAt: `start-${old.pid}`, daemonStartedAtMs: old.info.started_at_ms, adcVersion: "0.5.0" } });
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: recordedUser(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("owned");
+    expect(lease.info.daemonVersion).toBe("0.5.0");
+    expect(w.kills).toEqual([]);
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)!).toMatchObject({ state: "bound", generation: 1 });
+    expect(w.logs.some((l) => l.event === "daemon_upgrade_skipped_system_install")).toBe(true);
+    expect(w.logs.some((l) => l.event === "daemon_upgrading")).toBe(false);
+  });
+
+  it("Codex scope #1: a pre-0.5.0 owned daemon beside a system install — DaemonScopeError BEFORE the stop: never killed, no spawn, the row untouched", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    w.bundledVersion = "0.5.0";
+    const old = w.addDaemon(DIR, { version: "0.3.0", enrollSocket: false });
+    bindLegacy(w, old, "0.3.0");
+    const before = w.store.getOwnership(DIR)!;
+    const m = new DaemonManager(w.deps());
+    await expect(m.acquire({ identity: recordedUser(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonScopeError);
+    expect(w.kills).toEqual([]);
+    expect(w.processes.get(old.pid)!.alive).toBe(true);
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)!).toMatchObject({ state: before.state, generation: before.generation });
+    expect(w.logs.some((l) => l.event === "daemon_system_install_beside" && l.fields?.at === "legacy-upgrade")).toBe(true);
+  });
+
+  it("Codex scope #2: no row, a non-empty data dir, nothing answering, beside a system install — the recorded user scope is refused (never an endless retry); an explicit key keeps the unreachable foreign lease (the operator's own daemon may come back)", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    w.dirs.set(DIR, "nonempty");
+    const m = new DaemonManager(w.deps());
+    const err = await m.acquire({ identity: recordedUser(DIR), server: SERVER, role: "runtime" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonScopeError);
+    expect((err as Error).message).toContain("enrolled on this user's own Ademú device host");
+    expect(w.store.getOwnership(DIR)).toBeUndefined();
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("foreign");
+    expect(w.spawns).toHaveLength(0);
+    await lease.release();
+  });
+
+  it("a detected user scope whose host gains a system install mid-flight: the client's own refusal inside ensureDaemon is the backstop (PrivilegeError, claim deleted)", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    const m = new DaemonManager(w.deps());
+    const identity: DaemonIdentity = { ...identityFor(DIR), explicit: { dataDir: false, socketPath: false, enrollSocketPath: false }, scopeSource: "detected" };
+    await expect(m.acquire({ identity, server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(PrivilegeError);
+    expect(w.ensureProbePaths).toHaveLength(1);
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)).toBeUndefined();
+    expect(w.store.listHolders(DIR)).toHaveLength(0);
+  });
+
+  it("terminate never dials anything: verified-pid SIGTERM then SIGKILL; DaemonDeps has no control connect at all", async () => {
+    const w = new World();
+    const deps = w.deps();
+    expect("connectControl" in deps).toBe(false);
+    const m = new DaemonManager(deps);
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    const d = w.daemons.get(`${DIR}/adc-enroll.sock`)!;
+    d.honoursSigterm = false;
+    const dialled = w.dialled.length;
+    await lease.release();
+    expect(w.dialled.slice(dialled)).toEqual([]);
+    expect(w.dialled.every((p) => p.endsWith("/adc-enroll.sock"))).toBe(true);
+    expect(w.kills.map((k) => k.signal)).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
+  });
+
+  it("ensureDaemon receives probeSocketPath = the identity's enrollment socket", async () => {
+    const w = new World();
+    const m = new DaemonManager(w.deps());
+    await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(w.ensureProbePaths).toEqual([`${DIR}/adc-enroll.sock`]);
+  });
+
+  it("a pre-enrollment-socket owned daemon (verified pid, recorded version ≠ bundled, silent on the enrollment socket) is stopped by pid through the fence and respawned", async () => {
+    const w = new World();
+    w.bundledVersion = "0.5.0";
+    const old = w.addDaemon(DIR, { version: "0.3.0", enrollSocket: false });
+    bindLegacy(w, old, "0.3.0");
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("owned");
+    expect(w.kills.map((k) => k)).toEqual([{ pid: old.pid, signal: "SIGTERM" }]);
+    expect(w.processes.get(old.pid)!.alive).toBe(false);
+    expect(w.spawns).toHaveLength(1);
+    expect(w.store.getOwnership(DIR)!).toMatchObject({ state: "bound", generation: 3 });
+    expect(w.logs.some((l) => l.event === "daemon_upgrading")).toBe(true);
+    expect(lease.info.daemonVersion).toBe("0.5.0");
+  });
+
+  it("a silent daemon of the SAME version, a null recorded version, another live holder, or a setup role is never replaced: stale + retry-later, no sibling", async () => {
+    // same version → not a legacy candidate
+    const a = new World();
+    const da = a.addDaemon(DIR, { enrollSocket: false });
+    bindLegacy(a, da, a.bundledVersion);
+    const ma = new DaemonManager(a.deps());
+    await expect(ma.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(a.kills).toEqual([]);
+    expect(a.spawns).toHaveLength(0);
+    expect(a.store.getOwnership(DIR)!.state).toBe("stale");
+
+    // null recorded version → fail closed
+    const b = new World();
+    b.bundledVersion = "0.5.0";
+    const db = b.addDaemon(DIR, { version: "0.3.0", enrollSocket: false });
+    bindLegacy(b, db, null);
+    const mb = new DaemonManager(b.deps());
+    await expect(mb.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(b.kills).toEqual([]);
+
+    // another live holder → the fence defers, no sibling
+    const c = new World();
+    c.bundledVersion = "0.5.0";
+    const dc = c.addDaemon(DIR, { version: "0.3.0", enrollSocket: false });
+    bindLegacy(c, dc, "0.3.0");
+    c.processes.set(777, { alive: true, startedAt: "cli", command: "node openclaw" });
+    c.store.addHolder({ holderId: "setup:777:y", dataDir: DIR, role: "setup", pid: 777, pidStartedAt: "cli", heartbeatMs: c.clock });
+    const mc = new DaemonManager(c.deps());
+    await expect(mc.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(c.kills).toEqual([]);
+    expect(c.spawns).toHaveLength(0);
+    expect(dc.alive).toBe(true);
+
+    // setup role never stops anything
+    const d = new World();
+    d.bundledVersion = "0.5.0";
+    const dd = d.addDaemon(DIR, { version: "0.3.0", enrollSocket: false });
+    bindLegacy(d, dd, "0.3.0");
+    const md = new DaemonManager(d.deps());
+    await expect(md.acquire({ identity: identityFor(DIR), server: SERVER, role: "setup" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(d.kills).toEqual([]);
+    expect(dd.alive).toBe(true);
+  });
+
+  it("infoMatchesIdentity: a different enroll_socket_path is foreign; an absent one (older daemon) is ignored", () => {
+    const w = new World();
+    const d = w.addDaemon(DIR);
+    expect(infoMatchesIdentity(d.info, identityFor(DIR))).toBe(true);
+    expect(infoMatchesIdentity({ ...d.info, enroll_socket_path: "/elsewhere/adc-enroll.sock" }, identityFor(DIR))).toBe(false);
+    const { enroll_socket_path: _omitted, ...older } = d.info;
+    expect(infoMatchesIdentity(older, identityFor(DIR))).toBe(true);
+    expect(infoMatchesIdentity({ ...d.info, enroll_socket_path: "" }, identityFor(DIR))).toBe(true);
+  });
+
+  it("Codex #1: a bundled daemon older than the enrollment socket is refused before any spawn (typed, no lingering row)", async () => {
+    expect(MIN_BUNDLED_ADC_VERSION).toBe("0.5.0");
+    expect(versionAtLeast("0.5.0", "0.5.0")).toBe(true);
+    expect(versionAtLeast("0.5.1 (abc)", "0.5.0")).toBe(true);
+    expect(versionAtLeast("0.3.0", "0.5.0")).toBe(false);
+    expect(versionAtLeast("garbage", "0.5.0")).toBe(false);
+    const w = new World();
+    w.bundledVersion = "0.3.0";
+    const m = new DaemonManager(w.deps());
+    await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnsupportedError);
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)).toBeUndefined();
+    expect(w.store.listHolders(DIR)).toHaveLength(0);
+  });
+
+  it("Codex doc #3: a `stale` row left over a verified pre-Phase-B child (a setup acquisition saw it silent) is still replaced by the runtime", async () => {
+    const w = new World();
+    const old = w.addDaemon(DIR, { version: "0.3.0", enrollSocket: false });
+    bindLegacy(w, old, "0.3.0");
+    const m = new DaemonManager(w.deps());
+    // setup never stops anything: the row goes stale with the child's pid facts
+    await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "setup" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(w.store.getOwnership(DIR)!.state).toBe("stale");
+    expect(w.kills).toEqual([]);
+    // the runtime takes it back to bound under the same generation and replaces it through the fence
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("owned");
+    expect(w.kills.map((k) => k.pid)).toEqual([old.pid]);
+    expect(w.spawns).toHaveLength(1);
+    expect(w.store.getOwnership(DIR)!.state).toBe("bound");
+    // a stale row over a SAME-version child is untouched (still retry-later)
+    const b = new World();
+    const same = b.addDaemon(DIR, { enrollSocket: false });
+    bindLegacy(b, same, b.bundledVersion);
+    b.store.cas({ dataDir: DIR, from: ["bound"], to: "stale", expectedGeneration: 1 });
+    const mb = new DaemonManager(b.deps());
+    await expect(mb.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(b.kills).toEqual([]);
+    expect(b.spawns).toHaveLength(0);
   });
 });
