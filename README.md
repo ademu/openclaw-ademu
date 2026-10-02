@@ -130,6 +130,16 @@ enrollment socket `/run/adc/adc-enroll.sock`) whenever `channels.ademu` names no
 `socketPath` or `enrollSocketPath`, and then **attaches** to it: it never starts a device host of its
 own beside the hardened one, never stops or upgrades it.
 
+Enrollment records where the agent was enrolled (`daemonScope`: `user` or `system`, under the
+account), because a token belongs to the device host that minted it. An account stays on that device
+host whatever the host looks like later: an account enrolled at system scope keeps waiting for the
+system daemon while it is down (or not up yet at boot) instead of starting a private one, and an
+account enrolled on this user's own device host is not moved onto a system install added afterwards.
+If its own device host is not running then, the plugin will not start it beside the system one and
+says so (`blocked`); to move the agent, enroll it again (`openclaw channels add --channel ademu`) —
+both enrollment doors resolve the host as it is now and record the new scope. Accounts enrolled before
+the key existed follow the detection above.
+
 Enrollment still takes the same three actions. The plugin's ceremony runs over the daemon's
 **enrollment socket** (`adc-enroll.sock`, world-connectable on a system install): it exposes only the
 ceremony (create a device, show the QR, confirm the words, mint one token) and pins each connection to
@@ -137,9 +147,8 @@ the device it created; the owner's phone is the gate, and the daemon bounds unfi
 user and host-wide. The plugin never opens the control socket (`/run/adc/adc.sock`, root and group
 `adc` only). `sudo adc --system agent list` shows which local user created each device (`creator_uid`).
 
-When the plugin cannot run the ceremony — an operator group-gated the enrollment socket, the host's
-enrollment budget is full, or the plugin was pointed at a data dir it may not use — it prints the
-operator's path instead of a raw error:
+When the plugin cannot run the ceremony — an operator group-gated the enrollment socket, or the host's
+enrollment budget is full — it prints the operator's path instead of a raw error:
 
 ```sh
 sudo adc --system agent add "Iris"          # then scan the QR and confirm the words on the phone
@@ -208,7 +217,9 @@ dir; add `socketPath` (its control socket) and `enrollSocketPath` (its enrollmen
 are not under that dir — on Linux a zero-config daemon binds them under `$XDG_RUNTIME_DIR`. The
 plugin then runs in *foreign* mode: it attaches to that daemon but never starts, stops, or upgrades
 it. A system-wide install needs none of this (see *Hardened hosts*); naming any of the three keys
-turns that detection off.
+turns that detection off — and on a host with a system-wide install the plugin never starts a device
+host of its own at those paths: it attaches when one is already running there, and otherwise refuses
+(`blocked`), naming the keys to remove.
 
 **Owner authority:** enrollment adds `ademu:<ownerUserId>` to the global `commands.ownerAllowFrom`
 (if you said yes). Removing the account (`openclaw channels remove`) or logging it out removes that
@@ -232,8 +243,11 @@ a token and use *I have a device token* to come back.
   lists the three sockets — control, session, enrollment — with their modes; the plugin dials only the
   last two.
 - `blocked` with "refused this user": the device host's enrollment socket denied the gateway's user
-  (an operator's group-gated posture), or a system-wide `adc` is installed and `channels.ademu` points
-  at a data dir the plugin may not run a device host in. Fix access, or use the token door.
+  (an operator's group-gated posture). Fix access, or use the token door.
+- `blocked` with "a system-wide Ademú device host is installed": the account is held on a user-scope
+  device host — by `dataDir`/`socketPath`/`enrollSocketPath` (the copy names them: remove them) or by
+  where it was enrolled — and that device host is not running. Enroll the agent again to move it onto
+  the system device host.
 - The plugin never logs tokens, QR payloads, safety words, or message bodies.
 
 ## Development

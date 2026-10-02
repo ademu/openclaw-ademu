@@ -8,6 +8,7 @@ import {
   DaemonAbortedError,
   DaemonBusyError,
   DaemonManager,
+  DaemonScopeError,
   DaemonUnreachableError,
   DaemonUnsupportedError,
   MIN_BUNDLED_ADC_VERSION,
@@ -36,6 +37,7 @@ function identityFor(dir: string): DaemonIdentity {
     raw: { dataDir: dir, controlSocket: `${dir}/adc.sock`, sessionSocket: `${dir}/adc-session.sock`, enrollSocket: `${dir}/adc-enroll.sock` },
     explicit: { dataDir: true, socketPath: false, enrollSocketPath: false },
     scope: "user",
+    scopeSource: "explicit",
   };
 }
 
@@ -49,6 +51,7 @@ function systemIdentity(): DaemonIdentity {
     raw: { dataDir: SYSTEM_DATA_DIR, controlSocket: "/run/adc/adc.sock", sessionSocket: SYSTEM_SESSION_SOCKET_PATH, enrollSocket: SYSTEM_ENROLL_SOCKET_PATH },
     explicit: { dataDir: false, socketPath: false, enrollSocketPath: false },
     scope: "system",
+    scopeSource: "detected",
   };
 }
 
@@ -231,6 +234,7 @@ class World {
       },
       bundledVersion: this.bundledVersion,
       platform: this.platform,
+      detectSystemInstall: () => this.systemInstall,
       log: (event, fields) => {
         this.logs.push({ event, fields });
       },
@@ -1309,11 +1313,54 @@ describe("Phase B: the enrollment socket, the hardened host (spec A38 / M20)", (
     expect(c.store.getOwnership(DIR)!.state).toBe("stale");
   });
 
-  it("an explicit dataDir on a hardened host: the client's own refusal inside ensureDaemon deletes the fresh claim and propagates typed", async () => {
+  it("an explicit dataDir on a hardened host: DaemonScopeError names the key and the way to the system device host; no spawn, no claim left, ensureDaemon never called", async () => {
     const w = new World();
     w.systemInstall = true;
     const m = new DaemonManager(w.deps());
-    await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(PrivilegeError);
+    const err = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonScopeError);
+    expect(err).not.toBeInstanceOf(PrivilegeError);
+    expect((err as Error).message).toContain("channels.ademu dataDir");
+    expect((err as Error).message).toContain("remove that key");
+    expect((err as Error).message).toContain("openclaw channels add --channel ademu");
+    expect(w.spawns).toHaveLength(0);
+    expect(w.ensureProbePaths).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)).toBeUndefined();
+    expect(w.store.listHolders(DIR)).toHaveLength(0);
+    expect(w.logs.some((l) => l.event === "daemon_system_install_beside" && l.fields?.scopeSource === "explicit")).toBe(true);
+  });
+
+  it("an account recorded at user scope, a system install added later: DaemonScopeError says it was enrolled on this user's own device host and to enroll it again", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    const m = new DaemonManager(w.deps());
+    const identity: DaemonIdentity = { ...identityFor(DIR), explicit: { dataDir: false, socketPath: false, enrollSocketPath: false }, scopeSource: "enrolled" };
+    const err = await m.acquire({ identity, server: SERVER, role: "runtime" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonScopeError);
+    expect((err as Error).message).toContain("enrolled on this user's own Ademú device host");
+    expect((err as Error).message).not.toContain("channels.ademu dataDir");
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)).toBeUndefined();
+  });
+
+  it("the private daemon of a user-scope account still answering beside a system install is attached, never refused (only a spawn is)", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    w.addDaemon(DIR);
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" });
+    expect(lease.mode).toBe("foreign");
+    expect(w.spawns).toHaveLength(0);
+    await lease.release();
+  });
+
+  it("a detected user scope whose host gains a system install mid-flight: the client's own refusal inside ensureDaemon is the backstop (PrivilegeError, claim deleted)", async () => {
+    const w = new World();
+    w.systemInstall = true;
+    const m = new DaemonManager(w.deps());
+    const identity: DaemonIdentity = { ...identityFor(DIR), explicit: { dataDir: false, socketPath: false, enrollSocketPath: false }, scopeSource: "detected" };
+    await expect(m.acquire({ identity, server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(PrivilegeError);
+    expect(w.ensureProbePaths).toHaveLength(1);
     expect(w.spawns).toHaveLength(0);
     expect(w.store.getOwnership(DIR)).toBeUndefined();
     expect(w.store.listHolders(DIR)).toHaveLength(0);

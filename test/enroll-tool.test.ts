@@ -105,7 +105,8 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
       bindings: unknown[];
     };
     expect(cfg.channels.ademu.enabled).toBe(true);
-    expect(cfg.channels.ademu.accounts.iris).toMatchObject({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_secret_1", agentName: "Iris" });
+    // the scope of the lease the ceremony ran on is recorded with the account
+    expect(cfg.channels.ademu.accounts.iris).toMatchObject({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_secret_1", agentName: "Iris", daemonScope: "user" });
     expect(cfg.commands.ownerAllowFrom).toEqual([`ademu:${OWNER}`]);
     expect(cfg.bindings).toEqual([{ agentId: "main", match: { channel: "ademu", accountId: "iris" } }]);
     expect(w.control.calls.find((c) => c.op === "token_mint")?.params).toEqual({ device_id: NEW_DEVICE, label: "openclaw-iris" });

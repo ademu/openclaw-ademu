@@ -23,7 +23,7 @@ import {
   type EnrollmentLeaseDeps,
   type EnrollmentResult,
 } from "./ceremony.js";
-import { CHANNEL_ID, inspectAdemuAccount, listAdemuAccountIds } from "./config.js";
+import { CHANNEL_ID, inspectAdemuAccount, inspectAdemuAccountForEnrollment, listAdemuAccountIds } from "./config.js";
 import { applyEnrollment } from "./enroll-config.js";
 import { strings } from "./i18n/strings.js";
 import type { Lease } from "./monitor/daemon.js";
@@ -84,7 +84,8 @@ export function createAdemuSetupWizard(deps: WizardDeps): ChannelSetupWizard {
     finalize: async (args) => {
       const { cfg, accountId, prompter } = args;
       await prompter.intro(strings.enroll.wizardIntro);
-      const account = inspectAdemuAccount(cfg, accountId);
+      // The account's recorded scope is ignored: a re-enrollment lands where the host points now.
+      const account = inspectAdemuAccountForEnrollment(cfg, accountId);
       const operator: OperatorContext = { identity: account.daemon, label: tokenLabelFor(accountId) };
       // The question comes BEFORE any daemon lease: the token door must not need the enrollment socket.
       const mode = await prompter.select<"new" | "token">({
@@ -120,7 +121,7 @@ export function createAdemuSetupWizard(deps: WizardDeps): ChannelSetupWizard {
   };
 }
 
-type Account = ReturnType<typeof inspectAdemuAccount>;
+type Account = ReturnType<typeof inspectAdemuAccountForEnrollment>;
 type Fail = (err: unknown, ctx: OperatorContext, trailer?: string) => Promise<never>;
 
 /**
@@ -182,6 +183,7 @@ async function tokenDoor(deps: WizardDeps, args: FinalizeArgs, account: Account,
       agentUserId: identity.agentUserId,
       ownerUserId: identity.ownerUserId,
       token,
+      daemonScope: account.daemon.scope,
       grantOwnerAuthority: grant,
     });
     await prompter.outro(strings.enroll.connected(agentName));
@@ -250,6 +252,7 @@ async function newDoor(deps: WizardDeps, args: FinalizeArgs, account: Account, o
       agentUserId: result.agentUserId,
       ownerUserId: result.ownerUserId,
       token: result.token,
+      daemonScope: account.daemon.scope,
       grantOwnerAuthority: grant,
     });
     await prompter.outro(strings.enroll.enrolled(agentName));

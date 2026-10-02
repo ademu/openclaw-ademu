@@ -27,7 +27,14 @@ import type { Duplex } from "node:stream";
 import { chmodSync, existsSync, lstatSync, readdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { PlatformPackageMissingError, resolveAdcBinaryPath, UnsupportedPlatformError } from "@ademu/adc-bin";
-import { connectEnroll as connectEnrollReal, ensureDaemon as ensureDaemonReal, PrivilegeError, type ChildLike, type DaemonInfoResult } from "@ademu/adc-control";
+import {
+  connectEnroll as connectEnrollReal,
+  detectSystemInstall as detectSystemInstallReal,
+  ensureDaemon as ensureDaemonReal,
+  PrivilegeError,
+  type ChildLike,
+  type DaemonInfoResult,
+} from "@ademu/adc-control";
 import { canonicalizePath, ENROLL_SOCKET_FILE, type DaemonIdentity } from "../config.js";
 import { strings } from "../i18n/strings.js";
 import type { AdemuStore, OwnershipRow, OwnershipState } from "../store.js";
@@ -55,6 +62,15 @@ export function versionAtLeast(a: string | undefined, b: string): boolean {
   const [a1, a2, a3] = pa.split(".").map(Number) as [number, number, number];
   const [b1, b2, b3] = pb.split(".").map(Number) as [number, number, number];
   return a1 !== b1 ? a1 > b1 : a2 !== b2 ? a2 > b2 : a3 >= b3;
+}
+
+/** The explicit config keys behind a user-scope identity, in config order (for the operator's copy). */
+function explicitKeys(identity: DaemonIdentity): string[] {
+  const keys: string[] = [];
+  if (identity.explicit.dataDir) keys.push("dataDir");
+  if (identity.explicit.socketPath) keys.push("socketPath");
+  if (identity.explicit.enrollSocketPath) keys.push("enrollSocketPath");
+  return keys;
 }
 
 export type Role = "runtime" | "setup";
@@ -91,6 +107,8 @@ export type DaemonDeps = {
   probeConnect: (path: string) => Duplex;
   bundledVersion: string;
   platform: string;
+  /** The client's system-install detector (two stats, no connect), consulted before a user-scope spawn. */
+  detectSystemInstall: () => boolean;
   /** Closed-allowlist structured log: never a path with secrets, never `.detail`. */
   log: (event: string, fields?: Record<string, string | number | boolean>) => void;
 };
@@ -99,6 +117,18 @@ export class DaemonUnsupportedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "DaemonUnsupportedError";
+  }
+}
+/**
+ * A user-scope identity that an explicit key or the account's recorded scope holds in place, on a host
+ * where a system-scope daemon is installed: the broker never spawns beside it (AdemuMLS#642). The
+ * message is our own copy naming why and what to do — the client's own refusal inside `ensureDaemon`
+ * cannot, as its `PrivilegeError` is the same type and code as a plain EACCES.
+ */
+export class DaemonScopeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DaemonScopeError";
   }
 }
 export class DaemonBusyError extends Error {
@@ -217,6 +247,7 @@ export function realDaemonDeps(params: { store: AdemuStore; bundledVersion: stri
     probeConnect: boundedProbeConnect,
     bundledVersion: params.bundledVersion,
     platform: process.platform,
+    detectSystemInstall: () => detectSystemInstallReal(),
     log: params.log ?? (() => {}),
   };
 }
@@ -760,6 +791,14 @@ export class DaemonManager {
     // stop and forbids a second spawn beside it). Without a child the origin rule applies.
     const abandon = (to: "stopped" | "stale", reason: string) =>
       child ? this.#abandonStarting(identity, starting, "existing", "stale", reason) : this.#abandonStarting(identity, starting, origin, to, reason);
+    // A user-scope identity held in place by an explicit key or the recorded scope, with a system install
+    // on this host: never spawn beside it. A `detected` user scope is not checked here — the detector said
+    // no a moment ago, and the client's own detector inside ensureDaemon is the backstop for that race.
+    if (identity.scope === "user" && identity.scopeSource !== "detected" && this.#deps.detectSystemInstall()) {
+      abandon("stopped", "a system-scope daemon is installed; never spawn beside it");
+      this.#deps.log("daemon_system_install_beside", { dataDir: identity.dataDir, scopeSource: identity.scopeSource });
+      throw new DaemonScopeError(strings.status.systemInstallBeside(explicitKeys(identity)));
+    }
     // The bundled daemon must bind the enrollment socket (the only socket this broker ever probes):
     // an older bundle would spawn a child that can never answer here and leave every row `stale`.
     if (!versionAtLeast(this.#deps.bundledVersion, MIN_BUNDLED_ADC_VERSION)) {
@@ -1195,6 +1234,7 @@ export class DaemonManager {
         raw: { dataDir: row.dataDir, controlSocket: row.controlSocket, sessionSocket: row.sessionSocket, enrollSocket: `${row.dataDir}/${ENROLL_SOCKET_FILE}` },
         explicit: { dataDir: true, socketPath: true, enrollSocketPath: false },
         scope: "user",
+        scopeSource: "explicit",
       };
       const holderId = `runtime:${this.#deps.selfPid}:sweep:${randomUUID()}`;
       if (!this.#deps.store.addHolder({ holderId, dataDir: row.dataDir, role: "runtime", pid: this.#deps.selfPid, pidStartedAt: this.#deps.selfPidStartedAt, heartbeatMs: this.#deps.now() })) continue;

@@ -299,8 +299,22 @@ system layout (`/var/lib/adc`, the three `/run/adc` sockets) and `acquire` retur
 before any ownership row is read: zero claims, zero spawns (the coexistence gap, AdemuMLS#642). A
 refused enrollment socket still yields that lease — the session socket is the runtime's door and the
 ceremony half meets the refusal itself. Any explicit `dataDir`/`socketPath`/`enrollSocketPath` keeps
-user scope (an explicit `dataDir` on a hardened host is refused by the client's own detector inside
-`ensureDaemon`, propagated typed).
+user scope.
+
+**The recorded scope (`daemonScope`).** A token belongs to the daemon that minted it, so both doors
+record the scope they enrolled at under the account (`applyEnrollment`; per account, never inherited
+from the root). `resolveDaemonIdentity` applies, in order: an explicit key → user scope at those paths
+(`scopeSource: "explicit"`); the recorded scope → that scope whatever the host looks like now
+(`"enrolled"` — a system-scope account waits for a down or not-yet-started system daemon instead of
+spawning a private one, a user-scope account is not moved onto a system install added later); nothing
+→ the detector (`"detected"`, also every account enrolled before the key). The doors resolve with the
+recorded scope ignored (`inspectAdemuAccountForEnrollment`), so re-enrolling is how an agent moves. In
+the broker, a user-scope identity whose source is `explicit` or `enrolled` is checked against the
+client's detector before any spawn: on a system install it is never spawned beside it —
+`DaemonScopeError`, `blocked`, our own copy naming the keys to remove or the re-enrollment (the client's
+own refusal inside `ensureDaemon` is a `PrivilegeError` with the same code as a plain EACCES, so it
+cannot say why). A daemon already answering at those paths is attached as before; a `detected` user
+scope keeps the client's refusal as the backstop for a system install that appears mid-flight.
 
 **Default isolation (approval rider R2).** Default `dataDir` = `<OPENCLAW_STATE_DIR>/ademu/adc`,
 control socket `<dataDir>/adc.sock`, session socket `<dataDir>/adc-session.sock`, enrollment socket

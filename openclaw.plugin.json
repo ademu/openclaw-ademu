@@ -309,6 +309,13 @@
                 },
                 "enrollSocketPath": {
                   "type": "string"
+                },
+                "daemonScope": {
+                  "type": "string",
+                  "enum": [
+                    "user",
+                    "system"
+                  ]
                 }
               },
               "additionalProperties": false
@@ -352,6 +359,11 @@
         "accounts.*.enrollSocketPath": {
           "label": "Device host enrollment socket (override)",
           "advanced": true
+        },
+        "accounts.*.daemonScope": {
+          "label": "Device host scope (written at enrollment)",
+          "advanced": true,
+          "help": "user: this user's own device host; system: the host's system-wide install. Enrollment writes it, so a system install added later never moves an enrolled account to a device host that does not know its token."
         },
         "dataDir": {
           "label": "Device host data dir",

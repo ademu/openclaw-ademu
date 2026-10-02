@@ -30,6 +30,10 @@ export const strings = {
       `The Ademú device host is not reachable. Check channels.ademu.server${logPath ? ` and the daemon log at ${logPath}` : ""}.`,
     bundledDaemonTooOld: (bundled: string, min: string) =>
       `The bundled Ademú device host (adc ${bundled}) predates the enrollment socket (adc ${min}); update the plugin, or point channels.ademu at a current adc daemon.`,
+    systemInstallBeside: (explicitKeys: string[]) =>
+      explicitKeys.length
+        ? `A system-wide Ademú device host is installed on this host, and the plugin never starts its own beside it; this account names its own (channels.ademu ${explicitKeys.join(", ")}). To use the system one, remove ${explicitKeys.length > 1 ? "those keys" : "that key"} (root or this account), then enroll the agent again: openclaw channels add --channel ademu.`
+        : "This agent was enrolled on this user's own Ademú device host; a system-wide one has since been installed, and the plugin never starts its own beside it. Enroll the agent again, on the system device host: openclaw channels add --channel ademu.",
     privilegeDenied:
       "This host's Ademú device host refused this user: permission denied on its enrollment socket, or a system-wide device host is installed and the plugin was pointed at a data dir it may not run one in. Ask the operator to grant access, or point channels.ademu at a device host this user may use.",
     daemonLost: "The Ademú device host exited; restarting.",

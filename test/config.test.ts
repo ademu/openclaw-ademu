@@ -17,6 +17,7 @@ import {
   ENROLL_SOCKET_FILE,
   SYSTEM_DATA_DIR,
   inspectAdemuAccount,
+  inspectAdemuAccountForEnrollment,
   listAdemuAccountIds,
   ownerAllowFromEntry,
   resolveAdemuAccount,
@@ -246,6 +247,47 @@ describe("daemon scope: a hardened host (system-scope adc install) is attach-onl
     const id = resolveDaemonIdentity({}, ENV, () => false);
     expect(id.scope).toBe("user");
     expect(id.raw.dataDir).toBe(defaultDataDir(ENV));
+  });
+});
+
+describe("the recorded scope (daemonScope): an enrolled account stays on the device host that minted its token", () => {
+  it("recorded user scope + a system install added later → still the default user-scope data dir; the detector is not consulted", () => {
+    let consulted = 0;
+    const id = resolveDaemonIdentity({ enrolledScope: "user" }, ENV, () => (consulted++, true));
+    expect(id).toMatchObject({ scope: "user", scopeSource: "enrolled" });
+    expect(id.raw.dataDir).toBe(defaultDataDir(ENV));
+    expect(consulted).toBe(0);
+  });
+
+  it("recorded system scope + no system install detected (down, or not up yet at boot) → the system layout, never a private daemon", () => {
+    const id = resolveDaemonIdentity({ enrolledScope: "system" }, ENV, () => false);
+    expect(id).toMatchObject({ scope: "system", scopeSource: "enrolled" });
+    expect(id.raw.enrollSocket).toBe("/run/adc/adc-enroll.sock");
+  });
+
+  it("an explicit key beats the recorded scope: an operator who names paths gets exactly those paths", () => {
+    const id = resolveDaemonIdentity({ enrolledScope: "system", dataDir: join(tmp, "named") }, ENV, () => true);
+    expect(id).toMatchObject({ scope: "user", scopeSource: "explicit" });
+    expect(id.raw.dataDir).toBe(join(tmp, "named"));
+  });
+
+  it("nothing recorded or configured → the detector decides (an account enrolled before the key)", () => {
+    expect(resolveDaemonIdentity({}, ENV, () => true)).toMatchObject({ scope: "system", scopeSource: "detected" });
+    expect(resolveDaemonIdentity({}, ENV, () => false)).toMatchObject({ scope: "user", scopeSource: "detected" });
+  });
+
+  it("the key is per account: accepted on an account, refused at the root and for any other value", () => {
+    expect(AdemuChannelSchema.safeParse({ accounts: { a: { daemonScope: "system" } } }).success).toBe(true);
+    expect(AdemuChannelSchema.safeParse({ daemonScope: "system" }).success).toBe(false);
+    expect(AdemuChannelSchema.safeParse({ accounts: { a: { daemonScope: "root" } } }).success).toBe(false);
+  });
+
+  it("account resolution honours the recorded scope; the enrollment doors' resolution ignores it (a re-enrollment lands where the host points now)", () => {
+    const c = cfg({ accounts: { a: { deviceId: "d", token: "t", daemonScope: "user" } } });
+    expect(resolveAdemuAccount(c, "a", ENV, () => true).daemon).toMatchObject({ scope: "user", scopeSource: "enrolled" });
+    expect(inspectAdemuAccount(c, "a", ENV, () => true).daemon).toMatchObject({ scope: "user", scopeSource: "enrolled" });
+    expect(inspectAdemuAccountForEnrollment(c, "a", ENV, () => true).daemon).toMatchObject({ scope: "system", scopeSource: "detected" });
+    expect(inspectAdemuAccountForEnrollment(c, "a", ENV, () => false).daemon).toMatchObject({ scope: "user", scopeSource: "detected" });
   });
 });
 

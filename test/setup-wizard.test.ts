@@ -2,7 +2,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { WizardCancelledError } from "openclaw/plugin-sdk/setup";
 import { describe, expect, it } from "vitest";
 import type { EnrollmentLeaseDeps } from "../src/ceremony.js";
-import type { DaemonManager, Lease } from "../src/monitor/daemon.js";
+import type { AcquireParams, DaemonManager, Lease } from "../src/monitor/daemon.js";
 import { DaemonUnreachableError } from "../src/monitor/daemon.js";
 import { createAdemuSetupWizard, defaultAgentName, presentQr } from "../src/setup-wizard.js";
 import { FakeAdcClient, OWNER } from "./fakes/adc.js";
@@ -65,8 +65,10 @@ function world(opts: { acquireError?: unknown; connectSession?: (o: unknown) => 
     lost: new Promise<never>(() => {}),
     release: async () => void released++,
   };
+  const acquires: AcquireParams[] = [];
   const daemons = {
-    acquire: async () => {
+    acquire: async (p: AcquireParams) => {
+      acquires.push(p);
       if (opts.acquireError) throw opts.acquireError;
       return daemonLease;
     },
@@ -78,7 +80,7 @@ function world(opts: { acquireError?: unknown; connectSession?: (o: unknown) => 
     connectSession: opts.connectSession ?? (async () => client as never),
     qr: { terminal: async (p) => `[QR ${p}]`, pngDataUrl: async () => "data:image/png;base64,AAA" },
   });
-  return { wizard, control, released: () => released };
+  return { wizard, control, acquires, released: () => released };
 }
 
 const baseCfg = { agents: { entries: { main: { identity: { name: "Iris" } } } } } as unknown as OpenClawConfig;
@@ -118,7 +120,8 @@ describe("setup wizard: new enrollment", () => {
 
     const cfg = result!.cfg as unknown as { channels: { ademu: { enabled: boolean; accounts: Record<string, Record<string, unknown>> } }; commands: { ownerAllowFrom: string[] } };
     expect(cfg.channels.ademu.enabled).toBe(true);
-    expect(cfg.channels.ademu.accounts.iris).toMatchObject({ enabled: true, agentName: "Iris", deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_secret_1" });
+    // the scope of the device host that minted the token is recorded (no system install on this host → user)
+    expect(cfg.channels.ademu.accounts.iris).toMatchObject({ enabled: true, agentName: "Iris", deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_secret_1", daemonScope: "user" });
     expect(cfg.commands.ownerAllowFrom).toEqual([`ademu:${OWNER}`]);
     // routing is the HOST's step on this door (`channels add` asks which agent): the wizard writes no binding
     expect((cfg as unknown as { bindings?: unknown }).bindings).toBeUndefined();
@@ -204,12 +207,26 @@ describe("setup wizard: the token door and the hardened host", () => {
     const text = log.find((l) => l.kind === "text");
     expect(text?.message).toContain("device token");
     const cfg = result!.cfg as unknown as { channels: { ademu: { accounts: Record<string, { deviceId: string; agentUserId: string; ownerUserId: string; token: string; agentName: string }> } }; commands: { ownerAllowFrom: string[] } };
-    expect(cfg.channels.ademu.accounts.main).toMatchObject({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_pasted_secret", agentName: "Iris" });
+    expect(cfg.channels.ademu.accounts.main).toMatchObject({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_pasted_secret", agentName: "Iris", daemonScope: "user" });
     expect(cfg.commands.ownerAllowFrom).toContain(`ademu:${OWNER}`);
     expect(log.at(-1)?.message).toContain("Connected");
     expect(released()).toBe(1);
     // the token never appears in any prompt copy
     expect(log.map((l) => l.message ?? "").join("\n")).not.toContain("adc1_pasted_secret");
+  });
+
+  it("re-enrolling an account recorded at another scope resolves the host as it is NOW and records that scope (the way an agent moves)", async () => {
+    const { wizard, acquires } = world();
+    const { prompter } = fakePrompter({ selects: ["token"], texts: ["adc1_moved_secret"], confirms: [true] });
+    const recorded = {
+      ...baseCfg,
+      channels: { ademu: { accounts: { main: { deviceId: "old-device", token: "adc1_old", daemonScope: "system" } } } },
+    } as unknown as OpenClawConfig;
+    const result = await wizard.finalize!({ cfg: recorded, accountId: "main", credentialValues: {}, runtime: {} as never, prompter: prompter as never, options, forceAllowFrom: false });
+    // no system install on this host: the recorded `system` is ignored for the door, the lease is user scope
+    expect(acquires[0]?.identity).toMatchObject({ scope: "user", scopeSource: "detected" });
+    const cfg = result!.cfg as unknown as { channels: { ademu: { accounts: Record<string, Record<string, unknown>> } } };
+    expect(cfg.channels.ademu.accounts.main).toMatchObject({ deviceId: NEW_DEVICE, token: "adc1_moved_secret", daemonScope: "user" });
   });
 
   it("the token door is asked BEFORE any daemon lease and asks the prompter for a sensitive text", async () => {

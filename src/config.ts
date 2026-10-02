@@ -63,6 +63,8 @@ export const AdemuAccountSchema = z
     dataDir: z.string().optional(),
     socketPath: z.string().optional(),
     enrollSocketPath: z.string().optional(),
+    /** The device host scope this account was enrolled at; written by both enrollment doors, never inherited. */
+    daemonScope: z.enum(["user", "system"]).optional(),
   })
   .strict();
 
@@ -102,6 +104,11 @@ export const ADEMU_UI_HINTS = {
   "accounts.*.dataDir": { label: "Device host data dir (override)", advanced: true },
   "accounts.*.socketPath": { label: "Device host control socket (override)", advanced: true },
   "accounts.*.enrollSocketPath": { label: "Device host enrollment socket (override)", advanced: true },
+  "accounts.*.daemonScope": {
+    label: "Device host scope (written at enrollment)",
+    advanced: true,
+    help: "user: this user's own device host; system: the host's system-wide install. Enrollment writes it, so a system install added later never moves an enrolled account to a device host that does not know its token.",
+  },
   dataDir: { label: "Device host data dir", advanced: true },
   socketPath: { label: "Device host control socket", advanced: true },
   enrollSocketPath: { label: "Device host enrollment socket", advanced: true },
@@ -120,6 +127,12 @@ export const ademuConfigSchema: ReturnType<typeof buildChannelConfigSchema> = bu
 // ---------------------------------------------------------------------------------------------
 
 export type DaemonScope = "user" | "system";
+/**
+ * Why the identity has its scope: `explicit` — a `dataDir`/`socketPath`/`enrollSocketPath` key names the
+ * paths (always user scope); `enrolled` — the account's recorded `daemonScope`; `detected` — neither, so
+ * the host decided (`detectSystemInstall`).
+ */
+export type ScopeSource = "explicit" | "enrolled" | "detected";
 
 export type DaemonIdentity = {
   /** Canonical data dir (realpath of the deepest existing ancestor + verbatim tail). */
@@ -134,12 +147,14 @@ export type DaemonIdentity = {
   raw: { dataDir: string; controlSocket: string; sessionSocket: string; enrollSocket: string };
   explicit: { dataDir: boolean; socketPath: boolean; enrollSocketPath: boolean };
   /**
-   * `system`: a system-scope ADC daemon is installed on this host (`detectSystemInstall`: a root-owned
-   * regular /etc/adc/config.toml AND a socket at /run/adc/adc-enroll.sock) and nothing was configured
-   * explicitly, so the identity IS the system layout and the daemon is foreign (attach-only, never
-   * spawned beside — the coexistence gap, AdemuMLS#642). `user`: everything else.
+   * `system`: the identity IS the system layout and the daemon is foreign (attach-only, never spawned
+   * beside — the coexistence gap, AdemuMLS#642) — because the account was enrolled there, or because
+   * nothing is recorded or configured and a system-scope ADC daemon is installed on this host
+   * (`detectSystemInstall`: a root-owned regular /etc/adc/config.toml AND a socket at
+   * /run/adc/adc-enroll.sock). `user`: everything else.
    */
   scope: DaemonScope;
+  scopeSource: ScopeSource;
 };
 
 /** The hardened host's detector (seam for tests). */
@@ -183,10 +198,12 @@ export type DaemonIdentityInput = {
   dataDir?: string | undefined;
   socketPath?: string | undefined;
   enrollSocketPath?: string | undefined;
+  /** The account's recorded `daemonScope`; absent for an enrollment door or an account enrolled before the key. */
+  enrolledScope?: DaemonScope | undefined;
 };
 
 /** The system layout as an identity: `/var/lib/adc` + the three `/run/adc` sockets, foreign by scope. */
-function systemIdentity(): DaemonIdentity {
+function systemIdentity(scopeSource: ScopeSource): DaemonIdentity {
   return {
     dataDir: canonicalizePath(SYSTEM_DATA_DIR),
     controlSocket: canonicalizePath(SYSTEM_CONTROL_SOCKET_PATH),
@@ -200,14 +217,20 @@ function systemIdentity(): DaemonIdentity {
     },
     explicit: { dataDir: false, socketPath: false, enrollSocketPath: false },
     scope: "system",
+    scopeSource,
   };
 }
 
 /**
- * Resolves the daemon identity. With NOTHING configured (no `dataDir`, `socketPath` or
- * `enrollSocketPath`, inherited root values included) and a system install detected, the identity is
- * the system layout (scope `system`). Any explicit key keeps user scope: an operator who names paths
- * gets exactly those paths.
+ * Resolves the daemon identity, first rule that applies:
+ *   1. any explicit `dataDir`/`socketPath`/`enrollSocketPath` (inherited root values included) → user
+ *      scope at exactly those paths: an operator who names paths gets exactly those paths;
+ *   2. the account's recorded scope → that scope, whatever the host looks like NOW: a token belongs to
+ *      the device host that minted it, so a system install added later never moves a user-scope account
+ *      onto a daemon that does not know its token, and a system-scope account never falls back to a
+ *      private daemon while the system one is down (or not up yet at boot);
+ *   3. nothing recorded or configured → the system layout when a system install is detected, else user
+ *      scope at the default data dir.
  */
 export function resolveDaemonIdentity(
   input: DaemonIdentityInput,
@@ -219,7 +242,10 @@ export function resolveDaemonIdentity(
     socketPath: Boolean(input.socketPath?.trim()),
     enrollSocketPath: Boolean(input.enrollSocketPath?.trim()),
   };
-  if (!explicit.dataDir && !explicit.socketPath && !explicit.enrollSocketPath && detect()) return systemIdentity();
+  const anyExplicit = explicit.dataDir || explicit.socketPath || explicit.enrollSocketPath;
+  const scopeSource: ScopeSource = anyExplicit ? "explicit" : input.enrolledScope ? "enrolled" : "detected";
+  if (scopeSource === "enrolled" && input.enrolledScope === "system") return systemIdentity("enrolled");
+  if (scopeSource === "detected" && detect()) return systemIdentity("detected");
   const rawDataDir = input.dataDir?.trim() ? expandHome(input.dataDir.trim()) : defaultDataDir(env);
   const rawControl = input.socketPath?.trim()
     ? expandHome(input.socketPath.trim())
@@ -241,6 +267,7 @@ export function resolveDaemonIdentity(
     },
     explicit,
     scope: "user",
+    scopeSource,
   };
 }
 
@@ -309,6 +336,7 @@ function readAccount(
   mode: SecretInputStringResolutionMode,
   env: NodeJS.ProcessEnv,
   detect?: SystemInstallDetector,
+  ignoreEnrolledScope = false,
 ): ResolvedAdemuAccount {
   const channel = getChannelConfig(cfg) ?? ({} as AdemuChannelConfig);
   const id = normalizeOptionalAccountId(accountId) ?? resolveDefaultAdemuAccountId(cfg);
@@ -318,7 +346,16 @@ function readAccount(
   const token = resolveSecretInputString({ value: merged.token, path: tokenPath(id), mode });
   const tokenSource: ResolvedAdemuAccount["tokenSource"] =
     token.status === "available" ? "config" : token.status === "configured_unavailable" ? "secretRef" : "none";
-  const daemon = resolveDaemonIdentity({ dataDir: merged.dataDir, socketPath: merged.socketPath, enrollSocketPath: merged.enrollSocketPath }, env, detect);
+  const daemon = resolveDaemonIdentity(
+    {
+      dataDir: merged.dataDir,
+      socketPath: merged.socketPath,
+      enrollSocketPath: merged.enrollSocketPath,
+      enrolledScope: ignoreEnrolledScope ? undefined : merged.daemonScope,
+    },
+    env,
+    detect,
+  );
   const enabled = channel.enabled !== false && entry?.enabled !== false;
   const deviceId = merged.deviceId?.trim() || undefined;
   const configured = enabled && Boolean(deviceId) && token.status !== "missing";
@@ -423,6 +460,23 @@ export function inspectAdemuAccount(
   detect?: SystemInstallDetector,
 ): Omit<ResolvedAdemuAccount, "token"> {
   const { token: _token, ...account } = readAccount(cfg, accountId, "inspect", env, detect);
+  const error = validateDaemonIdentities(cfg, env, detect).get(account.accountId);
+  return error ? { ...account, configError: error } : account;
+}
+
+/**
+ * Inspect-mode resolution for an enrollment door (wizard, `ademu_enroll`): the account's recorded
+ * `daemonScope` is ignored, so a re-enrollment lands where the host points NOW (an explicit key, else
+ * the detector) — the way an agent moves onto a system install added after it was enrolled. The door
+ * records the scope it enrolled at (`applyEnrollment`).
+ */
+export function inspectAdemuAccountForEnrollment(
+  cfg: OpenClawConfig,
+  accountId?: string | null,
+  env: NodeJS.ProcessEnv = process.env,
+  detect?: SystemInstallDetector,
+): Omit<ResolvedAdemuAccount, "token"> {
+  const { token: _token, ...account } = readAccount(cfg, accountId, "inspect", env, detect, true);
   const error = validateDaemonIdentities(cfg, env, detect).get(account.accountId);
   return error ? { ...account, configError: error } : account;
 }

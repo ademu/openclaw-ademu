@@ -22,7 +22,7 @@ import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plug
 import { Type } from "typebox";
 import { applyRouteBinding, findRouteBinding, RouteBindingConflictError } from "../bindings.js";
 import { createDeviceOrRefuse, createEnrollmentLease, EnrollmentError, mintAccountToken, probeIdentity, tokenLabelFor, type EnrollmentLease, type EnrollmentLeaseDeps } from "../ceremony.js";
-import { CHANNEL_ID, inspectAdemuAccount, listAdemuAccountIds } from "../config.js";
+import { CHANNEL_ID, inspectAdemuAccountForEnrollment, listAdemuAccountIds } from "../config.js";
 import { accountExists, applyEnrollment } from "../enroll-config.js";
 import { enrollmentPageBaseUrl, enrollmentPageUrl, isLoopbackEnrollmentPageUrl } from "../enrollment-page.js";
 import { strings } from "../i18n/strings.js";
@@ -408,7 +408,7 @@ async function admitAndStart(p: {
     return reportStatus(previous, p.deps, p.registry, { alreadyRunning: true });
   }
 
-  const account = inspectAdemuAccount(cfg, accountId);
+  const account = inspectAdemuAccountForEnrollment(cfg, accountId);
   // The operator context: a hardened host's refusal or a full enrollment budget answer with the
   // operator ceremony naming this host's commands (M20 d).
   const operator: OperatorContext = { identity: account.daemon, label: tokenLabelFor(accountId), agentName };
@@ -649,6 +649,7 @@ async function confirmEnrollment(p: { active: ActiveEnrollment; deps: EnrollTool
         agentUserId: identity.agentUserId,
         ownerUserId: identity.ownerUserId,
         token: m.token,
+        daemonScope: active.lease.daemonLease.identity.scope,
         grantOwnerAuthority: true, // the initiator is owner-by-scope and confirmed the words from the same phone
       });
       return applyRouteBinding(enrolled, { channel: CHANNEL_ID, accountId: common.accountId, agentId: routedAgentId });

@@ -30,6 +30,17 @@ Tested with `@ademu/adc-bin` **0.3.0**.
   may never name the control or session socket (a config error), and one enrollment socket may not be
   shared by two data dirs. A bundled daemon older than adc 0.5.0 is refused before any spawn (typed,
   `blocked`) instead of leaving `stale` rows behind.
+- **An account stays on the device host that enrolled it.** Both enrollment doors record the scope they
+  enrolled at (`daemonScope`: `user` | `system`, per account, never at the root); resolution honours it
+  after any explicit `dataDir`/`socketPath`/`enrollSocketPath` and before the system-install detector.
+  A system install added later no longer moves a user-scope account onto a daemon that does not know
+  its token (the old symptom: "token rejected (revoked or rotated)" and an orphaned private daemon), and
+  a system-scope account whose daemon is down — or not up yet at boot — no longer starts a private one.
+  A user-scope identity held in place by an explicit key or the recorded scope is never spawned beside a
+  system install: `DaemonScopeError` (`blocked`) names the keys to remove, or says the agent was enrolled
+  on this user's own device host, and to enroll it again — the doors ignore the recorded scope, so a
+  re-enrollment lands where the host points now. A daemon still running at those paths is attached as
+  before. Accounts enrolled before the key keep the detector rule.
 - **"I have a device token" replaces "Connect an already-enrolled agent".** The wizard asks the mode
   first; the token door takes an operator-minted token (masked input), needs no enrollment connection,
   checks the token over the session socket (`get_self`) and writes the account. `list_devices`,

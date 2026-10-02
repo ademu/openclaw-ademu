@@ -7,6 +7,8 @@ import { EnrollmentError } from "../src/ceremony.js";
 import type { DaemonIdentity } from "../src/config.js";
 import { adcCommandPrefix, mintFreshLabelCommand, operatorCeremony, revokeLabelCommand, shellQuote } from "../src/operator.js";
 import { remedyFor } from "../src/remedies.js";
+import { strings } from "../src/i18n/strings.js";
+import { DaemonScopeError } from "../src/monitor/daemon.js";
 import { classifyError } from "../src/status.js";
 
 const user: DaemonIdentity = {
@@ -22,6 +24,7 @@ const user: DaemonIdentity = {
   },
   explicit: { dataDir: false, socketPath: false, enrollSocketPath: false },
   scope: "user",
+  scopeSource: "detected",
 };
 const system: DaemonIdentity = { ...user, dataDir: "/var/lib/adc", raw: { ...user.raw, dataDir: "/var/lib/adc" }, scope: "system" };
 const DEVICE = "aaaaaaaa-1111-4222-8333-444444444444";
@@ -97,5 +100,14 @@ describe("status classification", () => {
   it("PrivilegeError is blocked (user-actionable), never a restart loop", () => {
     expect(classifyError(new PrivilegeError("x", "permission_denied"))).toMatchObject({ kind: "blocked" });
     expect(classifyError(new PrivilegeError("x")).lastError).toContain("refused this user");
+  });
+
+  it("DaemonScopeError (a system install beside a user-scope account) is blocked with its own copy, and the doors show that same copy", () => {
+    const err = new DaemonScopeError(strings.status.systemInstallBeside(["dataDir", "socketPath"]));
+    expect(classifyError(err)).toEqual({ kind: "blocked", lastError: err.message });
+    expect(remedyFor(err, { identity: user })).toBe(err.message);
+    expect(err.message).toContain("channels.ademu dataDir, socketPath");
+    expect(err.message).toContain("remove those keys");
+    expect(strings.status.systemInstallBeside([])).toContain("enrolled on this user's own Ademú device host");
   });
 });
