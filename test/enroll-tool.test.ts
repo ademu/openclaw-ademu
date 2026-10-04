@@ -632,6 +632,8 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     releaseProbe();
     const result = await yesP;
     expect(result).toMatchObject({ ok: false, state: "cancelled" });
+    // Codex branch pass 3: the token was minted before the NO — the yes's answer names it for revocation.
+    expect(result.message).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
     expect(w.writes).toHaveLength(0);
     expect(w.released()).toBe(1);
   });
@@ -649,6 +651,7 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(r).toMatchObject({ ok: true, state: "cancelled" });
     const result = await yesP;
     expect(result).toMatchObject({ ok: false, state: "cancelled" });
+    expect(result.message).not.toContain("token revoke"); // nothing was minted: nothing to revoke
     expect(w.control.calls.some((c) => c.op === "token_mint")).toBe(false);
     expect(w.writes).toHaveLength(0);
     expect(w.released()).toBe(1);

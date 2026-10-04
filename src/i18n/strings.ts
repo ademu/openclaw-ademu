@@ -103,7 +103,7 @@ export const strings = {
       `The Ademú device host's enrollment budget is full (too many unfinished enrollments on this host). Nothing was created. Cancel stale ones (\`${prefix} agent list\`, then \`${prefix} agent cancel <device_id>\`) or wait for them to expire, then try again.\n\n${steps}`,
     mintLost: (command: string) =>
       `Enrollment reached the end, but the device token could not be issued (its reply was lost, or the label is already taken) and that cannot be retried from here. Nothing was written. Mint a fresh token at the CLI:\n\n  ${command}\n\nthen run \`openclaw channels add --channel ademu\` and choose “I have a device token”.`,
-    orphanedToken: (command: string) => `A device token was issued but the configuration could not be written, so that token is orphaned. Revoke it:\n\n  ${command}`,
+    orphanedToken: (command: string) => `A device token was issued but the configuration was not written, so that token is orphaned. Revoke it:\n\n  ${command}`,
     enrollSocketUnreachable: (steps: string) =>
       `The Ademú device host did not answer on its enrollment socket. If it is starting, try again in a moment; if it is not running, start it (~/.local/bin/adc service start, or check channels.ademu.dataDir / enrollSocketPath). Nothing was created.\n\n${steps}`,
     toolCommitFailed: "The enrollment finished on the device host, but OpenClaw could not write the configuration; nothing was saved.",

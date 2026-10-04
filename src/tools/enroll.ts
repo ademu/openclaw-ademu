@@ -676,9 +676,11 @@ async function confirmEnrollment(p: { active: ActiveEnrollment; deps: EnrollTool
       (!(err instanceof EnrollmentError) && (active.lease.disposed || active.lease.signal.aborted));
     if (cancelled) {
       // It failed because the enrollment was cancelled/superseded underneath us: release, report cancelled.
+      // A NO or the expiry can land while the identity probe runs AFTER the mint: that token exists, so
+      // the answer (the page's /confirm reply) names it for revocation (M20 c).
       p.registry.forget(active);
       await active.lease.dispose("cancelled");
-      return text(strings.enroll.toolCancelled, { ok: false, state: "cancelled" });
+      return text(orphaned(strings.enroll.toolCancelled), { ok: false, state: "cancelled", ...(minted ? { deviceId: active.deviceId, tokenOrphaned: true } : {}) });
     }
     const fail = async (reason: string, msg: string, details: Record<string, unknown>) => {
       active.state = "failed";
