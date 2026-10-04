@@ -376,7 +376,10 @@ export class DaemonAttacher implements Attacher {
 
     if (signal?.aborted) throw new DaemonAbortedError();
     await params.beforeEffect?.();
-    const started = await this.#deps.userService.start(layout);
+    if (signal?.aborted) throw new DaemonAbortedError();
+    // launchd's helper runs several commands with 5 s timeouts each: an abort must not wait for them
+    // (a late result is dropped; starting the installed service is the effect asked for anyway).
+    const started = await this.#unlessAborted(this.#deps.userService.start(layout), signal);
     this.#deps.log("daemon_service_start", { result: started.kind });
     if (started.kind === "disabled") throw new AdcServiceNotAnsweringError(layout, true);
     if (started.kind === "failed") throw new AdcServiceNotAnsweringError(layout, false, started.reason);

@@ -302,6 +302,28 @@ describe("setup wizard: the token door and the hardened host", () => {
     }
   });
 
+  it("Codex branch pass 2: a failure in the identity probe AFTER the mint (session refused, or takeover declined) still names the label to revoke", async () => {
+    const { AlreadyAttachedError } = await import("@ademu/adc-client");
+    for (const scenario of ["session-refused", "takeover-declined"] as const) {
+      const { wizard, control } = world({
+        connectSession: async () => {
+          if (scenario === "session-refused") throw Object.assign(new Error("connect ECONNREFUSED /x/adc-session.sock"), { code: "ECONNREFUSED" });
+          throw new AlreadyAttachedError();
+        },
+      });
+      const { prompter, log } = fakePrompter({ selects: ["new"], texts: ["Iris"], confirms: [true /* words */, false /* takeover */] });
+      const run = finalize(wizard, prompter, "iris");
+      await new Promise((r) => setTimeout(r, 5));
+      control.emit({ words: WORDS });
+      await new Promise((r) => setTimeout(r, 5));
+      control.finish("enrolled");
+      await expect(run).rejects.toBeDefined();
+      expect(control.calls.filter((c) => c.op === "token_mint"), scenario).toHaveLength(1);
+      const notes = log.filter((l) => l.kind === "note").map((l) => l.message).join("\n");
+      expect(notes, scenario).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
+    }
+  });
+
   it("Codex #5: the token door works when the enrollment socket refuses this user — no lease, the identity's own session socket, the account written", async () => {
     const { PrivilegeError } = await import("@ademu/adc-control");
     const connects: Array<{ socketPath?: string }> = [];

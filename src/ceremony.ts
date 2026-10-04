@@ -171,11 +171,13 @@ export async function probeTokenIdentity(params: {
 }
 
 /** `daemon_info` BEFORE the mint: the first successful mint closes the enrollment connection (M20 a). */
-async function finishWithToken(params: Common & { deviceId: string }): Promise<EnrollmentResult> {
+async function finishWithToken(params: Common & { deviceId: string; onMinted?: RunEnrollmentParams["onMinted"] }): Promise<EnrollmentResult> {
   const info = await params.control.daemonInfo();
   const sessionSocketPath = info.session_socket_path;
   if (!sessionSocketPath) throw new EnrollmentError("daemon_too_old", "the Ademú device host does not report a session socket; upgrade adc");
   const { token, tokenId, tokenLabel } = await mintAccountToken(params);
+  // A token now exists: anything failing from here on (the identity probe included) must name it.
+  params.onMinted?.({ deviceId: params.deviceId, tokenLabel });
   const identity = await probeIdentity({ ...params, token, sessionSocketPath });
   return { deviceId: params.deviceId, token, tokenId, tokenLabel, sessionSocketPath, ...identity };
 }
@@ -190,6 +192,8 @@ export type RunEnrollmentParams = Common & {
   confirm: (words: FourWords) => Promise<boolean>;
   /** Called once with the new device id as soon as it exists (lease bookkeeping for cancellation). */
   onDevice?: ((deviceId: string) => void) | undefined;
+  /** Called once, right after the mint succeeds — before the identity probe that may still fail. */
+  onMinted?: ((minted: { deviceId: string; tokenLabel: string }) => void) | undefined;
 };
 
 /**

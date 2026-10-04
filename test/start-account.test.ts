@@ -35,7 +35,7 @@ function account(over: Partial<ResolvedAdemuAccount> = {}): ResolvedAdemuAccount
 
 type FakeAttachment = Attachment & { released: number };
 
-function fakeAttacher(opts: { acquire?: () => Promise<void>; unreachable?: Unreachable; releaseHangs?: boolean; resolved?: string } = {}) {
+function fakeAttacher(opts: { acquire?: () => Promise<void>; unreachable?: Unreachable; releaseHangs?: boolean; resolved?: string | Array<string | "hang"> } = {}) {
   const calls: unknown[] = [];
   const reprobes: unknown[] = [];
   let lease: FakeAttachment | undefined;
@@ -58,7 +58,10 @@ function fakeAttacher(opts: { acquire?: () => Promise<void>; unreachable?: Unrea
     },
     resolveSessionSocket: async (identity: unknown) => {
       reprobes.push(identity);
-      return opts.resolved ?? "/d/adc-session.sock";
+      const seq = opts.resolved;
+      const next = Array.isArray(seq) ? (seq.length > 1 ? seq.shift()! : seq[0]!) : seq;
+      if (next === "hang") return new Promise<string>(() => {});
+      return next ?? "/d/adc-session.sock";
     },
   } satisfies Attacher;
   return { attacher, calls, reprobes, lease: () => lease };
@@ -76,7 +79,7 @@ function runtimeSurface(): RuntimeChannelSurface {
 }
 
 function world(
-  opts: { platform?: string; connectError?: unknown; acquireError?: unknown; unreachable?: Unreachable; releaseHangs?: boolean; resolved?: string } = {},
+  opts: { platform?: string; connectError?: unknown; acquireError?: unknown; unreachable?: Unreachable; releaseHangs?: boolean; resolved?: string | Array<string | "hang"> } = {},
 ) {
   const client = new FakeAdcClient();
   client.room(ROOM_DM, [member(OWNER, "human", "Marios"), member(AGENT, "agent", "Iris")]);
@@ -327,7 +330,7 @@ describe("startAccount: restart outcomes (throw)", () => {
     expect(moved.dm.reprobes).toHaveLength(1);
   });
 
-  it("#712: an unmoved session path keeps the retries unbounded (recovering), re-resolved once per streak", async () => {
+  it("#712: an unmoved session path keeps the retries unbounded (recovering); 8 attempts = one re-check (at the 5th)", async () => {
     const w = world();
     const run = startAccount(w.ctx, w.deps);
     await settle();
@@ -337,6 +340,29 @@ describe("startAccount: restart outcomes (throw)", () => {
     expect(w.dm.reprobes).toHaveLength(1);
     w.ac.abort();
     await run; // still running until abort; never rejected
+  });
+
+  it("Codex branch pass 2: the path is re-resolved every REPROBE_AFTER_ATTEMPTS attempts — adc still down at the first re-check and back on a moved path later restarts the account", async () => {
+    const w = world({ resolved: ["/d/adc-session.sock", "/moved/adc-session.sock"] });
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    // Retries are spaced by the client's backoff: the first re-check settles before attempt 10.
+    for (let i = 1; i <= REPROBE_AFTER_ATTEMPTS; i++) w.client.emit("retry", { attempt: i, delayMs: 10 } as never);
+    await settle();
+    for (let i = REPROBE_AFTER_ATTEMPTS + 1; i <= 2 * REPROBE_AFTER_ATTEMPTS; i++) w.client.emit("retry", { attempt: i, delayMs: 10 } as never);
+    await expect(run).rejects.toBeInstanceOf(SessionSocketMovedError);
+    expect(w.dm.reprobes).toHaveLength(2);
+  });
+
+  it("Codex branch pass 2: re-checks never overlap — a pending re-resolution suppresses the next ones", async () => {
+    const w = world({ resolved: ["hang"] });
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    for (let i = 1; i <= 4 * REPROBE_AFTER_ATTEMPTS; i++) w.client.emit("retry", { attempt: i, delayMs: 10 } as never);
+    await settle();
+    expect(w.dm.reprobes).toHaveLength(1);
+    w.ac.abort();
+    await run;
   });
 
   it("a device host unreachable at attach → recovering + rejects", async () => {

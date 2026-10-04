@@ -205,7 +205,8 @@ async function newDoor(deps: WizardDeps, args: FinalizeArgs, account: Account, o
   let progress = prompter.progress(account.daemon.scope === "system" ? strings.enroll.attachingSystemDaemon : strings.enroll.startingHost);
   let lease: EnrollmentLease | undefined;
   /** Set once a token exists: a failure after this point names the label to revoke (M20 c). */
-  let minted: EnrollmentResult | undefined;
+  /** Set the moment a token exists (`onMinted`), so every later failure names the label to revoke. */
+  let minted: { deviceId: string; tokenLabel: string } | undefined;
   try {
     try {
       lease = await createEnrollmentLease({ deps: deps.lease, accountId, identity: account.daemon, beforeEffect });
@@ -229,6 +230,9 @@ async function newDoor(deps: WizardDeps, args: FinalizeArgs, account: Account, o
         agentName,
         onDevice: (id) => {
           activeLease.deviceId = id;
+        },
+        onMinted: (m) => {
+          minted = m;
         },
         onQr: (payload) => presentQr(prompter, deps.qr, payload, deferToClient),
         onWords: (words) => prompter.note(strings.enroll.words(words), strings.enroll.wordsTitle),

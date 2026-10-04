@@ -330,6 +330,32 @@ describe("cancellation and the setup budget (Codex branch pass, #712 PR-b)", () 
     expect(await run).toBeInstanceOf(DaemonAbortedError);
   });
 
+  it("setup: an abort during the authority re-check never reaches the service start (Codex branch pass 2)", async () => {
+    const w = world();
+    const ctl = new AbortController();
+    const err = await new DaemonAttacher(w.deps)
+      .attach({ identity: userIdentity(), role: "setup", signal: ctl.signal, beforeEffect: async () => ctl.abort() })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonAbortedError);
+    expect(w.startCalls).toBe(0);
+  });
+
+  it("setup: an abort while the service manager is still starting ends the attach at once, and a late failure is not reported (Codex branch pass 2)", async () => {
+    const w = world();
+    let finishStart!: (r: UserServiceStartResult) => void;
+    w.deps.userService.start = () => {
+      w.startCalls++;
+      return new Promise((r) => (finishStart = r));
+    };
+    const ctl = new AbortController();
+    const run = new DaemonAttacher(w.deps).attach({ identity: userIdentity(), role: "setup", signal: ctl.signal }).catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(w.startCalls).toBe(1);
+    ctl.abort();
+    expect(await run).toBeInstanceOf(DaemonAbortedError);
+    finishStart({ kind: "failed", reason: "launchctl bootstrap exited 5" }); // late: nobody is listening
+  });
+
   it("the real sleep resolves early on abort and leaves no timer behind", async () => {
     vi.useFakeTimers();
     try {

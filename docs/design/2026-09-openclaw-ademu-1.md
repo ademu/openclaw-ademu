@@ -321,8 +321,8 @@ task** — 2 s doubling to 30 s, then attaches again — instead of throwing: th
 gives up after 10 attempts (5 s → 300 s backoff, ~25 min) and replaces the status with the raw connect
 error, so an adc that stays down longer (not installed yet, stopped over lunch) would leave the account
 dead until a gateway restart (#712 live leg, 2026-10-02). Once seated, the client's reconnect loop rides
-out a daemon restart. After `REPROBE_AFTER_ATTEMPTS` (5) failed reconnects the
-session path is re-resolved once per streak; a device host that came back on another session socket
+out a daemon restart. Every `REPROBE_AFTER_ATTEMPTS` (5) failed reconnects, for the whole
+outage and never two at once, the session path is re-resolved; a device host that came back on another session socket
 ends the lifetime (`SessionSocketMovedError`) so a fresh attachment takes the new path.
 
 **Setup role** (the wizard, `ademu_enroll`). Probe; a current daemon attaches. A daemon below

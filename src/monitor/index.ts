@@ -24,7 +24,7 @@ import { openSession, type Session, type SessionDeps } from "./session.js";
 export const STOP_DEADLINE_MS = 4500;
 export const RELEASE_TAIL_MS = 2500;
 export const DRAIN_CAP_MS = 2000;
-/** After this many consecutive reconnect attempts the session path is re-resolved (it may have moved). */
+/** Every this many consecutive reconnect attempts the session path is re-resolved (it may have moved). */
 export const REPROBE_AFTER_ATTEMPTS = 5;
 /** The in-task wait while nothing listens on the session socket: first delay, doubling to the cap. */
 export const ABSENT_WAIT_INITIAL_MS = 2_000;
@@ -168,10 +168,12 @@ async function runWithLease(
 
   try {
     // --- session ---------------------------------------------------------------------------
-    // Retries are unbounded (`recovering` while the client's own loop probes). After
-    // REPROBE_AFTER_ATTEMPTS the session path is re-resolved once per streak: a device host that came
-    // back on a different session socket (an adc upgrade that moved it) ends the lifetime → restart →
-    // a fresh attachment on the new path.
+    // Retries are unbounded (`recovering` while the client's own loop probes). Every
+    // REPROBE_AFTER_ATTEMPTS attempts — for the whole outage, since adc may still be down at the first
+    // check — the session path is re-resolved, never two at once: a device host that came back on a
+    // different session socket (an adc upgrade that moved it) ends the lifetime → restart → a fresh
+    // attachment on the new path.
+    let reprobing = false;
     let retriesExceeded!: (err: Error) => void;
     const retriesExceededP = new Promise<never>((_, reject) => {
       retriesExceeded = reject;
@@ -185,13 +187,17 @@ async function runWithLease(
         deps: deps.session,
         onRetry: (info) => {
           setStatus(recoveringPatch(strings.status.reconnecting(info.attempt)));
-          if (info.attempt === REPROBE_AFTER_ATTEMPTS) {
+          if (info.attempt % REPROBE_AFTER_ATTEMPTS === 0 && !reprobing) {
+            reprobing = true;
             void deps.attacher
               .resolveSessionSocket(account.daemon, ctx.abortSignal)
               .then((path) => {
                 if (path !== lease.info.sessionSocketPath) retriesExceeded(new SessionSocketMovedError());
               })
-              .catch(() => {});
+              .catch(() => {})
+              .finally(() => {
+                reprobing = false;
+              });
           }
         },
         onReconnected: () => {
