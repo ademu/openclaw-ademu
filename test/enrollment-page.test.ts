@@ -14,6 +14,7 @@ import {
   isLoopbackEnrollmentPageUrl,
   pageOriginListening,
   registerEnrollmentPage,
+  spawnOpener,
 } from "../src/enrollment-page.js";
 import { cancelByHuman, confirmByHuman } from "../src/tools/enroll.js";
 import { NEW_DEVICE, QR, WORDS } from "./fakes/control.js";
@@ -117,6 +118,13 @@ describe("enrollment page: the tool's start result", () => {
     // the conversation is not left reserved: a later start (listener back) proceeds
     w.deps.pageListening = async () => true;
     expect((await w.call({ action: "start", agentName: "Iris" })).details).toMatchObject({ ok: true });
+  });
+
+  it("the launcher reports the opener's outcome, not just its spawn: exit 0 or still running at the grace → opened; a non-zero exit or no such command → not opened (Codex branch pass 3, #712 PR-a)", async () => {
+    expect(await spawnOpener("sh", ["-c", "exit 0"], 2_000)).toBe(true);
+    expect(await spawnOpener("sh", ["-c", "exit 3"], 2_000)).toBe(false); // xdg-open with no desktop session
+    expect(await spawnOpener("sh", ["-c", "sleep 5"], 100)).toBe(true); // an opener that execs the browser
+    expect(await spawnOpener("/nonexistent/opener", [], 2_000)).toBe(false);
   });
 
   it("pageOriginListening asks the system: a listener on the origin → true, a closed port → false", async () => {

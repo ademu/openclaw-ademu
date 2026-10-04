@@ -101,21 +101,43 @@ export function isLoopbackEnrollmentPageUrl(url: string): boolean {
   }
 }
 
-/** Production launcher: the platform's opener, detached, output ignored. Resolves whether it spawned. */
+/** How long the opener gets to report failure; one still running then has launched something. */
+export const OPENER_EXIT_GRACE_MS = 3_000;
+
+/** Production launcher: the platform's opener, detached, output ignored. Resolves whether it opened. */
 export async function openInBrowser(url: string): Promise<boolean> {
-  const { spawn } = await import("node:child_process");
   const [cmd, args] =
     process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : ["xdg-open", [url]];
+  return await spawnOpener(cmd, args);
+}
+
+/**
+ * Runs an opener and reports its OUTCOME, not just its spawn: an opener spawns fine and then fails
+ * when there is no desktop session or browser (`xdg-open` exits 3/4, `open` exits 1). Exit 0, or
+ * still running at the grace (some `xdg-open` setups exec the browser), counts as opened.
+ */
+export async function spawnOpener(cmd: string, args: string[], graceMs = OPENER_EXIT_GRACE_MS): Promise<boolean> {
+  const { spawn } = await import("node:child_process");
   return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (opened: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(opened);
+    };
     try {
       const child = spawn(cmd, args, { stdio: "ignore", detached: true });
-      child.once("error", () => resolve(false));
+      child.once("error", () => settle(false));
+      child.once("exit", (code) => settle(code === 0));
       child.once("spawn", () => {
         child.unref();
-        resolve(true);
+        timer = setTimeout(() => settle(true), graceMs);
+        timer.unref?.();
       });
     } catch {
-      resolve(false);
+      settle(false);
     }
   });
 }
