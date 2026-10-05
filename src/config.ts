@@ -398,6 +398,8 @@ export function validateDaemonIdentities(
   cfg: OpenClawConfig,
   env: NodeJS.ProcessEnv = process.env,
   detect?: SystemInstallDetector,
+  /** An enrollment door's candidate: validated with the identity the door will dial, existing or not. */
+  candidate?: { accountId: string; daemon: DaemonIdentity },
 ): Map<string, string> {
   const errors = new Map<string, string>();
   const ids = listAdemuAccountIds(cfg);
@@ -408,13 +410,13 @@ export function validateDaemonIdentities(
   const identities = new Map<string, DaemonIdentity>();
   const add = (map: Map<string, Set<string>>, key: string, value: string) =>
     (map.get(key) ?? map.set(key, new Set()).get(key)!).add(value);
-  for (const id of ids) {
-    const account = readAccount(cfg, id, "inspect", env, detect);
-    identities.set(id, account.daemon);
-    add(byDir, account.daemon.dataDir, account.daemon.controlSocket);
-    add(byDirEnroll, account.daemon.dataDir, account.daemon.enrollSocket);
-    add(bySocket, account.daemon.controlSocket, account.daemon.dataDir);
-    add(byEnrollSocket, account.daemon.enrollSocket, account.daemon.dataDir);
+  for (const id of ids) identities.set(id, readAccount(cfg, id, "inspect", env, detect).daemon);
+  if (candidate) identities.set(candidate.accountId, candidate.daemon);
+  for (const daemon of identities.values()) {
+    add(byDir, daemon.dataDir, daemon.controlSocket);
+    add(byDirEnroll, daemon.dataDir, daemon.enrollSocket);
+    add(bySocket, daemon.controlSocket, daemon.dataDir);
+    add(byEnrollSocket, daemon.enrollSocket, daemon.dataDir);
   }
   for (const [id, identity] of identities) {
     const sockets = byDir.get(identity.dataDir)!;
@@ -491,7 +493,9 @@ export function inspectAdemuAccountForEnrollment(
   detect?: SystemInstallDetector,
 ): Omit<ResolvedAdemuAccount, "token"> {
   const { token: _token, ...account } = readAccount(cfg, accountId, "inspect", env, detect, true);
-  const error = validateDaemonIdentities(cfg, env, detect).get(account.accountId);
+  // The candidate is validated as the door will dial it, even before its account exists: an
+  // enrollment socket configured as the control socket would drive the ceremony with operator authority.
+  const error = validateDaemonIdentities(cfg, env, detect, { accountId: account.accountId, daemon: account.daemon }).get(account.accountId);
   return error ? { ...account, configError: error } : account;
 }
 

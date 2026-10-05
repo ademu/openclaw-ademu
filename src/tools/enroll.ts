@@ -416,6 +416,9 @@ async function admitAndStart(p: {
   }
 
   const account = inspectAdemuAccountForEnrollment(cfg, accountId);
+  // A daemon identity error (an enrollment socket that is the control or session socket, a collision)
+  // is refused before any attachment, socket call or write.
+  if (account.configError) return text(strings.status.configCollision(account.configError), { ok: false, state: "config_error" });
   // The operator context: a hardened host's refusal or a full enrollment budget answer with the
   // operator ceremony naming this host's commands (M20 d).
   const operator: OperatorContext = { identity: account.daemon, label: tokenLabelFor(accountId), agentName };

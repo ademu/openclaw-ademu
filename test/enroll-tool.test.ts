@@ -644,6 +644,16 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.released()).toBe(1);
   });
 
+  it("Codex branch pass 5: an enrollment socket configured as the control socket is refused at start — no attach, no socket call, no write", async () => {
+    const w = world({ channels: { ademu: { dataDir: "/d", enrollSocketPath: "/d/adc.sock" } } } as unknown as OpenClawConfig);
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(r.details).toMatchObject({ ok: false, state: "config_error" });
+    expect(r.content[0]!.text).toMatch(/must differ/);
+    expect(w.acquires).toEqual([]);
+    expect(w.control.calls).toEqual([]);
+    expect(w.writes).toHaveLength(0);
+  });
+
   it("R4#1 a NO that lands after the words were confirmed but before the mint wins: no mint, no write", async () => {
     const w = world();
     await w.call({ action: "start", agentName: "Iris" });

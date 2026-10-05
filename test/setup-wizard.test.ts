@@ -302,6 +302,19 @@ describe("setup wizard: the token door and the hardened host", () => {
     }
   });
 
+  it("Codex branch pass 5: an enrollment socket configured as the control socket is refused before the question, any lease or any socket call", async () => {
+    const { wizard, acquires, control } = world();
+    const cfg = { ...baseCfg, channels: { ademu: { dataDir: "/d", enrollSocketPath: "/d/adc.sock" } } } as unknown as OpenClawConfig;
+    const { prompter, log } = fakePrompter({ selects: ["new"], texts: ["Iris"], confirms: [] });
+    await expect(
+      wizard.finalize!({ cfg, accountId: "iris", credentialValues: {}, runtime: {} as never, prompter: prompter as never, options, forceAllowFrom: false }),
+    ).rejects.toBeInstanceOf(WizardCancelledError);
+    expect(acquires).toEqual([]);
+    expect(control.calls).toEqual([]);
+    expect(log.some((l) => l.kind === "note" && /must differ/.test(l.message ?? ""))).toBe(true);
+    expect(log.some((l) => l.kind === "select")).toBe(false);
+  });
+
   it("Codex branch pass 2: a failure in the identity probe AFTER the mint (session refused, or takeover declined) still names the label to revoke", async () => {
     const { AlreadyAttachedError } = await import("@ademu/adc-client");
     for (const scenario of ["session-refused", "takeover-declined"] as const) {

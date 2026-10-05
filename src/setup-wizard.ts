@@ -86,6 +86,12 @@ export function createAdemuSetupWizard(deps: WizardDeps): ChannelSetupWizard {
       await prompter.intro(strings.enroll.wizardIntro);
       // The account's recorded scope is ignored: a re-enrollment lands where the host points now.
       const account = inspectAdemuAccountForEnrollment(cfg, accountId);
+      // A daemon identity error is refused before the question, any lease or any socket call (both doors).
+      if (account.configError) {
+        const note = strings.status.configCollision(account.configError);
+        await prompter.note(note, strings.channelLabel);
+        throw new WizardCancelledError(note);
+      }
       const operator: OperatorContext = { identity: account.daemon, label: tokenLabelFor(accountId) };
       // The question comes BEFORE any daemon lease: the token door must not need the enrollment socket.
       const mode = await prompter.select<"new" | "token">({

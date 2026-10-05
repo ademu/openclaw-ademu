@@ -420,3 +420,18 @@ describe("manifest schema parity with the code schema", () => {
     expect(manifest.channelConfigs.ademu.uiHints["accounts.*.token"]?.sensitive).toBe(true);
   });
 });
+
+describe("enrollment candidates are validated before any dial (Codex branch pass 5, #712 PR-b)", () => {
+  it("a root enrollSocketPath naming the control socket is a configError for an account that does not exist yet", () => {
+    const c = { channels: { ademu: { dataDir: "/d", enrollSocketPath: "/d/adc.sock" } } } as unknown as OpenClawConfig;
+    expect(listAdemuAccountIds(c)).not.toContain("newbie");
+    expect(inspectAdemuAccountForEnrollment(c, "newbie", ENV, () => false).configError).toMatch(/enrollment socket .* must differ/);
+  });
+
+  it("a candidate whose enrollment socket another data dir already uses collides", () => {
+    const c = { channels: { ademu: { enrollSocketPath: "/a/adc-enroll.sock", accounts: { a: { dataDir: "/a" } }, dataDir: "/b" } } } as unknown as OpenClawConfig;
+    expect(inspectAdemuAccountForEnrollment(c, "b", ENV, () => false).configError).toMatch(/enrollment socket \/a\/adc-enroll\.sock is shared/);
+    // the runtime view of the existing account is unchanged by a candidate that does not exist
+    expect(resolveAdemuAccount(c, "a", ENV, () => false).configError).toBeUndefined();
+  });
+});
