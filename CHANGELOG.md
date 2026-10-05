@@ -43,6 +43,12 @@ Tested with `@ademu/adc-bin` **0.3.0**.
   before and is not upgraded (a reachable one is kept on its version; a pre-0.5.0 one is refused
   without being stopped); a lost ownership record over the plugin's own data dir is refused the same
   way instead of retrying forever. Accounts enrolled before the key keep the detector rule.
+- **Upgrades are forward only, and an existing device never gets an empty daemon.** A rolled-back plugin
+  keeps a running daemon newer than its bundled adc, and refuses to start its older adc on data a newer
+  one last ran on (adc cannot open migrated data) with a message to update the plugin. A configured
+  account or a pasted token whose data dir is missing or empty is refused (`blocked`, naming the dir)
+  instead of getting a fresh, empty daemon that rejects the token. "Refused this user" now says to log
+  in again and restart the gateway after the user is added to the device host's group.
 - **"I have a device token" replaces "Connect an already-enrolled agent".** The wizard asks the mode
   first; the token door takes an operator-minted token (masked input), needs no enrollment connection,
   checks the token over the session socket (`get_self`) and writes the account. `list_devices`,

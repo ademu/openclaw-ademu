@@ -7,7 +7,7 @@ import { NotInstalledError, DaemonUnreachableError as ControlDaemonUnreachableEr
 import { PlatformPackageMissingError, UnsupportedPlatformError } from "@ademu/adc-bin";
 import { EnrollmentError } from "./ceremony.js";
 import { strings } from "./i18n/strings.js";
-import { DaemonBusyError, DaemonScopeError, DaemonUnreachableError, DaemonUnsupportedError } from "./monitor/daemon.js";
+import { DaemonBusyError, DaemonDataMissingError, DaemonScopeError, DaemonUnreachableError, DaemonUnsupportedError } from "./monitor/daemon.js";
 import { adcCommandPrefix, mintFreshLabelCommand, operatorCeremony, type OperatorContext } from "./operator.js";
 
 /** A socket that is absent or not listening (the client passes Node's own error through unchanged). */
@@ -21,6 +21,7 @@ export function remedyFor(err: unknown, ctx: OperatorContext = {}): string | und
   if (err instanceof UnsupportedPlatformError) return strings.status.unsupportedPlatform(err.platform);
   if (err instanceof DaemonUnsupportedError) return err.message; // our own copy
   if (err instanceof DaemonScopeError) return err.message; // our own copy
+  if (err instanceof DaemonDataMissingError) return err.message; // our own copy
   if (err instanceof DaemonBusyError) return err.message; // our own copy
   if (err instanceof DaemonUnreachableError) return strings.enroll.daemonUnreachable(err.logPath);
   if (err instanceof ControlDaemonUnreachableError) return strings.enroll.daemonUnreachable(undefined);

@@ -138,6 +138,8 @@ describe("startAccount: happy path and abort", () => {
     await settle();
     expect(w.dm.calls).toHaveLength(1);
     expect((w.dm.calls[0] as { role: string }).role).toBe("runtime");
+    // a configured account's device must already live in its data dir: never a fresh, empty daemon
+    expect((w.dm.calls[0] as { existingDevice?: boolean }).existingDevice).toBe(true);
     expect(w.statuses.some((s) => s.lifecycle === "starting")).toBe(true);
     expect(w.statuses.at(-1)).toMatchObject({ connected: true });
     expect(getLiveAccount("iris").client).toBe(w.client);

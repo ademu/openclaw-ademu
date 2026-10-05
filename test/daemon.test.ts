@@ -7,6 +7,7 @@ import type { DaemonIdentity } from "../src/config.js";
 import {
   DaemonAbortedError,
   DaemonBusyError,
+  DaemonDataMissingError,
   DaemonManager,
   DaemonScopeError,
   DaemonUnreachableError,
@@ -1550,5 +1551,94 @@ describe("Phase B: the enrollment socket, the hardened host (spec A38 / M20)", (
     await expect(mb.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
     expect(b.kills).toEqual([]);
     expect(b.spawns).toHaveLength(0);
+  });
+});
+
+describe("never downgrade; never an empty daemon for a device that already exists", () => {
+  /** A row as a plugin-started daemon leaves it: bound under generation 1 with the facts of `d` (or none). */
+  function bindRow(w: World, d: FakeDaemon | undefined, adcVersion: string) {
+    w.store.claim({ dataDir: DIR, controlSocket: `${DIR}/adc.sock`, sessionSocket: `${DIR}/adc-session.sock`, ownerPid: 1, ownerPidStartedAt: "x" });
+    w.store.cas({ dataDir: DIR, from: ["claimed"], to: "starting", bumpGeneration: true });
+    w.store.cas({
+      dataDir: DIR,
+      from: ["starting"],
+      to: "bound",
+      expectedGeneration: 1,
+      set: d
+        ? { daemonPid: d.pid, daemonPidStartedAt: `start-${d.pid}`, daemonStartedAtMs: d.info.started_at_ms, adcVersion }
+        : { daemonStartedAtMs: 1, adcVersion },
+    });
+  }
+
+  it("a rolled-back plugin keeps a running daemon NEWER than its bundled adc (owned), never stops or replaces it", async () => {
+    const w = new World();
+    w.bundledVersion = "0.5.0";
+    const newer = w.addDaemon(DIR, { version: "0.5.1" });
+    bindRow(w, newer, "0.5.1");
+    const m = new DaemonManager(w.deps());
+    const lease = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime", existingDevice: true });
+    expect(lease.mode).toBe("owned");
+    expect(lease.info.daemonVersion).toBe("0.5.1");
+    expect(w.kills).toEqual([]);
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)!).toMatchObject({ state: "bound", generation: 1 });
+    expect(w.logs.some((l) => l.event === "daemon_downgrade_skipped")).toBe(true);
+    expect(w.logs.some((l) => l.event === "daemon_upgrading")).toBe(false);
+  });
+
+  it("a silent daemon NEWER than the bundled adc is not a legacy-upgrade candidate: never killed, no sibling", async () => {
+    const w = new World();
+    w.bundledVersion = "0.5.0";
+    const d = w.addDaemon(DIR, { version: "0.6.0", enrollSocket: false });
+    bindRow(w, d, "0.6.0");
+    const m = new DaemonManager(w.deps());
+    await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime" })).rejects.toBeInstanceOf(DaemonUnreachableError);
+    expect(w.kills).toEqual([]);
+    expect(w.processes.get(d.pid)!.alive).toBe(true);
+    expect(w.spawns).toHaveLength(0);
+  });
+
+  it("data a newer adc last ran on is never handed to the older bundled binary: DaemonUnsupportedError naming both versions, no spawn, the row back to stopped", async () => {
+    const w = new World();
+    w.bundledVersion = "0.5.0";
+    w.dirs.set(DIR, "nonempty");
+    bindRow(w, undefined, "0.6.0");
+    w.store.cas({ dataDir: DIR, from: ["bound"], to: "stopped", expectedGeneration: 1 });
+    const m = new DaemonManager(w.deps());
+    const err = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime", existingDevice: true }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonUnsupportedError);
+    expect((err as Error).message).toContain("adc 0.6.0");
+    expect((err as Error).message).toContain("adc 0.5.0");
+    expect(w.spawns).toHaveLength(0);
+    expect(w.ensureProbePaths).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
+    expect(w.logs.some((l) => l.event === "daemon_data_newer")).toBe(true);
+  });
+
+  it("an existing device with an absent data dir (a config copied without its data) is refused, never given a fresh daemon; a new enrollment still gets one", async () => {
+    const w = new World();
+    const m = new DaemonManager(w.deps());
+    const err = await m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime", existingDevice: true }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonDataMissingError);
+    expect((err as Error).message).toContain(DIR);
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)).toBeUndefined();
+    expect(w.store.listHolders(DIR)).toHaveLength(0);
+    expect(w.logs.some((l) => l.event === "daemon_data_missing")).toBe(true);
+
+    const w2 = new World();
+    const m2 = new DaemonManager(w2.deps());
+    await m2.acquire({ identity: identityFor(DIR), server: SERVER, role: "setup" });
+    expect(w2.spawns).toHaveLength(1);
+  });
+
+  it("the same when the data dir was deleted but the plugin's database kept its row: refused, the row back to stopped", async () => {
+    const w = new World();
+    bindRow(w, undefined, "0.5.0");
+    w.store.cas({ dataDir: DIR, from: ["bound"], to: "stopped", expectedGeneration: 1 });
+    const m = new DaemonManager(w.deps());
+    await expect(m.acquire({ identity: identityFor(DIR), server: SERVER, role: "runtime", existingDevice: true })).rejects.toBeInstanceOf(DaemonDataMissingError);
+    expect(w.spawns).toHaveLength(0);
+    expect(w.store.getOwnership(DIR)!.state).toBe("stopped");
   });
 });

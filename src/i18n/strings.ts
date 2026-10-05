@@ -35,7 +35,11 @@ export const strings = {
         ? `A system-wide Ademú device host is installed on this host, and the plugin never starts its own beside it; this account names its own (channels.ademu ${explicitKeys.join(", ")}). To use the system one, remove ${explicitKeys.length > 1 ? "those keys" : "that key"} (root or this account), then enroll the agent again: openclaw channels add --channel ademu.`
         : "This agent was enrolled on this user's own Ademú device host; a system-wide one has since been installed, and the plugin never starts its own beside it. Enroll the agent again, on the system device host: openclaw channels add --channel ademu.",
     privilegeDenied:
-      "This host's Ademú device host refused this user: permission denied on its enrollment socket, or a system-wide device host is installed and the plugin was pointed at a data dir it may not run one in. Ask the operator to grant access, or point channels.ademu at a device host this user may use.",
+      "This host's Ademú device host refused this user: permission denied on its enrollment socket, or a system-wide device host is installed and the plugin was pointed at a data dir it may not run one in. Ask the operator to grant access, or point channels.ademu at a device host this user may use. If this user was just added to the device host's group, log in again and restart the gateway: a running process keeps the groups it started with.",
+    deviceHostDataMissing: (dataDir: string) =>
+      `This agent's device host data is not in ${dataDir} (the folder is missing or empty), so the plugin will not start a new, empty device host there: the agent's token only works on the device host that issued it. Restore that folder, point channels.ademu at the device host the agent was enrolled on, or enroll a new agent: openclaw channels add --channel ademu.`,
+    dataNewerThanBundled: (lastRan: string, bundled: string) =>
+      `This agent's device host data was last used by adc ${lastRan}, newer than the plugin's bundled adc ${bundled}, and adc cannot open data a newer version has migrated. Update the plugin to a release that bundles adc ${lastRan} or newer.`,
     daemonLost: "The Ademú device host exited; restarting.",
     ingressHalted: "Inbound processing halted before a message was adopted; restarting to replay.",
     securityNotice: "An Ademú security notice was raised for a conversation; see the room.",
@@ -98,7 +102,7 @@ export const strings = {
         "  3. openclaw channels add --channel ademu → “I have a device token” → paste the token",
       ].join("\n"),
     operatorInstructions: (steps: string) =>
-      `Enrollment is not possible from this account on this host: the Ademú device host is a system install and its enrollment socket refused this user, or the plugin was pointed at a data dir it may not run a device host in. Nothing was created.\n\n${steps}`,
+      `Enrollment is not possible from this account on this host: the Ademú device host is a system install and its enrollment socket refused this user, or the plugin was pointed at a data dir it may not run a device host in. Nothing was created. If this user was just added to the device host's group, log in again and restart the gateway first: a running process keeps the groups it started with.\n\n${steps}`,
     quotaFull: (prefix: string, steps: string) =>
       `The Ademú device host's enrollment budget is full (too many unfinished enrollments on this host). Nothing was created. Cancel stale ones (\`${prefix} agent list\`, then \`${prefix} agent cancel <device_id>\`) or wait for them to expire, then try again.\n\n${steps}`,
     mintLost: (command: string) =>

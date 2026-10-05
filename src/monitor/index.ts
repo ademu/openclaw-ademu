@@ -104,7 +104,8 @@ export async function startAccount(ctx: ChannelGatewayContext<ResolvedAdemuAccou
   await sweepPendingOnce(deps, ctx.cfg);
   let lease: Lease;
   try {
-    lease = await deps.daemons.acquire({ identity: account.daemon, server: account.server, role: "runtime", signal: ctx.abortSignal });
+    // A configured account's device must already live in its data dir: never a fresh, empty daemon.
+    lease = await deps.daemons.acquire({ identity: account.daemon, server: account.server, role: "runtime", signal: ctx.abortSignal, existingDevice: true });
   } catch (err) {
     if (err instanceof DaemonAbortedError || ctx.abortSignal.aborted) return;
     const c = classifyError(err);

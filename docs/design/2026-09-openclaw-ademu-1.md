@@ -322,6 +322,15 @@ unreachable foreign lease, since the operator's own daemon may come back. A daem
 at those paths is attached as before; a `detected` user scope keeps the client's refusal as the
 backstop for a system install that appears mid-flight.
 
+**Upgrades are forward only; an existing device never gets an empty daemon.** The broker replaces an
+owned daemon only when the bundled adc is newer than the running or recorded one (`versionNewer`): a
+newer running daemon (a rolled-back plugin) is kept and logged (`daemon_downgrade_skipped`), and a
+stopped one whose data a newer adc last ran on is refused before any spawn (`DaemonUnsupportedError`)
+— adc's migration runner refuses on-disk data newer than the binary. Acquisitions for a device that
+must already exist (a configured account at runtime, the wizard's token door) pass `existingDevice`;
+an absent or empty data dir then raises `DaemonDataMissingError` (`blocked`, naming the dir) instead of
+a fresh, empty daemon that would only reject the token. A new enrollment still gets a fresh daemon.
+
 **Default isolation (approval rider R2).** Default `dataDir` = `<OPENCLAW_STATE_DIR>/ademu/adc`,
 control socket `<dataDir>/adc.sock`, session socket `<dataDir>/adc-session.sock`, enrollment socket
 `<dataDir>/adc-enroll.sock`. Every owned spawn receives `ADC_DATA_DIR`, `ADC_SOCKET_PATH`,

@@ -147,7 +147,8 @@ async function tokenDoor(deps: WizardDeps, args: FinalizeArgs, account: Account,
   let sessionSocketPath = account.daemon.raw.sessionSocket;
   try {
     try {
-      daemonLease = await deps.lease.daemons.acquire({ identity: account.daemon, server: account.server, role: "setup", beforeEffect });
+      // The pasted token names a device that must already live there: never a fresh, empty daemon.
+      daemonLease = await deps.lease.daemons.acquire({ identity: account.daemon, server: account.server, role: "setup", beforeEffect, existingDevice: true });
       sessionSocketPath = daemonLease.info.sessionSocketPath;
     } catch (err) {
       progress.stop();

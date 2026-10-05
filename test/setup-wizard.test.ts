@@ -3,7 +3,7 @@ import { WizardCancelledError } from "openclaw/plugin-sdk/setup";
 import { describe, expect, it } from "vitest";
 import type { EnrollmentLeaseDeps } from "../src/ceremony.js";
 import type { AcquireParams, DaemonManager, Lease } from "../src/monitor/daemon.js";
-import { DaemonUnreachableError } from "../src/monitor/daemon.js";
+import { DaemonDataMissingError, DaemonUnreachableError } from "../src/monitor/daemon.js";
 import { createAdemuSetupWizard, defaultAgentName, presentQr } from "../src/setup-wizard.js";
 import { FakeAdcClient, OWNER } from "./fakes/adc.js";
 import { FakeControl, NEW_AGENT, NEW_DEVICE, QR, WORDS } from "./fakes/control.js";
@@ -199,7 +199,7 @@ describe("setup wizard: the token door and the hardened host", () => {
     wizard.finalize!({ cfg: baseCfg, accountId, credentialValues: {}, runtime: {} as never, prompter: prompter as never, options, forceAllowFrom: false });
 
   it("“I have a device token” enrolls from a pasted token via get_self: no enrollment connection, no list_devices, no mint, no QR", async () => {
-    const { wizard, control, released } = world();
+    const { wizard, control, released, acquires } = world();
     const { prompter, log } = fakePrompter({ selects: ["token"], texts: ["adc1_pasted_secret"], confirms: [true] });
     const result = await finalize(wizard, prompter);
     expect(control.calls).toEqual([]);
@@ -211,6 +211,8 @@ describe("setup wizard: the token door and the hardened host", () => {
     expect(cfg.commands.ownerAllowFrom).toContain(`ademu:${OWNER}`);
     expect(log.at(-1)?.message).toContain("Connected");
     expect(released()).toBe(1);
+    // the pasted token names a device that must already live there: never a fresh, empty daemon
+    expect(acquires[0]?.existingDevice).toBe(true);
     // the token never appears in any prompt copy
     expect(log.map((l) => l.message ?? "").join("\n")).not.toContain("adc1_pasted_secret");
   });
@@ -227,6 +229,13 @@ describe("setup wizard: the token door and the hardened host", () => {
     expect(acquires[0]?.identity).toMatchObject({ scope: "user", scopeSource: "detected" });
     const cfg = result!.cfg as unknown as { channels: { ademu: { accounts: Record<string, Record<string, unknown>> } } };
     expect(cfg.channels.ademu.accounts.main).toMatchObject({ deviceId: NEW_DEVICE, token: "adc1_moved_secret", daemonScope: "user" });
+  });
+
+  it("the token door with no device host data in the data dir shows that copy and throws WizardCancelledError (no fresh daemon)", async () => {
+    const { wizard } = world({ acquireError: new DaemonDataMissingError("This agent's device host data is not in /d (the folder is missing or empty)…") });
+    const { prompter, log } = fakePrompter({ selects: ["token"], texts: ["adc1_pasted_secret"], confirms: [] });
+    await expect(finalize(wizard, prompter)).rejects.toBeInstanceOf(WizardCancelledError);
+    expect(log.find((l) => l.kind === "note")?.message).toContain("device host data is not in /d");
   });
 
   it("the token door is asked BEFORE any daemon lease and asks the prompter for a sensitive text", async () => {

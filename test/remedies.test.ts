@@ -8,7 +8,7 @@ import type { DaemonIdentity } from "../src/config.js";
 import { adcCommandPrefix, mintFreshLabelCommand, operatorCeremony, revokeLabelCommand, shellQuote } from "../src/operator.js";
 import { remedyFor } from "../src/remedies.js";
 import { strings } from "../src/i18n/strings.js";
-import { DaemonScopeError } from "../src/monitor/daemon.js";
+import { DaemonDataMissingError, DaemonScopeError } from "../src/monitor/daemon.js";
 import { classifyError } from "../src/status.js";
 
 const user: DaemonIdentity = {
@@ -100,6 +100,19 @@ describe("status classification", () => {
   it("PrivilegeError is blocked (user-actionable), never a restart loop", () => {
     expect(classifyError(new PrivilegeError("x", "permission_denied"))).toMatchObject({ kind: "blocked" });
     expect(classifyError(new PrivilegeError("x")).lastError).toContain("refused this user");
+  });
+
+  it("DaemonDataMissingError is blocked with its own copy naming the dir; the doors show that same copy", () => {
+    const err = new DaemonDataMissingError(strings.status.deviceHostDataMissing("/home/me/.openclaw/ademu/adc"));
+    expect(classifyError(err)).toEqual({ kind: "blocked", lastError: err.message });
+    expect(remedyFor(err, { identity: user })).toBe(err.message);
+    expect(err.message).toContain("/home/me/.openclaw/ademu/adc");
+    expect(err.message).toContain("will not start a new, empty device host");
+  });
+
+  it("a refused user is told to log in again and restart the gateway after being added to the group (status and doors)", () => {
+    expect(strings.status.privilegeDenied).toContain("log in again and restart the gateway");
+    expect(remedyFor(new PrivilegeError("x", "permission_denied"), { identity: system })).toContain("log in again and restart the gateway first");
   });
 
   it("DaemonScopeError (a system install beside a user-scope account) is blocked with its own copy, and the doors show that same copy", () => {

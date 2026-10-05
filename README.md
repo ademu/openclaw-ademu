@@ -170,6 +170,11 @@ alone and reports `recovering`: stop it by hand (`ADC_DATA_DIR=<dataDir> adc dae
 `kill <pid>`). The bundled daemon itself must be adc 0.5.0 or newer; an older bundle is refused
 (`blocked`) rather than started.
 
+Upgrades only go forward. After rolling the plugin back to an older release, a running device host
+that is newer than the bundled adc is kept as it is; once it has stopped, the plugin refuses to start
+its older adc on that data (adc cannot open data a newer version has migrated) and asks you to update
+the plugin instead.
+
 ## Living with it
 
 - **Direct chats:** only the owner (the Ademú account that enrolled the agent) is heard; anyone
@@ -244,7 +249,12 @@ a token and use *I have a device token* to come back.
   lists the three sockets — control, session, enrollment — with their modes; the plugin dials only the
   last two.
 - `blocked` with "refused this user": the device host's enrollment socket denied the gateway's user
-  (an operator's group-gated posture). Fix access, or use the token door.
+  (an operator's group-gated posture). Fix access, or use the token door. After adding the gateway's
+  user to the group, log in again and restart the gateway: a running process keeps its old groups.
+- `blocked` with "device host data is not in …": the account has a device and a token, but its data
+  dir is missing or empty (a config copied to another machine, or restored without
+  `<state dir>/ademu/adc`). The plugin does not start an empty device host there, since it would only
+  reject the token. Restore the folder, or enroll a new agent.
 - `blocked` with "a system-wide Ademú device host is installed": the account is held on a user-scope
   device host — by `dataDir`/`socketPath`/`enrollSocketPath` (the copy names them: remove them) or by
   where it was enrolled — and that device host is not running. Enroll the agent again to move it onto

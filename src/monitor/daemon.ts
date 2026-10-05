@@ -64,6 +64,14 @@ export function versionAtLeast(a: string | undefined, b: string): boolean {
   return a1 !== b1 ? a1 > b1 : a2 !== b2 ? a2 > b2 : a3 >= b3;
 }
 
+/** `a > b` on parsed `x.y.z` versions; an unparsable or missing side is "not newer" (never triggers a replacement). */
+export function versionNewer(a: string | undefined, b: string | undefined): boolean {
+  const pa = parseAdcVersion(a);
+  const pb = parseAdcVersion(b);
+  if (!pa || !pb || pa === pb) return false;
+  return versionAtLeast(pa, pb);
+}
+
 /** The explicit config keys behind a user-scope identity, in config order (for the operator's copy). */
 function explicitKeys(identity: DaemonIdentity): string[] {
   const keys: string[] = [];
@@ -131,6 +139,17 @@ export class DaemonScopeError extends Error {
     this.name = "DaemonScopeError";
   }
 }
+/**
+ * A configured account (or the token door) holds a token for a device that must live in this data dir,
+ * but the dir is absent or empty: a fresh daemon there would only reject the token, so none is started.
+ * Typically a config copied or restored without its data dir. Our own copy names the dir.
+ */
+export class DaemonDataMissingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DaemonDataMissingError";
+  }
+}
 export class DaemonBusyError extends Error {
   constructor(message: string) {
     super(message);
@@ -166,6 +185,12 @@ export type AcquireParams = {
   signal?: AbortSignal | undefined;
   /** Authority re-check (async), awaited immediately before ANY spawn (Codex R8 #2). */
   beforeEffect?: (() => Promise<void>) | undefined;
+  /**
+   * The caller holds a token for a device that must already live in this data dir (a configured
+   * account at runtime, the wizard's token door). An absent or empty data dir is then refused
+   * (`DaemonDataMissingError`) instead of getting a fresh, empty daemon that would reject the token.
+   */
+  existingDevice?: boolean | undefined;
 };
 
 export type Lease = {
@@ -569,9 +594,10 @@ export class DaemonManager {
 
   /**
    * A bound daemon that does not answer on its enrollment socket but whose recorded process is
-   * verified alive and whose recorded version differs from the bundled binary: a daemon from before
+   * verified alive and whose recorded version is OLDER than the bundled binary: a daemon from before
    * the enrollment socket existed (< 0.5.0). Runtime only; the same fence and the same kill
-   * authority as a reachable upgrade. A same-version silent daemon is never touched (it may be slow).
+   * authority as a reachable upgrade. A same-version or newer silent daemon is never touched (it may
+   * be slow, or the plugin was rolled back — never downgrade).
    */
   /**
    * A user-scope identity held in place by an explicit key or the recorded scope, on a host where a
@@ -592,8 +618,7 @@ export class DaemonManager {
   #legacyUpgradeCandidate(params: AcquireParams, row: OwnershipRow): boolean {
     if (params.role !== "runtime") return false;
     if (!this.#daemonProcessVerified(row)) return false;
-    const recorded = parseAdcVersion(row.adcVersion ?? undefined);
-    return recorded !== undefined && recorded !== this.#deps.bundledVersion;
+    return versionNewer(this.#deps.bundledVersion, row.adcVersion ?? undefined);
   }
 
   async #acquireInner(params: AcquireParams, holderId: string): Promise<Lease> {
@@ -822,6 +847,21 @@ export class DaemonManager {
       abandon("stopped", "a system-scope daemon is installed; never spawn beside it");
       throw this.#scopeRefusal(identity, "spawn");
     }
+    // The caller's device must live in this data dir. Absent or empty, it does not: a fresh daemon
+    // there would only reject the token (a config copied or restored without its data dir).
+    if (params.existingDevice && this.#deps.isDirAbsentOrEmpty(identity.raw.dataDir)) {
+      abandon("stopped", "the data dir holds no device host data");
+      this.#deps.log("daemon_data_missing", { dataDir: identity.dataDir });
+      throw new DaemonDataMissingError(strings.status.deviceHostDataMissing(identity.raw.dataDir));
+    }
+    // Never start an older adc on data a newer one last ran on (a rolled-back plugin): adc refuses to
+    // open data a newer version has migrated, so say why instead of spawning a daemon that cannot start.
+    const lastRan = parseAdcVersion(starting.adcVersion ?? undefined);
+    if (lastRan && versionNewer(lastRan, this.#deps.bundledVersion)) {
+      abandon("stopped", "the data dir was last used by a newer adc");
+      this.#deps.log("daemon_data_newer", { dataDir: identity.dataDir, lastRan, bundled: this.#deps.bundledVersion });
+      throw new DaemonUnsupportedError(strings.status.dataNewerThanBundled(lastRan, this.#deps.bundledVersion));
+    }
     // The bundled daemon must bind the enrollment socket (the only socket this broker ever probes):
     // an older bundle would spawn a child that can never answer here and leave every row `stale`.
     if (!versionAtLeast(this.#deps.bundledVersion, MIN_BUNDLED_ADC_VERSION)) {
@@ -1032,11 +1072,15 @@ export class DaemonManager {
     child: { exited: () => unknown; onExit: (cb: () => void) => void; logPath: string } | undefined,
   ): Promise<Lease> {
     const { identity, role } = params;
-    // Upgrade (runtime only, through the fence): the bound daemon's version ≠ the bundled one.
+    // Upgrade (runtime only, through the fence) — forward only: the bound daemon is OLDER than the
+    // bundled one. A NEWER running daemon (a rolled-back plugin) is kept: adc refuses to open data a
+    // newer version has migrated, so the older bundled binary could not replace it.
     if (role === "runtime") {
       const running = parseAdcVersion(info.version);
-      const outdated = Boolean(running) && running !== this.#deps.bundledVersion;
-      if (outdated && this.#spawnForbiddenBesideSystem(identity)) {
+      const outdated = versionNewer(this.#deps.bundledVersion, running);
+      if (versionNewer(running, this.#deps.bundledVersion)) {
+        this.#deps.log("daemon_downgrade_skipped", { dataDir: identity.dataDir, running: running ?? "", bundled: this.#deps.bundledVersion });
+      } else if (outdated && this.#spawnForbiddenBesideSystem(identity)) {
         // Its replacement could never be started beside a system install: keep the running, verified
         // instance (as a deferred upgrade does) rather than stop it and refuse.
         this.#deps.log("daemon_upgrade_skipped_system_install", { dataDir: identity.dataDir, scopeSource: identity.scopeSource });

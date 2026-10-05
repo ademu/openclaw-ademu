@@ -14,7 +14,7 @@ import { PlatformPackageMissingError, UnsupportedPlatformError } from "@ademu/ad
 import { PrivilegeError } from "@ademu/adc-control";
 import { channelBlockedPatch, channelReadyPatch } from "openclaw/plugin-sdk/gateway-runtime";
 import { strings } from "./i18n/strings.js";
-import { DaemonBusyError, DaemonLostError, DaemonScopeError, DaemonUnreachableError, DaemonUnsupportedError } from "./monitor/daemon.js";
+import { DaemonBusyError, DaemonDataMissingError, DaemonLostError, DaemonScopeError, DaemonUnreachableError, DaemonUnsupportedError } from "./monitor/daemon.js";
 
 export class IdentityMismatchError extends Error {
   constructor() {
@@ -82,6 +82,8 @@ export function classifyError(err: unknown): Classified {
   if (err instanceof DaemonUnsupportedError) return { kind: "blocked", lastError: err.message };
   // A system install beside a user-scope account: re-enrolling (or removing the keys) is the fix, never a restart.
   if (err instanceof DaemonScopeError) return { kind: "blocked", lastError: err.message };
+  // The agent's data dir is missing or empty: restoring it (or re-enrolling) is the fix, never a restart.
+  if (err instanceof DaemonDataMissingError) return { kind: "blocked", lastError: err.message };
   // A restart cannot fix permissions: the hardened host's refusal is user-actionable, never a loop.
   if (err instanceof PrivilegeError) return { kind: "blocked", lastError: strings.status.privilegeDenied };
   if (err instanceof PlatformPackageMissingError) return { kind: "blocked", lastError: strings.status.daemonUnreachable(undefined) };
