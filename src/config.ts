@@ -21,6 +21,7 @@ import {
 } from "openclaw/plugin-sdk/secret-input";
 import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
 import { z } from "zod";
+import { pruneRouteBindings } from "./bindings.js";
 
 export const CHANNEL_ID = "ademu";
 
@@ -407,6 +408,8 @@ export const ademuConfigAdapter: AdemuConfigAdapter = {
     const id = normalizeAccountId(accountId);
     const owner = inspectAdemuAccount(cfg, id).ownerUserId;
     const next = baseAdapter.deleteAccount!({ cfg, accountId: id });
-    return pruneOwnerAllowFrom(next, owner, listAdemuAccountIds(next));
+    // Rider B, extended: the account's own route binding goes with it (wildcard/peer-scoped rows and
+    // other channels stay). Logout keeps the account block and therefore keeps the binding.
+    return pruneRouteBindings(pruneOwnerAllowFrom(next, owner, listAdemuAccountIds(next)), { channel: CHANNEL_ID, accountId: id });
   },
 };

@@ -1,95 +1,37 @@
+// The `ademu_enroll` chat tool: two actions (start, status). The human's yes / no never come through
+// the model — here they arrive through `confirmByHuman` / `cancelByHuman`, the same functions the
+// enrollment page calls.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
-import { afterEach, describe, expect, it } from "vitest";
-import type { EnrollmentLeaseDeps } from "../src/ceremony.js";
-import { DaemonAbortedError, DaemonUnreachableError, type DaemonManager, type Lease } from "../src/monitor/daemon.js";
-import { createEnrollTool, EnrollmentRegistry, registerEnrollTool, TOOL_NAME, type EnrollToolDeps } from "../src/tools/enroll.js";
+import { describe, expect, it } from "vitest";
+import { DaemonUnreachableError } from "../src/monitor/daemon.js";
+import { cancelByHuman, confirmByHuman, createEnrollTool, registerEnrollTool, TOOL_NAME } from "../src/tools/enroll.js";
 import { FakeAdcClient, OWNER } from "./fakes/adc.js";
-import { FakeControl, NEW_AGENT, NEW_DEVICE, QR, WORDS } from "./fakes/control.js";
+import { NEW_AGENT, NEW_DEVICE, QR, WORDS } from "./fakes/control.js";
+import { tick, world } from "./fakes/enroll-world.js";
 
-const tick = (ms = 3) => new Promise((r) => setTimeout(r, ms));
+type World = ReturnType<typeof world>;
+const SESSION = "agent:main:webchat:owner";
+/** A tool call from a chat channel: the ceremony still runs on the page the plugin opens on the gateway machine. */
+const TELEGRAM = { deliveryContext: { channel: "telegram", to: "chat-1", accountId: "bot" } } as unknown as Partial<OpenClawPluginToolContext>;
 
-function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?: unknown, acquireGate?: Promise<void>) {
-  const control = new FakeControl();
-  let released = 0;
-  const daemonLease: Lease = {
-    mode: "owned",
-    role: "setup",
-    identity: { dataDir: "/d" } as never,
-    holderId: "h",
-    info: { controlSocketPath: "/d/adc.sock", sessionSocketPath: "/d/adc-session.sock" },
-    lost: new Promise<never>(() => {}),
-    release: async () => void released++,
-  };
-  const acquires: unknown[] = [];
-  const promotions: string[] = [];
-  const daemons = {
-    acquire: async (p: unknown) => {
-      acquires.push(p);
-      if (acquireError) throw acquireError;
-      const signal = (p as { signal?: AbortSignal }).signal;
-      if (acquireGate) {
-        await Promise.race([
-          acquireGate,
-          new Promise<never>((_, reject) => signal?.addEventListener("abort", () => reject(new DaemonAbortedError()), { once: true })),
-        ]);
-      }
-      return daemonLease;
-    },
-    promotePendingPublication: (dataDir: string) => {
-      promotions.push(dataDir);
-      return true;
-    },
-  } as unknown as DaemonManager;
-  const timers: Array<{ fn: () => void; ms: number }> = [];
-  const lease: EnrollmentLeaseDeps = {
-    daemons,
-    connectControl: async () => control,
-    now: () => 0,
-    setTimer: (fn, ms) => {
-      timers.push({ fn, ms });
-      return timers.length;
-    },
-    clearTimer: () => {},
-  };
-  const client = new FakeAdcClient({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER });
-  const writes: OpenClawConfig[] = [];
-  let current = cfg;
-  const deps: EnrollToolDeps = {
-    lease,
-    connectSession: async () => client as never,
-    qr: { terminal: async () => "", pngDataUrl: async () => "data:image/png;base64,QUJD" },
-    writeConfig: async (mutate) => {
-      current = mutate(current);
-      writes.push(current);
-    },
-  };
-  const registry = new EnrollmentRegistry();
-  const ctx = (over: Partial<OpenClawPluginToolContext> = {}): OpenClawPluginToolContext => ({
-    senderIsOwner: true,
-    sessionKey: "agent:main:webchat:owner",
-    requesterSenderId: "owner-1",
-    agentId: "main",
-    runtimeConfig: current,
-    ...over,
-  });
-  const tool = (over: Partial<OpenClawPluginToolContext> = {}) => createEnrollTool(ctx(over), deps, registry)!;
-  const signal = new AbortController().signal;
-  const call = async (args: Record<string, unknown>, over: Partial<OpenClawPluginToolContext> = {}, sig: AbortSignal | undefined = signal) =>
-    tool(over).execute("call-1", args, sig);
-  return { control, deps, registry, tool, call, writes, acquires, promotions, released: () => released, timers, current: () => current };
-}
-
-afterEach(() => {});
+/** The live enrollment of the default conversation (what the page would address). */
+const live = (w: World) => w.registry.forSession(SESSION)!;
+const yes = (w: World, entry = live(w)) => confirmByHuman(entry, w.deps, w.registry);
+const no = (w: World, entry = live(w)) => cancelByHuman(entry, w.registry);
 
 describe("ademu_enroll: gating", () => {
-  it("is offered only to owners", () => {
+  it("is offered only to owners and exposes exactly start + status", () => {
     const w = world();
     expect(createEnrollTool({ senderIsOwner: false } as OpenClawPluginToolContext, w.deps, w.registry)).toBeNull();
     expect(createEnrollTool({} as OpenClawPluginToolContext, w.deps, w.registry)).toBeNull();
     const t = w.tool();
     expect(t.name).toBe(TOOL_NAME);
     expect(t.description).not.toMatch(/\bpair/i);
+    expect(t.description).toContain("neither confirm nor cancel");
+    const schema = t.parameters as unknown as { properties: { action: { enum: string[] }; leaseToken?: unknown } };
+    expect(schema.properties.action.enum).toEqual(["start", "status"]);
+    expect(schema.properties.leaseToken).toBeUndefined();
   });
 
   it("refuses to start without a conversation session", async () => {
@@ -117,111 +59,155 @@ describe("ademu_enroll: gating", () => {
   });
 });
 
-describe("ademu_enroll: the four-step flow", () => {
-  it("start → wait → confirm writes the account, grants the owner, disposes the lease exactly once", async () => {
+describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome)", () => {
+  it("start → scan → human yes writes the account, grants the owner, disposes the lease exactly once; status follows", async () => {
     const w = world();
     const start = await w.call({ action: "start", agentName: "Iris" });
-    expect(start.details).toMatchObject({ ok: true, state: "scanning", deviceId: NEW_DEVICE, accountId: "iris" });
-    const leaseToken = start.details.leaseToken as string;
-    expect(typeof leaseToken).toBe("string");
-    expect(start.content[0]!.text).toContain("![ademu-enroll](data:image/png;base64,QUJD)");
-    expect(start.content[0]!.text).toContain(QR);
+    expect(start.details).toMatchObject({ ok: true, state: "scanning", deviceId: NEW_DEVICE, accountId: "iris", pageOpened: true });
+    expect(start.details).not.toHaveProperty("lane");
+    expect(start.details).not.toHaveProperty("pageUrl");
+    expect(w.opens).toHaveLength(1);
+    expect(w.opens[0]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/plugins\/ademu\/enroll\/[a-f0-9]{40}$/);
+    const txt = start.content[0]!.text;
+    expect(txt).toContain("OPENED");
+    expect(txt).not.toMatch(/https?:\/\//); // the page URL is a bearer credential: browser only
+    expect(txt).not.toContain(QR);
+    expect(txt).not.toContain("data:image");
+    expect(txt).toContain("cannot confirm or cancel");
+    expect(txt).not.toMatch(/lease ?token/i);
     expect((w.acquires[0] as { role: string }).role).toBe("setup");
     expect(w.registry.size).toBe(1);
 
-    // wait before the phone scanned → still waiting
-    const early = await w.call({ action: "wait", leaseToken, timeoutMs: 10 });
-    expect(early.content[0]!.text).toContain("Still waiting");
+    const s1 = await w.call({ action: "status" });
+    expect(s1.details).toMatchObject({ ok: true, state: "scanning" });
 
     w.control.emit({ state: "paired", words: WORDS });
-    const waited = await w.call({ action: "wait", leaseToken });
-    expect(waited.details.state).toBe("words");
-    expect(waited.content[0]!.text).toContain(WORDS.join("   "));
+    const s2 = await w.call({ action: "status" });
+    expect(s2.details).toMatchObject({ ok: true, state: "words_shown" });
+    expect(s2.content[0]!.text).toContain("Do NOT ask");
+    for (const word of WORDS) expect(s2.content[0]!.text).not.toContain(word); // the words never reach the model
 
-    // confirm: the model cannot supply words; the daemon's are used
-    const confirmP = w.call({ action: "confirm", leaseToken, words: ["x", "y", "z", "w"] });
+    // the human's yes: the DAEMON's words are confirmed
+    const yesP = yes(w);
     await tick(5);
     expect(w.control.calls.find((c) => c.op === "confirm_words")?.params).toEqual({ device_id: NEW_DEVICE, words: WORDS });
+    expect((await w.call({ action: "status" })).details.state).toBe("confirming");
     w.control.finish("enrolled");
-    const done = await confirmP;
-    expect(done.details).toMatchObject({ ok: true, state: "done", accountId: "iris" });
-    expect(done.content[0]!.text).toContain("Enrolled");
+    const done = await yesP;
+    expect(done).toMatchObject({ ok: true, state: "done" });
+    expect(done.message).toContain("Enrolled");
+    expect(done.message).toContain('routed to OpenClaw agent "main"');
 
     expect(w.writes).toHaveLength(1);
-    const cfg = w.current() as unknown as { channels: { ademu: { enabled: boolean; accounts: Record<string, Record<string, unknown>> } }; commands: { ownerAllowFrom: string[] } };
+    const cfg = w.current() as unknown as {
+      channels: { ademu: { enabled: boolean; accounts: Record<string, Record<string, unknown>> } };
+      commands: { ownerAllowFrom: string[] };
+      bindings: unknown[];
+    };
     expect(cfg.channels.ademu.enabled).toBe(true);
     expect(cfg.channels.ademu.accounts.iris).toMatchObject({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_secret_1", agentName: "Iris" });
     expect(cfg.commands.ownerAllowFrom).toEqual([`ademu:${OWNER}`]);
+    expect(cfg.bindings).toEqual([{ agentId: "main", match: { channel: "ademu", accountId: "iris" } }]);
     expect(w.control.calls.find((c) => c.op === "token_mint")?.params).toEqual({ device_id: NEW_DEVICE, label: "openclaw-iris" });
     expect(w.registry.size).toBe(0);
     expect(w.released()).toBe(1);
     expect(w.control.closed).toBe(1);
+
+    // the chat learns the outcome the human produced
+    const s3 = await w.call({ action: "status" });
+    expect(s3.details).toMatchObject({ ok: true, state: "done" });
+    expect(s3.content[0]!.text).toContain("Enrolled");
   });
 
-  it("actions on a lease from another conversation or with the wrong token are refused; status/cancel work for the owner", async () => {
+  it("status from another conversation, sender or agent is refused; the owner's own is answered", async () => {
     const w = world();
-    const start = await w.call({ action: "start", agentName: "Iris" });
-    const leaseToken = start.details.leaseToken as string;
-    const other = await w.call({ action: "status", leaseToken, deviceId: NEW_DEVICE }, { sessionKey: "agent:main:webchat:someone-else" });
+    await w.call({ action: "start", agentName: "Iris" });
+    const other = await w.call({ action: "status", deviceId: NEW_DEVICE }, { sessionKey: "agent:main:webchat:someone-else" });
     expect(other.details.ok).toBe(false);
-    const badToken = await w.call({ action: "status", leaseToken: "nope" });
-    expect(badToken.details.ok).toBe(false);
-    const noToken = await w.call({ action: "status" });
-    expect(noToken.details.ok).toBe(false);
-    const status = await w.call({ action: "status", leaseToken });
-    expect(status.details).toMatchObject({ ok: true, state: "scanning" });
-    const cancel = await w.call({ action: "cancel", leaseToken });
-    expect(cancel.details.cancelled).toBe(true);
-    expect(w.control.calls.some((c) => c.op === "cancel_pairing")).toBe(true);
-    expect(w.registry.size).toBe(0);
-    expect(await w.call({ action: "status", leaseToken })).toMatchObject({ details: { ok: false } });
+    expect(other.content[0]!.text).toContain("another conversation");
+    expect((await w.call({ action: "status" }, { requesterSenderId: "intruder" })).details.ok).toBe(false);
+    expect((await w.call({ action: "status" }, { agentId: "other-agent" })).details.ok).toBe(false);
+    expect((await w.call({ action: "status" })).details).toMatchObject({ ok: true, state: "scanning" });
   });
 
-  it("label_exists asks for consent; replace_token rotates", async () => {
+  it("the human's NO cancels: the daemon ceremony is cancelled, nothing is written, status says cancelled, a second NO is idempotent", async () => {
+    const w = world();
+    await w.call({ action: "start", agentName: "Iris" });
+    w.control.emit({ words: WORDS });
+    const r = await no(w);
+    expect(r).toMatchObject({ ok: true, state: "cancelled" });
+    expect(w.control.calls.some((c) => c.op === "cancel_pairing")).toBe(true);
+    expect(w.writes).toHaveLength(0);
+    expect(w.registry.size).toBe(0);
+    expect(w.released()).toBe(1);
+    const status = await w.call({ action: "status" });
+    expect(status.details).toMatchObject({ ok: true, state: "cancelled" });
+    expect(status.content[0]!.text).toContain("cancelled");
+    const again = await cancelByHuman(w.registry.lookup(NEW_DEVICE)!, w.registry);
+    expect(again).toMatchObject({ ok: true, state: "cancelled" });
+    expect(w.released()).toBe(1);
+  });
+
+  it("a duplicate token label on the device this ceremony created is replaced silently (our own earlier attempt)", async () => {
     const w = world();
     w.control.tokenMintImpl = async (p) => {
-      if (!p.replace) {
-        throw new (await import("@ademu/adc-control")).ControlError("label_exists", "x");
-      }
+      if (!p.replace) throw new (await import("@ademu/adc-control")).ControlError("label_exists", "x");
       return { token_id: "tid", label: p.label, token: "adc1_rotated", created_at_ms: 1 };
     };
-    const start = await w.call({ action: "start", agentName: "Iris" });
-    const leaseToken = start.details.leaseToken as string;
+    await w.call({ action: "start", agentName: "Iris" });
     w.control.emit({ words: WORDS });
     await tick();
-    const confirmP = w.call({ action: "confirm", leaseToken });
+    const yesP = yes(w);
     await tick(5);
     w.control.finish("enrolled");
-    const blocked = await confirmP;
-    expect(blocked.details.state).toBe("label_exists");
-    expect(w.writes).toHaveLength(0);
-    const rotated = await w.call({ action: "replace_token", leaseToken });
-    expect(rotated.details.state).toBe("done");
+    const done = await yesP;
+    expect(done).toMatchObject({ ok: true, state: "done" });
+    expect(done.message).not.toMatch(/token/i);
     expect((w.current() as unknown as { channels: { ademu: { accounts: { iris: { token: string } } } } }).channels.ademu.accounts.iris.token).toBe("adc1_rotated");
-    const mints = w.control.calls.filter((c) => c.op === "token_mint").map((c) => c.params);
-    expect(mints).toEqual([
+    expect(w.control.calls.filter((c) => c.op === "token_mint").map((c) => c.params)).toEqual([
       { device_id: NEW_DEVICE, label: "openclaw-iris" },
       { device_id: NEW_DEVICE, label: "openclaw-iris", replace: true },
     ]);
+    expect(w.writes).toHaveLength(1);
   });
 
-  it("a words mismatch disposes the lease and reports without writing", async () => {
+  it("a words mismatch (the daemon refuses the human's yes) disposes the lease and reports without writing", async () => {
     const w = world();
     w.control.confirmWordsImpl = async () => {
       throw new (await import("@ademu/adc-control")).ControlError("words_mismatch", "x");
     };
-    const start = await w.call({ action: "start" });
-    const leaseToken = start.details.leaseToken as string;
+    await w.call({ action: "start" });
     w.control.emit({ words: WORDS });
     await tick();
-    const r = await w.call({ action: "confirm", leaseToken });
-    expect(r.details.state).toBe("words_mismatch");
+    const r = await yes(w);
+    expect(r).toMatchObject({ ok: false, state: "words_mismatch" });
     expect(w.writes).toHaveLength(0);
     expect(w.registry.size).toBe(0);
     expect(w.released()).toBe(1);
+    expect((await w.call({ action: "status" })).details.state).toBe("failed");
   });
 
-  it("the TTL timer disposes the lease (3 minutes) and a second start supersedes the first", async () => {
+  it("the tool call's signal aborting AFTER start (the host does this when the turn returns) leaves the ceremony alive: the scan is seen, the yes completes", async () => {
+    const w = world();
+    const ac = new AbortController();
+    const start = await w.call({ action: "start", agentName: "Iris" }, TELEGRAM, ac.signal);
+    expect(start.details.ok).toBe(true);
+    ac.abort(); // the turn ended
+    const entry = live(w);
+    expect(entry.lease.signal.aborted).toBe(false);
+    expect(entry.lease.disposed).toBe(false);
+    expect(w.control.polling).toBe(true); // the daemon poll is still running
+    w.control.emit({ state: "paired", words: WORDS });
+    await tick();
+    expect((await w.call({ action: "status" })).details.state).toBe("words_shown");
+    const yesP = yes(w, entry);
+    await tick(5);
+    w.control.finish("enrolled");
+    expect(await yesP).toMatchObject({ ok: true, state: "done" });
+    expect(w.writes).toHaveLength(1);
+  });
+
+  it("the TTL timer disposes the lease (3 minutes); a start after expiry creates a fresh ceremony", async () => {
     const w = world();
     await w.call({ action: "start", agentName: "Iris" });
     expect(w.timers[0]?.ms).toBe(180_000);
@@ -229,27 +215,165 @@ describe("ademu_enroll: the four-step flow", () => {
     await tick();
     expect(w.registry.size).toBe(0);
     expect(w.released()).toBe(1);
+    expect((await w.call({ action: "status" })).details.state).toBe("expired");
 
-    await w.call({ action: "start", agentName: "Iris" });
-    await w.call({ action: "start", agentName: "Bob" });
+    const again = await w.call({ action: "start", agentName: "Bob" });
+    expect(again.details).toMatchObject({ ok: true, state: "scanning" });
     expect(w.registry.size).toBe(1);
-    expect(w.released()).toBe(2);
+    expect(live(w).agentName).toBe("Bob");
+  });
+
+  it("a `start` while a ceremony is live NEVER disposes it (the model has no cancel): it reports the status, creates nothing, and re-opens a never-shown page", async () => {
+    const w = world();
+    let now = 0;
+    w.deps.lease.now = () => now;
+    await w.call({ action: "start", agentName: "Iris" });
+    const first = live(w);
+    // Inside the re-open grace: pure status.
+    let again = await w.call({ action: "start", agentName: "Bob" });
+    expect(again.details).toMatchObject({ ok: false, state: "scanning", alreadyRunning: true, deviceId: NEW_DEVICE });
+    expect(again.content[0]!.text).toContain("already in progress");
+    expect(again.content[0]!.text).not.toMatch(/https?:\/\//);
+    expect(live(w)).toBe(first);
+    expect(first.lease.disposed).toBe(false);
+    expect(w.released()).toBe(0);
+    expect(w.control.calls.filter((c) => c.op === "create_device")).toHaveLength(1);
+    expect(w.opens).toHaveLength(1);
+    // Past the grace with no browser having fetched the page: opened again, still nothing disposed.
+    now = 6_000;
+    again = await w.call({ action: "start", agentName: "Bob" });
+    expect(again.details).toMatchObject({ ok: false, alreadyRunning: true, pageReopened: true });
+    expect(w.opens).toHaveLength(2);
+    expect(live(w)).toBe(first);
+    // Words shown: still the human's ceremony.
+    w.control.emit({ state: "paired", words: WORDS });
+    await tick();
+    again = await w.call({ action: "start", agentName: "Bob" });
+    expect(again.details).toMatchObject({ ok: false, state: "words_shown", alreadyRunning: true });
+    for (const word of WORDS) expect(again.content[0]!.text).not.toContain(word);
+    expect(live(w)).toBe(first);
+    expect(w.released()).toBe(0);
+    // The human's NO ends it; only then does a start create a new ceremony.
+    await no(w);
+    const fresh = await w.call({ action: "start", agentName: "Bob" });
+    expect(fresh.details).toMatchObject({ ok: true, state: "scanning" });
+    expect(live(w).agentName).toBe("Bob");
+    expect(w.released()).toBe(1);
+  });
+});
+
+describe("ademu_enroll: routing binding (the account is never written unrouted)", () => {
+  async function enroll(w: World, over: Partial<OpenClawPluginToolContext> = {}, agentName = "Iris") {
+    const start = await w.call({ action: "start", agentName }, over);
+    expect(start.details.ok).toBe(true);
+    w.control.emit({ words: WORDS });
+    await tick();
+    const yesP = yes(w, w.registry.get(NEW_DEVICE)!);
+    await tick(5);
+    w.control.finish("enrolled");
+    return yesP;
+  }
+  const bindingsOf = (w: World) => (w.current() as unknown as { bindings?: unknown[] }).bindings;
+
+  it("routes the account to the enrolling agent on a multi-agent roster", async () => {
+    const w = world(ROSTER("iris", "ledger", "main"));
+    const done = await enroll(w, { agentId: "iris" });
+    expect(done).toMatchObject({ ok: true, state: "done" });
+    expect(bindingsOf(w)).toEqual([{ agentId: "iris", match: { channel: "ademu", accountId: "iris" } }]);
+    expect(w.writes).toHaveLength(1);
+  });
+
+  it("appends to existing bindings in host order and keeps non-route rows", async () => {
+    const existing = [
+      { agentId: "iris", match: { channel: "ademu", accountId: "iris" } },
+      { agentId: "ledger", match: { channel: "ademu", accountId: "ledger" } },
+      { type: "acp", agentId: "x", match: { channel: "ademu", accountId: "z" } },
+    ];
+    const w = world({ ...ROSTER("main", "work", "iris", "ledger"), bindings: existing, agents: { ownership: "explicit", entries: { main: {}, work: {}, iris: {}, ledger: {} } } } as unknown as OpenClawConfig);
+    const done = await enroll(w, { agentId: "main" }, "Repro");
+    expect(done).toMatchObject({ ok: true, state: "done" });
+    expect(bindingsOf(w)).toEqual([existing[0], existing[1], { agentId: "main", match: { channel: "ademu", accountId: "repro" } }, existing[2]]);
+  });
+
+  it("start is refused when the conversation carries no agent id: no device, no lease", async () => {
+    const w = world();
+    const r = await w.call({ action: "start", agentName: "Iris" }, NO_AXES);
+    expect(r.details).toMatchObject({ ok: false, state: "agent_unknown" });
+    expect(r.content[0]!.text).toContain("Nothing was written");
+    expect(w.control.calls.some((c) => c.op === "create_device")).toBe(false);
+    expect(w.acquires).toHaveLength(0);
+    expect(w.registry.size).toBe(0);
+  });
+
+  it("start is refused when the agent id names no configured agent (never a default fallback)", async () => {
+    const w = world(ROSTER("iris", "ledger"));
+    const r = await w.call({ action: "start", agentName: "Iris" }, { agentId: "ghost" });
+    expect(r.details).toMatchObject({ ok: false, state: "agent_unknown" });
+    expect(w.acquires).toHaveLength(0);
+    const ok = await world().call({ action: "start", agentName: "Iris" });
+    expect(ok.details.ok).toBe(true);
+  });
+
+  it("start is refused when the account id is already routed to another agent", async () => {
+    const w = world({ bindings: [{ agentId: "ledger", match: { channel: "ademu", accountId: "iris" } }], ...ROSTER("main", "ledger") } as unknown as OpenClawConfig);
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(r.details).toMatchObject({ ok: false, state: "routing_conflict", accountId: "iris" });
+    expect(r.content[0]!.text).toContain("openclaw agents unbind --agent ledger --bind ademu:iris");
+    expect(w.acquires).toHaveLength(0);
+    const same = await w.call({ action: "start", agentName: "Iris" }, { agentId: "ledger" });
+    expect(same.details.ok).toBe(true);
+  });
+
+  it("the yes re-checks against the CURRENT draft: an agent removed mid-ceremony → refused, nothing written, lease disposed", async () => {
+    const w = world(ROSTER("iris", "main"));
+    await w.call({ action: "start", agentName: "Iris" }, { agentId: "iris" });
+    w.deps.writeConfig = async (mutate) => {
+      mutate(ROSTER("main")); // the host's draft no longer lists `iris`
+    };
+    w.control.emit({ words: WORDS });
+    await tick();
+    const yesP = yes(w, w.registry.get(NEW_DEVICE)!);
+    await tick(5);
+    w.control.finish("enrolled");
+    const r = await yesP;
+    expect(r).toMatchObject({ ok: false, state: "agent_unknown" });
+    expect(w.writes).toHaveLength(0);
+    expect(w.registry.size).toBe(0);
+    expect(w.released()).toBe(1);
+  });
+
+  it("the yes re-checks the route: a binding claimed by another agent mid-ceremony → refused, nothing written", async () => {
+    const w = world(ROSTER("iris", "ledger"));
+    await w.call({ action: "start", agentName: "Iris" }, { agentId: "iris" });
+    w.deps.writeConfig = async (mutate) => {
+      mutate({ ...ROSTER("iris", "ledger"), bindings: [{ agentId: "ledger", match: { channel: "ademu", accountId: "iris" } }] } as unknown as OpenClawConfig);
+    };
+    w.control.emit({ words: WORDS });
+    await tick();
+    const yesP = yes(w, w.registry.get(NEW_DEVICE)!);
+    await tick(5);
+    w.control.finish("enrolled");
+    const r = await yesP;
+    expect(r).toMatchObject({ ok: false, state: "routing_conflict" });
+    expect(w.writes).toHaveLength(0);
+    expect(w.released()).toBe(1);
   });
 });
 
 describe("ademu_enroll: registration", () => {
-  it("registers the tool by name and a service that disposes leases on stop", async () => {
+  it("registers the tool by name and a service that disposes leases on stop — no button handlers, no hooks", async () => {
     const w = world();
     const registered: Array<{ name?: string }> = [];
     const services: Array<{ id: string; stop?: (ctx: unknown) => unknown }> = [];
     const api = {
       registerTool: (_factory: unknown, opts?: { name?: string }) => void registered.push(opts ?? {}),
       registerService: (svc: { id: string; stop?: (ctx: unknown) => unknown }) => void services.push(svc),
+      // Deliberately absent: registerInteractiveHandler / on. Registering either would throw here.
     } as unknown as OpenClawPluginApi;
     const registry = registerEnrollTool(api, w.deps);
     expect(registered).toEqual([{ name: TOOL_NAME }]);
     expect(services[0]?.id).toBe("ademu-enroll-leases");
-    const t = createEnrollTool({ senderIsOwner: true, sessionKey: "s" } as OpenClawPluginToolContext, w.deps, registry)!;
+    const t = createEnrollTool({ senderIsOwner: true, sessionKey: "s", agentId: "main" } as OpenClawPluginToolContext, w.deps, registry)!;
     await t.execute("c", { action: "start" }, new AbortController().signal);
     expect(registry.size).toBe(1);
     await services[0]!.stop!({});
@@ -259,58 +383,45 @@ describe("ademu_enroll: registration", () => {
 });
 
 const NO_AXES = { requesterSenderId: undefined, agentId: undefined } as unknown as Partial<OpenClawPluginToolContext>;
+const NO_SENDER = { requesterSenderId: undefined } as unknown as Partial<OpenClawPluginToolContext>;
+const ROSTER = (...ids: string[]) => ({ agents: { entries: Object.fromEntries(ids.map((id) => [id, {}])) } }) as unknown as OpenClawConfig;
 
 describe("ademu_enroll: Codex branch-review folds", () => {
-  it("#12 the agentId axis is enforced: same session, sender and token from another agent is refused", async () => {
+  it("#12 the agentId axis is enforced: same session and sender from another agent is refused", async () => {
     const w = world();
-    const start = await w.call({ action: "start", agentName: "Iris" });
-    const leaseToken = start.details.leaseToken as string;
-    const other = await w.call({ action: "status", leaseToken }, { agentId: "other-agent" });
-    expect(other.details.ok).toBe(false);
-    const same = await w.call({ action: "status", leaseToken });
-    expect(same.details.ok).toBe(true);
+    await w.call({ action: "start", agentName: "Iris" });
+    expect((await w.call({ action: "status" }, { agentId: "other-agent" })).details.ok).toBe(false);
+    expect((await w.call({ action: "status" })).details.ok).toBe(true);
   });
 
-  it("#13 replace_token before a label_exists answer is refused and mints nothing", async () => {
+  it("#14 a failure after the lease exists (the browser launcher) disposes the lease exactly once and leaves no registry entry", async () => {
     const w = world();
-    const start = await w.call({ action: "start", agentName: "Iris" });
-    const leaseToken = start.details.leaseToken as string;
-    const r = await w.call({ action: "replace_token", leaseToken });
-    expect(r.details.ok).toBe(false);
-    expect(w.control.calls.some((c) => c.op === "token_mint")).toBe(false);
-    expect(w.writes).toHaveLength(0);
-  });
-
-  it("#14 a failure after the lease exists (QR render) disposes the lease exactly once and leaves no registry entry", async () => {
-    const w = world();
-    w.deps.qr = {
-      terminal: async () => "",
-      pngDataUrl: async () => {
-        throw new Error("qr renderer unavailable");
-      },
+    w.deps.openUrl = async () => {
+      throw new Error("no opener");
     };
-    await expect(w.call({ action: "start", agentName: "Iris" })).rejects.toThrow(/qr renderer/);
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(r.details).toMatchObject({ ok: false, state: "page_open_failed" });
     expect(w.registry.size).toBe(0);
     expect(w.released()).toBe(1);
     expect(w.control.closed).toBe(1);
     expect(w.control.calls.some((c) => c.op === "cancel_pairing")).toBe(true);
   });
 
-  it("#14 a non-retryable failure during confirm (mint error) disposes the lease; a retryable one (device attached) keeps it", async () => {
+  it("#14 a non-retryable failure during the yes (mint error) disposes the lease; a retryable one (device attached) keeps it", async () => {
     const w = world();
     w.control.tokenMintImpl = async () => {
       throw new Error("mint exploded");
     };
-    const start = await w.call({ action: "start" });
-    const leaseToken = start.details.leaseToken as string;
+    await w.call({ action: "start" });
     w.control.emit({ words: WORDS });
     await tick();
-    const confirmP = w.call({ action: "confirm", leaseToken });
+    const yesP = yes(w);
     await tick(5);
     w.control.finish("enrolled");
-    await expect(confirmP).rejects.toThrow(/mint exploded/);
+    await expect(yesP).rejects.toThrow(/mint exploded/);
     expect(w.registry.size).toBe(0);
     expect(w.released()).toBe(1);
+    expect((await w.call({ action: "status" })).details.state).toBe("failed");
   });
 
   it("#15 a known acquisition failure returns fixed remedy text (ok:false), never throws, never installs", async () => {
@@ -321,7 +432,7 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.registry.size).toBe(0);
   });
 
-  it("R2#7 a background revoked/retired pairing disposes the lease at once (not at TTL)", async () => {
+  it("R2#7 a background revoked/retired pairing disposes the lease at once (not at TTL) and status says failed", async () => {
     for (const state of ["revoked", "retired"]) {
       const w = world();
       await w.call({ action: "start", agentName: "Iris" });
@@ -330,6 +441,7 @@ describe("ademu_enroll: Codex branch-review folds", () => {
       expect(w.registry.size).toBe(0);
       expect(w.released()).toBe(1);
       expect(w.control.closed).toBe(1);
+      expect((await w.call({ action: "status" })).details.state).toBe("failed");
     }
     const w = world();
     await w.call({ action: "start", agentName: "Iris" });
@@ -350,7 +462,7 @@ describe("ademu_enroll: Codex branch-review folds", () => {
       await slow;
     };
     await w.call({ action: "start", agentName: "Iris" });
-    w.control.finish("revoked"); // background terminal → disposal starts (and blocks on close)
+    w.control.finish("revoked");
     await tick(5);
     expect(w.registry.size).toBe(0);
     let allDone = false;
@@ -358,13 +470,13 @@ describe("ademu_enroll: Codex branch-review folds", () => {
       allDone = true;
     });
     await tick(5);
-    expect(allDone).toBe(false); // still waiting on the background cleanup
+    expect(allDone).toBe(false);
     releaseClose();
     await all;
     expect(w.released()).toBe(1);
   });
 
-  it("R8#4 a TTL-expiry disposal is tracked: a status lookup prunes the entry, and plugin stop still waits for the cleanup", async () => {
+  it("R8#4 a TTL-expiry disposal is tracked: a status lookup prunes the entry (expired), and plugin stop still waits for the cleanup", async () => {
     const w = world();
     let releaseClose!: () => void;
     const slow = new Promise<void>((r) => {
@@ -374,11 +486,10 @@ describe("ademu_enroll: Codex branch-review folds", () => {
       w.control.closed++;
       await slow;
     };
-    const start = await w.call({ action: "start", agentName: "Iris" });
-    const leaseToken = start.details.leaseToken as string;
-    w.timers[0]!.fn(); // TTL fires → disposal starts and blocks on close
-    const status = await w.call({ action: "status", leaseToken }); // prunes the disposed entry
-    expect(status.details.ok).toBe(false);
+    await w.call({ action: "start", agentName: "Iris" });
+    w.timers[0]!.fn();
+    const status = await w.call({ action: "status" });
+    expect(status.details).toMatchObject({ ok: true, state: "expired" });
     expect(w.registry.size).toBe(0);
     let allDone = false;
     const all = w.registry.disposeAll("plugin-stop").then(() => {
@@ -404,33 +515,30 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(acquireSignal).toBeDefined();
     expect(acquireSignal!.aborted).toBe(false);
     ac.abort();
-    expect(acquireSignal!.aborted).toBe(true); // the lease's signal follows the call's signal
+    expect(acquireSignal!.aborted).toBe(true);
     const r = await startP;
     expect(r.details).toMatchObject({ ok: false, state: "cancelled" });
     expect(w.registry.size).toBe(0);
     releaseGate();
   });
 
-  it("R2#8 axes compare exactly (absent → present is a mismatch) and only the same creator tuple may supersede", async () => {
-    const w = world();
-    const start = await w.call({ action: "start", agentName: "Iris" }, NO_AXES);
-    const leaseToken = start.details.leaseToken as string;
-    const withSender = await w.call({ action: "status", leaseToken }); // default ctx has a sender + agent
-    expect(withSender.details.ok).toBe(false);
-    const bare = await w.call({ action: "status", leaseToken }, NO_AXES);
-    expect(bare.details.ok).toBe(true);
-    // another agent on the same session key cannot supersede (dispose) it
-    const other = await w.call({ action: "start", agentName: "Bob" });
+  it("R2#8 axes compare exactly (absent → present is a mismatch); another creator is refused, the same creator gets the status — nobody disposes", async () => {
+    const w = world(ROSTER("main", "other"));
+    await w.call({ action: "start", agentName: "Iris" }, NO_SENDER);
+    expect((await w.call({ action: "status" })).details.ok).toBe(false); // default ctx has a sender
+    expect((await w.call({ action: "status" }, NO_SENDER)).details.ok).toBe(true);
+    const other = await w.call({ action: "start", agentName: "Bob" }, { agentId: "other" });
     expect(other.details).toMatchObject({ ok: false, state: "busy" });
+    expect(other.details).not.toHaveProperty("alreadyRunning"); // a stranger learns nothing about the ceremony
     expect(w.registry.size).toBe(1);
     expect(w.released()).toBe(0);
-    // the same creator may
-    const again = await w.call({ action: "start", agentName: "Bob" }, NO_AXES);
-    expect(again.details.ok).toBe(true);
-    expect(w.released()).toBe(1);
+    const again = await w.call({ action: "start", agentName: "Bob" }, NO_SENDER);
+    expect(again.details).toMatchObject({ ok: false, state: "scanning", alreadyRunning: true });
+    expect(w.registry.size).toBe(1);
+    expect(w.released()).toBe(0);
   });
 
-  it("R3#1 a cancel that lands while confirm is probing wins: nothing is written, confirm reports cancelled", async () => {
+  it("R3#1 a NO that lands while the yes is probing wins: nothing is written, the yes reports cancelled", async () => {
     const w = world();
     let releaseProbe!: () => void;
     const stall = new Promise<void>((r) => {
@@ -439,42 +547,42 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     const client = new FakeAdcClient({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER });
     client.stallGetSelf = stall;
     w.deps.connectSession = async () => client as never;
-    const start = await w.call({ action: "start", agentName: "Iris" });
-    const leaseToken = start.details.leaseToken as string;
+    await w.call({ action: "start", agentName: "Iris" });
     w.control.emit({ words: WORDS });
     await tick();
-    const confirmP = w.call({ action: "confirm", leaseToken });
+    const entry = live(w);
+    const yesP = yes(w, entry);
     await tick(5);
     w.control.finish("enrolled");
-    await tick(5); // confirm is now parked in the identity probe
-    const cancel = await w.call({ action: "cancel", leaseToken });
-    expect(cancel.details.cancelled).toBe(true);
+    await tick(5); // the yes is parked in the identity probe
+    const r = await no(w, entry);
+    expect(r).toMatchObject({ ok: true, state: "cancelled" });
     releaseProbe();
-    const result = await confirmP;
-    expect(result.details).toMatchObject({ ok: false, state: "cancelled" });
+    const result = await yesP;
+    expect(result).toMatchObject({ ok: false, state: "cancelled" });
     expect(w.writes).toHaveLength(0);
     expect(w.released()).toBe(1);
   });
 
-  it("R4#1 a cancel that lands after the words were confirmed but before the mint wins: no mint, no write", async () => {
+  it("R4#1 a NO that lands after the words were confirmed but before the mint wins: no mint, no write", async () => {
     const w = world();
-    const start = await w.call({ action: "start", agentName: "Iris" });
-    const leaseToken = start.details.leaseToken as string;
+    await w.call({ action: "start", agentName: "Iris" });
     w.control.emit({ words: WORDS });
     await tick();
-    const confirmP = w.call({ action: "confirm", leaseToken });
-    await tick(5); // confirm_words sent; confirm is parked waiting for the terminal state
+    const entry = live(w);
+    const yesP = yes(w, entry);
+    await tick(5);
     expect(w.control.calls.some((c) => c.op === "confirm_words")).toBe(true);
-    const cancel = await w.call({ action: "cancel", leaseToken });
-    expect(cancel.details.cancelled).toBe(true);
-    const result = await confirmP;
-    expect(result.details).toMatchObject({ ok: false, state: "cancelled" });
+    const r = await no(w, entry);
+    expect(r).toMatchObject({ ok: true, state: "cancelled" });
+    const result = await yesP;
+    expect(result).toMatchObject({ ok: false, state: "cancelled" });
     expect(w.control.calls.some((c) => c.op === "token_mint")).toBe(false);
     expect(w.writes).toHaveLength(0);
     expect(w.released()).toBe(1);
   });
 
-  it("R4#1 a cancel that lands while the host mutation is pending is refused (committing) and the write completes exactly once", async () => {
+  it("R4#1 a NO that lands while the host mutation is pending is refused (committing) and the write completes exactly once", async () => {
     const w = world();
     let releaseWrite!: () => void;
     const gate = new Promise<void>((r) => {
@@ -482,50 +590,39 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     });
     const origWrite = w.deps.writeConfig;
     w.deps.writeConfig = async (mutate) => {
-      await gate; // the host takes its time before handing us the draft
+      await gate;
       await origWrite(mutate);
     };
-    const start = await w.call({ action: "start", agentName: "Iris" });
-    const leaseToken = start.details.leaseToken as string;
+    await w.call({ action: "start", agentName: "Iris" });
     w.control.emit({ words: WORDS });
     await tick();
-    const confirmP = w.call({ action: "confirm", leaseToken });
+    const entry = live(w);
+    const yesP = yes(w, entry);
     await tick(5);
     w.control.finish("enrolled");
-    await tick(10); // confirm is inside writeConfig (committing)
-    const cancel = await w.call({ action: "cancel", leaseToken });
-    expect(cancel.details).toMatchObject({ ok: false, state: "committing" });
+    await tick(10); // inside writeConfig (committing)
+    const r = await no(w, entry);
+    expect(r).toMatchObject({ ok: false, state: "committing" });
     releaseWrite();
-    const result = await confirmP;
-    expect(result.details.state).toBe("done");
+    const result = await yesP;
+    expect(result.state).toBe("done");
     expect(w.writes).toHaveLength(1);
   });
 
-  it("R5#1 concurrent confirm / replace_token calls are serialized: exactly one durable operation, the stored token is the surviving one", async () => {
+  it("R5#1 two simultaneous human decisions are serialized: exactly one durable operation", async () => {
     const w = world();
-    let mints = 0;
-    w.control.tokenMintImpl = async (p) => {
-      if (!p.replace) throw new (await import("@ademu/adc-control")).ControlError("label_exists", "x");
-      mints++;
-      return { token_id: `tid-${mints}`, label: p.label, token: `adc1_rotated_${mints}`, created_at_ms: 1 };
-    };
-    const start = await w.call({ action: "start", agentName: "Iris" });
-    const leaseToken = start.details.leaseToken as string;
+    await w.call({ action: "start", agentName: "Iris" });
     w.control.emit({ words: WORDS });
     await tick();
-    const p1 = w.call({ action: "confirm", leaseToken });
-    const p2 = w.call({ action: "confirm", leaseToken });
+    const entry = live(w);
+    const p1 = yes(w, entry);
+    const p2 = yes(w, entry);
     await tick(5);
     w.control.finish("enrolled");
     const [c1, c2] = await Promise.all([p1, p2]);
-    // only one confirm ran; the duplicate was refused as busy
-    expect([c1, c2].filter((r) => r.details.busy === true)).toHaveLength(1);
-    const blocked = [c1, c2].find((r) => r.details.busy !== true)!;
-    expect(blocked.details.state).toBe("label_exists");
-    const [r1, r2] = await Promise.all([w.call({ action: "replace_token", leaseToken }), w.call({ action: "replace_token", leaseToken })]);
-    expect([r1, r2].filter((r) => r.details.busy === true)).toHaveLength(1);
-    expect(mints).toBe(1);
-    expect((w.current() as unknown as { channels: { ademu: { accounts: { iris: { token: string } } } } }).channels.ademu.accounts.iris.token).toBe("adc1_rotated_1");
+    expect([c1, c2].filter((r) => r.ok)).toHaveLength(1);
+    expect(w.control.calls.filter((c) => c.op === "confirm_words")).toHaveLength(1);
+    expect(w.control.calls.filter((c) => c.op === "token_mint")).toHaveLength(1);
     expect(w.writes).toHaveLength(1);
   });
 
@@ -540,22 +637,21 @@ describe("ademu_enroll: Codex branch-review folds", () => {
       await gate;
       await origWrite(mutate);
     };
-    const start = await w.call({ action: "start", agentName: "Iris" });
-    const leaseToken = start.details.leaseToken as string;
+    await w.call({ action: "start", agentName: "Iris" });
     w.control.emit({ words: WORDS });
     await tick();
-    const confirmP = w.call({ action: "confirm", leaseToken });
+    const yesP = yes(w);
     await tick(5);
     w.control.finish("enrolled");
-    await tick(10); // parked inside writeConfig (committing)
+    await tick(10);
     w.registry.delete(NEW_DEVICE); // superseded underneath the pending mutation
     releaseWrite();
-    const result = await confirmP;
-    expect(result.details).toMatchObject({ ok: false, state: "cancelled" });
+    const result = await yesP;
+    expect(result).toMatchObject({ ok: false, state: "cancelled" });
     expect(w.writes).toHaveLength(0);
   });
 
-  it("R6#3 a same-creator `start` while the host holds the mutation supersedes the old enrollment: its confirm is cancelled, nothing written, the new one is live", async () => {
+  it("R6#3 a same-creator `start` while the host holds the mutation changes nothing: it reports `confirming`, the yes completes, the write happens once", async () => {
     const w = world();
     let releaseWrite!: () => void;
     const gate = new Promise<void>((r) => {
@@ -566,57 +662,56 @@ describe("ademu_enroll: Codex branch-review folds", () => {
       await gate;
       await origWrite(mutate);
     };
-    const start = await w.call({ action: "start", agentName: "Iris" });
-    const leaseToken = start.details.leaseToken as string;
+    await w.call({ action: "start", agentName: "Iris" });
     w.control.emit({ words: WORDS });
     await tick();
-    const confirmP = w.call({ action: "confirm", leaseToken });
+    const yesP = yes(w);
     await tick(5);
     w.control.finish("enrolled");
-    await tick(10); // parked inside writeConfig (committing)
-    const again = await w.call({ action: "start", agentName: "Bob" }); // same creator tuple → supersedes
-    expect(again.details.ok).toBe(true);
-    expect(w.released()).toBe(1); // the old lease was disposed by the supersession
+    await tick(10);
+    const again = await w.call({ action: "start", agentName: "Bob" });
+    expect(again.details).toMatchObject({ ok: false, state: "confirming", alreadyRunning: true });
+    expect(w.released()).toBe(0);
     releaseWrite();
-    const result = await confirmP;
-    expect(result.details).toMatchObject({ ok: false, state: "cancelled" });
-    expect(w.writes).toHaveLength(0);
-    expect(w.registry.size).toBe(1);
-    expect(w.registry.forSession("agent:main:webchat:owner")?.agentName).toBe("Bob");
+    const result = await yesP;
+    expect(result).toMatchObject({ ok: true, state: "done" });
+    expect(w.writes).toHaveLength(1);
+    expect(w.registry.size).toBe(0);
+    expect(w.released()).toBe(1);
+    // Only now does a start create a new ceremony.
+    const fresh = await w.call({ action: "start", agentName: "Bob" });
+    expect(fresh.details).toMatchObject({ ok: true, state: "scanning" });
+    expect(w.registry.forSession(SESSION)?.agentName).toBe("Bob");
   });
 
   it("R3#3 two simultaneous starts in one conversation admit exactly one; an account created meanwhile is never overwritten", async () => {
     const w = world();
     const [a, b] = await Promise.all([w.call({ action: "start", agentName: "Iris" }), w.call({ action: "start", agentName: "Iris" })]);
-    const oks = [a, b].filter((r) => r.details.ok);
-    expect(oks).toHaveLength(1);
+    expect([a, b].filter((r) => r.details.ok)).toHaveLength(1);
     expect(w.registry.size).toBe(1);
-    const leaseToken = oks[0]!.details.leaseToken as string;
-    // someone writes channels.ademu.accounts.iris while the ceremony runs
     w.deps.writeConfig = async (mutate) => {
       const draft = { channels: { ademu: { accounts: { iris: { deviceId: "other", token: "t" } } } } } as unknown as OpenClawConfig;
       mutate(draft);
     };
     w.control.emit({ words: WORDS });
     await tick();
-    const confirmP = w.call({ action: "confirm", leaseToken });
+    const yesP = yes(w);
     await tick(5);
     w.control.finish("enrolled");
-    const r = await confirmP;
-    expect(r.details).toMatchObject({ ok: false, state: "account_exists" });
+    const r = await yesP;
+    expect(r).toMatchObject({ ok: false, state: "account_exists" });
     expect(w.released()).toBe(1);
   });
 
   it("#10 after the config write the setup-spawned daemon is promoted (pending-publication → bound)", async () => {
     const w = world();
-    const start = await w.call({ action: "start", agentName: "Iris" });
-    const leaseToken = start.details.leaseToken as string;
+    await w.call({ action: "start", agentName: "Iris" });
     w.control.emit({ words: WORDS });
     await tick();
-    const confirmP = w.call({ action: "confirm", leaseToken });
+    const yesP = yes(w);
     await tick(5);
     w.control.finish("enrolled");
-    await confirmP;
+    await yesP;
     expect(w.promotions).toEqual(["/d"]);
   });
 });

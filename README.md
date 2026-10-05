@@ -35,6 +35,14 @@ does not try to install anything itself; you can point it at a running `adc` dae
 
 ## Enroll an agent
 
+**The requirement both doors must meet (non-negotiable):** to enroll an OpenClaw agent on Ademú the
+user does exactly three things — ask the agent to connect to Ademú (or run the wizard command), scan
+the QR shown by the agent device with the Ademú app, and confirm that the four safety words match.
+Nothing else: no commands to type, no links to copy, no files to open, no extra steps. Where a
+surface cannot show the QR itself (OpenClaw's TUI renders no images), the plugin puts the QR and the
+words in front of the user on its own — the **enrollment page** it opens in a browser on the gateway
+machine (see door two). Both doors assume you are at the gateway machine.
+
 ### Door one — the wizard (terminal)
 
 ```sh
@@ -51,13 +59,43 @@ openclaw channels add --channel ademu
 
 ### Door two — from chat
 
-Tell your agent (from the web UI or any channel where you are the owner):
+Tell your agent (from any chat where you are the owner):
 
 > I want to talk to you on Ademú.
 
-The agent uses the `ademu_enroll` tool: it shows the QR, waits for your scan, reads you the four
-words, and — only after you say they match — finishes enrollment and writes the config. The tool is
-invisible to non-owners.
+The agent calls the `ademu_enroll` tool, which has exactly two actions, **start** and **status**. The
+agent can neither confirm nor cancel an enrollment: the plugin puts the QR, the link, the four safety
+words and a **Yes / No** choice in front of you itself, and you decide. Whatever chat you asked from,
+the ceremony happens in one place:
+
+- The **enrollment page** opens in your browser on the gateway machine (a page served by the plugin on
+  the gateway itself, `/plugins/ademu/enroll/<token>`). It shows the QR, then the four words with
+  **Yes — the words match** and **No — they differ**. The agent is told only that the page opened: it
+  never receives the page's address, the QR or the words, so nothing it says can stand in for them. If
+  no tab appeared, ask the agent how it is going — the plugin opens the page again.
+
+Your actions are the same three as door one: ask, scan (or open the link on the phone that runs
+Ademú), and click Yes after comparing the words. Nothing is written unless you did; **Cancel** before
+scanning, **No** after, or three minutes of silence end the ceremony with nothing written. The words never
+pass through the model, a model cannot say yes for you, and it cannot end a ceremony either — asking the
+agent to start again while one is running only tells you where it stands.
+
+#### Where it works, and where it does not
+
+| You are on | QR / link | Words | Your Yes / No | Works? |
+|---|---|---|---|---|
+| TUI, web UI, Control UI on the gateway machine | page (auto-opens) + inline in the web UI | page | page buttons | yes |
+| A chat channel (Telegram, WhatsApp, …) while sitting at the gateway machine | page (auto-opens on the gateway machine) | page | page buttons | yes |
+| TUI over SSH, a remote web UI, or a chat channel away from the gateway machine | the page opens on the gateway machine, where you are not | — | — | **no** — run `openclaw channels add --channel ademu` on the gateway machine |
+| A gateway bound to a non-loopback address, or a headless gateway with no browser | — | — | — | **no** — `start` refuses before creating anything and names the wizard |
+| Phone only | the QR cannot be scanned from the same phone — open the `ademu://` link from the page | | | scan from a second device, or use the page's copy-link on the phone |
+
+Pushing the QR, the words and Yes / No buttons into the chat itself (Telegram, Slack, Discord buttons;
+quoted-reply decisions elsewhere) is not part of this release; that lane lives on a separate branch.
+
+There are no settings for the page. Its URL is a bearer link that only the browser the plugin opens
+ever receives; the route answers loopback clients only, and the four-word comparison against your phone
+remains the real check.
 
 ### Reconnecting an already-enrolled agent
 
@@ -77,8 +115,13 @@ Ademú; this is it.)
   live under `channels.ademu.groups.<conversationId>` (`requireMention`, `toolsBySender`, …).
 - **Sending proactively:** the `message` tool with `channel: "ademu"` and a conversation id
   (`ademu:<uuid>` or the bare UUID). Reactions: `action: "react"`.
-- **Multiple agents:** one account per agent under `channels.ademu.accounts`; route each to an
-  OpenClaw agent with the usual `bindings` (`channel: "ademu"`, `accountId`).
+- **Multiple agents:** one account per agent under `channels.ademu.accounts`, each routed to an
+  OpenClaw agent by a `bindings` entry (`channel: "ademu"`, `accountId`). The wizard asks which agent
+  to route to; enrolling from chat routes the account to the agent you are talking to, and refuses
+  (writing nothing) when that conversation names no configured agent or the account id is already
+  routed to another agent. `openclaw channels remove` deletes the account's binding with the account.
+  Without a binding, a multi-agent install refuses the account's messages (`agents.ownership: "explicit"`)
+  or sends them to the default agent.
 
 ## Configuration
 

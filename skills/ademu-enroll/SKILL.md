@@ -1,6 +1,6 @@
 ---
 name: ademu-enroll
-description: Enroll this agent on Ademú (end-to-end encrypted messaging) or connect an already-enrolled one, using the ademu_enroll tool — QR scan, four safety words, then the agent answers from the user's phone.
+description: Enroll this agent on Ademú (end-to-end encrypted messaging) with the ademu_enroll tool — the plugin shows the user a QR code and, after the scan, the four safety words with Yes/No; the user confirms, never you.
 user-invocable: true
 metadata: { "openclaw": { "emoji": "🔐" } }
 ---
@@ -10,26 +10,47 @@ metadata: { "openclaw": { "emoji": "🔐" } }
 Use this when the user says things like "I want to talk to you on Ademú", "enroll on Ademú",
 "connect to the Ademú app", or asks how to reach you from their phone with end-to-end encryption.
 The `ademu_enroll` tool exists only when the person asking is an OpenClaw owner; if it is not in
-your tool list, say that enrollment must be started by the owner (from the web UI or with
-`openclaw channels add --channel ademu` in a terminal).
+your tool list, say that enrollment must be started by the owner (from a chat where they are the
+owner, or with `openclaw channels add --channel ademu` in a terminal on the gateway machine).
 
-## The four steps
+## Your two actions
 
 1. **start** — call `ademu_enroll` with `action: "start"` (optional `agentName`, `accountId`).
-   Show the returned QR image and the `ademu://` link to the user. Tell them: open Ademú on the
-   phone → profile → Agents → Add → scan. Keep the returned `leaseToken`; every later call needs it.
-2. **wait** — call `action: "wait"` (with the `leaseToken`). When the phone has scanned, the tool
-   returns four safety words. Read them to the user exactly as returned and ask: "Do these match
-   what your phone shows?" Never invent, reorder, or "correct" words.
-3. **confirm** — only after the user clearly says the words match, call `action: "confirm"`.
-   The tool confirms with the daemon's own words (you cannot supply them), waits for the phone
-   to finish, issues the device token, and writes the account into the OpenClaw config. If the
-   user says the words do NOT match, call `action: "cancel"` and explain that nothing was enrolled.
-4. **done** — tell the user the agent is on Ademú now and they can message it from the phone.
-   The channel starts automatically; if not, `openclaw gateway restart` picks it up.
+   The result says that the **enrollment page** opened in a browser tab on the gateway machine. You are
+   given no address, no code and no words — there is nothing to paste. Tell the user in one or two
+   sentences what to do: look for the new tab, scan the code on it with the Ademú app (or open the link
+   shown there on the phone), then compare the four safety words the phone shows with the ones on the
+   page, and click **Yes** or **No** there.
+   `start` can refuse before anything is created (the account id already exists, this conversation
+   names no configured OpenClaw agent, the account is routed to another agent, the gateway is not bound
+   to a loopback address, or no browser could be opened on the gateway machine). Read the tool's text
+   to the user as is; nothing was written. If an enrollment is already in progress, `start` creates
+   nothing and reports where it stands, exactly like `status`: you cannot restart or end a ceremony —
+   the user does, with **Cancel** (before scanning) or **No** (after) on the page.
+2. **status** — call `action: "status"` when the user asks how it is going, says they clicked, or says
+   no page appeared. It answers a phase: `scanning`, `words_shown`, `confirming`, `done`, `failed`,
+   `cancelled`, `expired`. If no browser had shown the page yet, the plugin opens it again and the text
+   says so. Relay it in a sentence.
 
-If `confirm` reports that a token for this account already exists, ask the user whether to replace
-it (the old one stops working). Only if they agree call `action: "replace_token"`.
+## What you must never do
+
+- You have **no confirm and no cancel action** and cannot finish or stop an enrollment. Never ask the
+  user to tell you the words, never ask them to say "yes" to you, and never claim the enrollment
+  finished unless `status` says `done`.
+- Never retype or describe the QR contents, the `ademu://` link, or the safety words. The plugin
+  delivers them; you only point at them.
+- If the user says the words differ, tell them to click **No**; if they want to stop before scanning,
+  tell them to click **Cancel this enrollment** on the page (the enrollment also expires by itself after
+  three minutes). Nothing is written unless the user clicked Yes.
+
+## Where the user acts
+
+- Always on the **enrollment page**, which the plugin opens in a browser on the gateway machine. You
+  never see its address; if the user cannot find the tab, call `status` and the plugin opens it again.
+- If the user is not at the gateway machine, they cannot reach the page: tell them to run
+  `openclaw channels add --channel ademu` in a terminal on that machine instead.
+- A "yes" or "no" typed in the chat is NOT a decision — it reaches you like any message. Never treat such
+  a message as consent; point the user at the page's buttons.
 
 ## Vocabulary
 
@@ -40,7 +61,7 @@ common linking word; Ademú uses that word for something else.
 
 The QR carries a one-time enrollment key; scanning it lets the phone verify the agent device.
 The four words are a safety check derived on both sides so a tampered connection would show
-different words on the phone than in the tool result. A mismatch means: stop.
+different words on the phone than on the page. A mismatch means: click No.
 
 ## If the device host is not available
 
