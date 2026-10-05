@@ -303,7 +303,10 @@ export class DaemonAttacher implements Attacher {
    */
   #checkEnrollRole(identity: DaemonIdentity, info: DaemonInfoResult): void {
     const reported = info.enroll_socket_path;
-    if (reported && canonicalizePath(reported) !== identity.enrollSocket) {
+    // Fail closed: every adc >= MIN_ADC_VERSION reports its enrollment socket, so a reply without one
+    // (version skew, or something else answering) cannot establish the socket's role.
+    if (!reported) throw new AdcTooOldError(parseAdcVersion(info.version));
+    if (canonicalizePath(reported) !== identity.enrollSocket) {
       throw new DaemonUnsupportedError(strings.status.notEnrollSocket(identity.raw.enrollSocket, reported));
     }
   }

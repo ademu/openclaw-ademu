@@ -369,6 +369,19 @@ describe("cancellation and the setup budget (Codex branch pass, #712 PR-b)", () 
     expect(a.info.sessionSocketPath).toBe(`${DATA}/adc-session.sock`);
   });
 
+  it("setup: a daemon that reports no (or an empty) enrollment socket fails closed as too old, whatever its version string says (Codex branch pass 7)", async () => {
+    for (const enroll_socket_path of [undefined, ""]) {
+      const w = world();
+      const reply = info({ version: `${MIN_ADC_VERSION} (source)` });
+      if (enroll_socket_path === undefined) delete (reply as { enroll_socket_path?: string }).enroll_socket_path;
+      else reply.enroll_socket_path = enroll_socket_path;
+      w.answers.set(`${DATA}/adc-enroll.sock`, [reply]);
+      const err = await new DaemonAttacher(w.deps).attach({ identity: userIdentity(), role: "setup" }).catch((e: unknown) => e);
+      expect(err, String(enroll_socket_path)).toBeInstanceOf(AdcTooOldError);
+      expect(w.startCalls).toBe(0);
+    }
+  });
+
   it("the real sleep resolves early on abort and leaves no timer behind", async () => {
     vi.useFakeTimers();
     try {
