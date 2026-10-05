@@ -4,6 +4,7 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { describe, expect, it } from "vitest";
+import { pageStateFor } from "../src/enrollment-page.js";
 import { AdcServiceNotInstalledError } from "../src/monitor/attach.js";
 import { cancelByHuman, confirmByHuman, createEnrollTool, registerEnrollTool, TOOL_NAME } from "../src/tools/enroll.js";
 import { FakeAdcClient, OWNER } from "./fakes/adc.js";
@@ -634,6 +635,11 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(result).toMatchObject({ ok: false, state: "cancelled" });
     // Codex branch pass 3: the token was minted before the NO — the yes's answer names it for revocation.
     expect(result.message).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
+    // Codex branch pass 4: the page's next poll (or a reload) keeps the instruction — it is the
+    // enrollment's persisted outcome, not only the /confirm reply.
+    const polled = await pageStateFor(entry, w.deps.qr);
+    expect(polled).toMatchObject({ phase: "failed" });
+    expect((polled as { message: string }).message).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
     expect(w.writes).toHaveLength(0);
     expect(w.released()).toBe(1);
   });
@@ -652,6 +658,7 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     const result = await yesP;
     expect(result).toMatchObject({ ok: false, state: "cancelled" });
     expect(result.message).not.toContain("token revoke"); // nothing was minted: nothing to revoke
+    expect(JSON.stringify(await pageStateFor(entry, w.deps.qr))).not.toContain("token revoke");
     expect(w.control.calls.some((c) => c.op === "token_mint")).toBe(false);
     expect(w.writes).toHaveLength(0);
     expect(w.released()).toBe(1);
