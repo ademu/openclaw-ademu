@@ -37,6 +37,8 @@ export const strings = {
     adcNotAnswering: (dataDir: string) =>
       `The adc background service was started but did not answer within 20 seconds. Check ~/.local/bin/adc service status and its log (macOS: ${dataDir}/daemon.log; Linux: journalctl --user -u adc).`,
     systemDaemonDown: "This host's system-wide Ademú device host is not running. Ask the operator to start it: sudo adc --system service start.",
+    notEnrollSocket: (dialled: string, reported: string) =>
+      `The socket configured as the Ademú enrollment socket (${dialled}) is not the device host's enrollment socket (it reports ${reported}). Fix channels.ademu.enrollSocketPath, or remove it to use the installed service's own.`,
     adcTooOld: "The Ademú device host (adc) is too old for this plugin. Upgrade it: re-run the adc installer (it restarts the service).",
     sessionSocketMoved: "The Ademú device host moved its session socket; reconnecting.",
     privilegeDenied:

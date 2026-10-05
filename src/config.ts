@@ -412,7 +412,11 @@ export function validateDaemonIdentities(
     (map.get(key) ?? map.set(key, new Set()).get(key)!).add(value);
   for (const id of ids) identities.set(id, readAccount(cfg, id, "inspect", env, detect).daemon);
   if (candidate) identities.set(candidate.accountId, candidate.daemon);
+  // Every control and session socket any identity names: an enrollment socket may be none of them.
+  const otherRoles = new Set<string>();
   for (const daemon of identities.values()) {
+    otherRoles.add(daemon.controlSocket);
+    otherRoles.add(daemon.sessionSocket);
     add(byDir, daemon.dataDir, daemon.controlSocket);
     add(byDirEnroll, daemon.dataDir, daemon.enrollSocket);
     add(bySocket, daemon.controlSocket, daemon.dataDir);
@@ -430,6 +434,11 @@ export function validateDaemonIdentities(
       errors.set(
         id,
         `daemon identity error: the enrollment socket ${identity.enrollSocket} must differ from the control and session sockets (channels.ademu.enrollSocketPath names adc-enroll.sock, never adc.sock)`,
+      );
+    } else if (otherRoles.has(identity.enrollSocket)) {
+      errors.set(
+        id,
+        `daemon identity error: the enrollment socket ${identity.enrollSocket} is another daemon's control or session socket (channels.ademu.enrollSocketPath names an adc-enroll.sock)`,
       );
     } else if (sockets.size > 1) {
       errors.set(

@@ -296,6 +296,18 @@ export class DaemonAttacher implements Attacher {
     if (!versionAtLeast(info.version, MIN_ADC_VERSION)) throw new AdcTooOldError(parseAdcVersion(info.version));
   }
 
+  /**
+   * The ceremony's effects run on the socket we dialled, so the daemon must say that socket IS its
+   * enrollment socket: a control socket answers the same handshake, and the ceremony would then run
+   * with ambient operator authority. Asked of the daemon — whatever the config aliases.
+   */
+  #checkEnrollRole(identity: DaemonIdentity, info: DaemonInfoResult): void {
+    const reported = info.enroll_socket_path;
+    if (reported && canonicalizePath(reported) !== identity.enrollSocket) {
+      throw new DaemonUnsupportedError(strings.status.notEnrollSocket(identity.raw.enrollSocket, reported));
+    }
+  }
+
   async attach(params: AttachParams): Promise<Attachment> {
     if (this.#deps.platform === "win32") {
       throw new DaemonUnsupportedError("Ademú is not available on Windows yet (no adc daemon build).");
@@ -349,7 +361,10 @@ export class DaemonAttacher implements Attacher {
         if (!(err instanceof PrivilegeError)) throw err;
         this.#deps.log("daemon_enroll_privilege_denied", { scope: "system" });
       }
-      if (info) this.#checkVersion(info);
+      if (info) {
+        this.#checkVersion(info);
+        this.#checkEnrollRole(identity, info);
+      }
       this.#deps.log("daemon_attached", { scope: "system", reachable: Boolean(info) });
       return this.#attachment(params, info);
     }
@@ -357,6 +372,7 @@ export class DaemonAttacher implements Attacher {
     const first = await this.#probe(identity.raw.enrollSocket, signal); // PrivilegeError propagates
     if (first) {
       this.#checkVersion(first);
+      this.#checkEnrollRole(identity, first);
       this.#deps.log("daemon_attached", { scope: "user", reachable: true });
       return this.#attachment(params, first);
     }
@@ -402,6 +418,7 @@ export class DaemonAttacher implements Attacher {
       }
       if (info) {
         this.#checkVersion(info);
+        this.#checkEnrollRole(identity, info);
         this.#deps.log("daemon_attached", { scope: "user", reachable: true, started: true });
         return this.#attachment(params, info);
       }

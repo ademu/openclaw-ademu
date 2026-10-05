@@ -264,7 +264,7 @@ describe("setup role (the enrollment doors)", () => {
   });
 
   it("a system install is attached as it is — reachable, down, or gated — and never started", async () => {
-    for (const answer of [info({ session_socket_path: "/run/adc/adc-session.sock" }), "absent", "privilege"] as Answer[]) {
+    for (const answer of [info({ session_socket_path: "/run/adc/adc-session.sock", enroll_socket_path: SYSTEM_ENROLL }), "absent", "privilege"] as Answer[]) {
       const w = world();
       w.answers.set(SYSTEM_ENROLL, [answer]);
       const a = await new DaemonAttacher(w.deps).attach({ identity: systemIdentity(), role: "setup" });
@@ -354,6 +354,19 @@ describe("cancellation and the setup budget (Codex branch pass, #712 PR-b)", () 
     ctl.abort();
     expect(await run).toBeInstanceOf(DaemonAbortedError);
     finishStart({ kind: "failed", reason: "launchctl bootstrap exited 5" }); // late: nobody is listening
+  });
+
+  it("setup: the daemon must report the dialled socket as its enrollment socket — a control socket answering there is refused before any effect (Codex branch pass 6)", async () => {
+    const w = world();
+    // whatever answers at the configured enrollment path says its enrollment socket is elsewhere
+    w.answers.set(`${DATA}/adc-enroll.sock`, [info({ enroll_socket_path: "/elsewhere/adc-enroll.sock" })]);
+    const err = await new DaemonAttacher(w.deps).attach({ identity: userIdentity(), role: "setup" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonUnsupportedError);
+    expect(String((err as Error).message)).toContain("/elsewhere/adc-enroll.sock");
+    expect(w.startCalls).toBe(0);
+    // the runtime only reads the session path: it still attaches
+    const a = await new DaemonAttacher(w.deps).attach({ identity: userIdentity(), role: "runtime" });
+    expect(a.info.sessionSocketPath).toBe(`${DATA}/adc-session.sock`);
   });
 
   it("the real sleep resolves early on abort and leaves no timer behind", async () => {

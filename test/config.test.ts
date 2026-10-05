@@ -428,6 +428,15 @@ describe("enrollment candidates are validated before any dial (Codex branch pass
     expect(inspectAdemuAccountForEnrollment(c, "newbie", ENV, () => false).configError).toMatch(/enrollment socket .* must differ/);
   });
 
+  it("Codex branch pass 6: an enrollment socket that is ANOTHER account's control or session socket is a role error — for a candidate and for persisted accounts", () => {
+    const b = { dataDir: "/b", enrollSocketPath: "/b/adc-enroll.sock" };
+    const candidate = { channels: { ademu: { accounts: { b }, dataDir: "/a", enrollSocketPath: "/b/adc.sock" } } } as unknown as OpenClawConfig;
+    expect(inspectAdemuAccountForEnrollment(candidate, "a", ENV, () => false).configError).toMatch(/enrollment socket \/b\/adc\.sock is another daemon's control or session socket/);
+    const persisted = { channels: { ademu: { accounts: { b, a: { dataDir: "/a", enrollSocketPath: "/b/adc-session.sock" } } } } } as unknown as OpenClawConfig;
+    expect(resolveAdemuAccount(persisted, "a", ENV, () => false).configError).toMatch(/is another daemon's control or session socket/);
+    expect(inspectAdemuAccountForEnrollment(persisted, "a", ENV, () => false).configError).toMatch(/is another daemon's control or session socket/);
+  });
+
   it("a candidate whose enrollment socket another data dir already uses collides", () => {
     const c = { channels: { ademu: { enrollSocketPath: "/a/adc-enroll.sock", accounts: { a: { dataDir: "/a" } }, dataDir: "/b" } } } as unknown as OpenClawConfig;
     expect(inspectAdemuAccountForEnrollment(c, "b", ENV, () => false).configError).toMatch(/enrollment socket \/a\/adc-enroll\.sock is shared/);
