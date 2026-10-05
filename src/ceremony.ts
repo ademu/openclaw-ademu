@@ -12,7 +12,7 @@
 import { AlreadyAttachedError, type AdcClient, type AdcClientOptions } from "@ademu/adc-client";
 import { ConnectionClosedError, ControlError, ControlTimeoutError, type AdcControlClient, type FourWords, type PairingSnapshot } from "@ademu/adc-control";
 import { normalizeId } from "./grammar.js";
-import { DaemonAbortedError, type Attacher, type Attachment } from "./monitor/attach.js";
+import { checkEnrollRole, DaemonAbortedError, type Attacher, type Attachment } from "./monitor/attach.js";
 import type { DaemonIdentity } from "./config.js";
 
 /** The enrollment socket's op table as the ceremony uses it (no `list_devices`, no `device_status`). */
@@ -361,9 +361,15 @@ export async function createEnrollmentLease(params: {
       signal: abort.signal,
       beforeEffect: params.beforeEffect,
     });
+    let connected: ControlLike | undefined;
     try {
-      control = await deps.connectEnroll(attachment.info.enrollSocketPath);
+      connected = await deps.connectEnroll(attachment.info.enrollSocketPath);
+      // The ceremony's OWN connection establishes its role before any effect (the attach probe may have
+      // found nothing — a system daemon still starting — and a later connect reaches whatever answers).
+      checkEnrollRole(attachment.info.enrollSocketPath, await connected.daemonInfo());
+      control = connected;
     } catch (err) {
+      await connected?.close().catch(() => {});
       await attachment.release().catch(() => {});
       throw err;
     }

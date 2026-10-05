@@ -644,6 +644,22 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.released()).toBe(1);
   });
 
+  it("close-out consult: the ceremony's own enrollment connection must be the daemon's enrollment socket (fail closed) — refused before any device", async () => {
+    for (const enroll_socket_path of ["/d/adc.sock", undefined]) {
+      const w = world();
+      const info = { ...w.control.info } as Record<string, unknown>;
+      if (enroll_socket_path === undefined) delete info.enroll_socket_path;
+      else info.enroll_socket_path = enroll_socket_path;
+      w.control.info = info as typeof w.control.info;
+      const r = await w.call({ action: "start", agentName: "Iris" });
+      expect(r.details, String(enroll_socket_path)).toMatchObject({ ok: false });
+      expect(w.control.calls.some((c) => c.op === "create_device")).toBe(false);
+      expect(w.writes).toHaveLength(0);
+      expect(w.control.closed).toBeGreaterThan(0);
+      expect(w.released()).toBe(1);
+    }
+  });
+
   it("Codex branch pass 5: an enrollment socket configured as the control socket is refused at start — no attach, no socket call, no write", async () => {
     const w = world({ channels: { ademu: { dataDir: "/d", enrollSocketPath: "/d/adc.sock" } } } as unknown as OpenClawConfig);
     const r = await w.call({ action: "start", agentName: "Iris" });

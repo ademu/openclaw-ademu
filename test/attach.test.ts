@@ -127,7 +127,14 @@ function world(over: { layout?: UserServiceLayout; platform?: string } = {}): Wo
   return w;
 }
 
-const userIdentity = (): DaemonIdentity => resolveDaemonIdentity({ dataDir: DATA }, process.env, () => false);
+/** An identity naming DATA explicitly (`channels.ademu.dataDir`): never started (spec X8). */
+const explicitIdentity = (): DaemonIdentity => resolveDaemonIdentity({ dataDir: DATA }, process.env, () => false);
+/** The default identity — the installed user service's layout, nothing configured (here: at DATA). */
+const userIdentity = (): DaemonIdentity => ({
+  ...explicitIdentity(),
+  explicit: { dataDir: false, socketPath: false, enrollSocketPath: false },
+  scopeSource: "detected",
+});
 // The Linux system layout, pinned (the macOS one lives under /private/var/db/adc/run).
 const systemIdentity = (): DaemonIdentity => resolveDaemonIdentity({ enrolledScope: "system" }, process.env, () => true, undefined, "linux");
 
@@ -252,6 +259,13 @@ describe("setup role (the enrollment doors)", () => {
     await expect(new DaemonAttacher(w.deps).attach({ identity: userIdentity(), role: "setup" })).rejects.toBeInstanceOf(
       AdcServiceNotInstalledError,
     );
+    expect(w.startCalls).toBe(0);
+  });
+
+  it("spec X8: an explicit dataDir is never started — even one that names the installed service's own layout (close-out consult)", async () => {
+    const w = world(); // the installed layout IS at DATA
+    const err = await new DaemonAttacher(w.deps).attach({ identity: explicitIdentity(), role: "setup" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonUnreachableError);
     expect(w.startCalls).toBe(0);
   });
 

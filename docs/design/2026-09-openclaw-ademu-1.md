@@ -317,10 +317,11 @@ deliberate `adc service stop` is respected, and at login adc and the gateway sta
 nothing answered, the attachment carries why (`not_installed` / `disabled` / `not_running` /
 `system_down`, from the installed unit and, on launchd, `print-disabled`). A first session open that
 finds no listener (`ENOENT` / `ECONNREFUSED`) shows that copy while `recovering` and **waits in the
-task** — 2 s doubling to 30 s, then attaches again — instead of throwing: the gateway's restart loop
-gives up after 10 attempts (5 s → 300 s backoff, ~25 min) and replaces the status with the raw connect
-error, so an adc that stays down longer (not installed yet, stopped over lunch) would leave the account
-dead until a gateway restart (#712 live leg, 2026-10-02). Once seated, the client's reconnect loop rides
+task** — 2 s doubling to 30 s, then attaches again — instead of throwing. Thrown, the account
+belongs to the host: its restart loop gives up after 10 attempts (5 s → 300 s backoff, ~25 min), then
+only the health monitor brings it back (checks every 5 min, 10-min cooldown, ≤ 10 restarts an hour),
+and every exit replaces the status with the raw connect error, so the X1–X5 reason never shows and an
+adc that returns waits up to ~10 min for the account (#712 live leg, 2026-10-02). Once seated, the client's reconnect loop rides
 out a daemon restart. Every `REPROBE_AFTER_ATTEMPTS` (5) failed reconnects, for the whole
 outage and never two at once, the session path is re-resolved; a device host that came back on another session socket
 ends the lifetime (`SessionSocketMovedError`) so a fresh attachment takes the new path.

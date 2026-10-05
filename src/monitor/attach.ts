@@ -224,6 +224,21 @@ export function realAttachDeps(params: { log: AttachDeps["log"] }): AttachDeps {
   };
 }
 
+/**
+ * The ceremony's effects run on the socket we dialled, so the daemon must say that socket IS its
+ * enrollment socket: a control socket answers the same handshake, and the ceremony would then run with
+ * ambient operator authority. Asked of the daemon — whatever the config aliases. Fail closed: every adc
+ * >= MIN_ADC_VERSION reports its enrollment socket, so a reply without one (version skew, or something
+ * else answering) cannot establish the socket's role.
+ */
+export function checkEnrollRole(dialled: string, info: DaemonInfoResult): void {
+  const reported = info.enroll_socket_path;
+  if (!reported) throw new AdcTooOldError(parseAdcVersion(info.version));
+  if (canonicalizePath(reported) !== canonicalizePath(dialled)) {
+    throw new DaemonUnsupportedError(strings.status.notEnrollSocket(dialled, reported));
+  }
+}
+
 export class DaemonAttacher implements Attacher {
   readonly #deps: AttachDeps;
 
@@ -296,19 +311,8 @@ export class DaemonAttacher implements Attacher {
     if (!versionAtLeast(info.version, MIN_ADC_VERSION)) throw new AdcTooOldError(parseAdcVersion(info.version));
   }
 
-  /**
-   * The ceremony's effects run on the socket we dialled, so the daemon must say that socket IS its
-   * enrollment socket: a control socket answers the same handshake, and the ceremony would then run
-   * with ambient operator authority. Asked of the daemon — whatever the config aliases.
-   */
   #checkEnrollRole(identity: DaemonIdentity, info: DaemonInfoResult): void {
-    const reported = info.enroll_socket_path;
-    // Fail closed: every adc >= MIN_ADC_VERSION reports its enrollment socket, so a reply without one
-    // (version skew, or something else answering) cannot establish the socket's role.
-    if (!reported) throw new AdcTooOldError(parseAdcVersion(info.version));
-    if (canonicalizePath(reported) !== identity.enrollSocket) {
-      throw new DaemonUnsupportedError(strings.status.notEnrollSocket(identity.raw.enrollSocket, reported));
-    }
+    checkEnrollRole(identity.raw.enrollSocket, info);
   }
 
   async attach(params: AttachParams): Promise<Attachment> {
@@ -384,9 +388,11 @@ export class DaemonAttacher implements Attacher {
     // start anything beside it — re-running the installer is the fix.
     if (await this.#deps.controlSocketAnswers(identity.raw.controlSocket)) throw new AdcTooOldError();
 
-    const layout = this.#serviceLayoutFor(identity);
+    // An explicit configuration is never started (spec X8) — even one naming the installed service's own
+    // layout; nor is a path that is not the installed service's own.
+    const explicit = identity.explicit.dataDir || identity.explicit.socketPath || identity.explicit.enrollSocketPath;
+    const layout = explicit ? undefined : this.#serviceLayoutFor(identity);
     if (!layout) {
-      // An explicit path that is not the installed service's own: the plugin starts nothing for it.
       throw new DaemonUnreachableError(strings.status.adcNotRunningAt(identity.raw.enrollSocket));
     }
     const state = await this.#unlessAborted(this.#deps.userService.installed(layout), signal);
