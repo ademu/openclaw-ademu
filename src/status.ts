@@ -10,10 +10,18 @@ import {
   ProtocolViolationError,
   SessionRejectedError,
 } from "@ademu/adc-client";
-import { PlatformPackageMissingError, UnsupportedPlatformError } from "@ademu/adc-bin";
+import { PrivilegeError } from "@ademu/adc-control";
 import { channelBlockedPatch, channelReadyPatch } from "openclaw/plugin-sdk/gateway-runtime";
 import { strings } from "./i18n/strings.js";
-import { DaemonBusyError, DaemonLostError, DaemonUnreachableError, DaemonUnsupportedError } from "./monitor/daemon.js";
+import {
+  AdcServiceNotAnsweringError,
+  AdcServiceNotInstalledError,
+  AdcTooOldError,
+  DaemonUnreachableError,
+  DaemonUnsupportedError,
+  SessionSocketMovedError,
+  type Unreachable,
+} from "./monitor/attach.js";
 
 export class IdentityMismatchError extends Error {
   constructor() {
@@ -77,12 +85,19 @@ export function classifyError(err: unknown): Classified {
   // Every session rejection is terminal by the client's contract — future codes arrive as the base class.
   if (err instanceof SessionRejectedError) return { kind: "blocked", lastError: strings.status.sessionRejected };
   if (err instanceof SessionWarmupError) return { kind: "recovering", lastError: strings.status.warmupFailed };
-  if (err instanceof UnsupportedPlatformError) return { kind: "blocked", lastError: strings.status.unsupportedPlatform(err.platform) };
   if (err instanceof DaemonUnsupportedError) return { kind: "blocked", lastError: err.message };
-  if (err instanceof PlatformPackageMissingError) return { kind: "blocked", lastError: strings.status.daemonUnreachable(undefined) };
-  if (err instanceof DaemonUnreachableError) return { kind: "recovering", lastError: strings.status.daemonUnreachable(err.logPath) };
-  if (err instanceof DaemonLostError) return { kind: "recovering", lastError: strings.status.daemonLost };
-  if (err instanceof DaemonBusyError) return { kind: "recovering", lastError: err.message };
+  // A restart cannot fix permissions: the hardened host's refusal is user-actionable, never a loop.
+  if (err instanceof PrivilegeError) return { kind: "blocked", lastError: strings.status.privilegeDenied };
+  // An upgrade restarts the service, but this account still needs a gateway restart to re-check.
+  if (err instanceof AdcTooOldError) return { kind: "blocked", lastError: strings.status.adcTooOld };
+  // The installed device host (#712): everything below is fixed by the user starting/installing adc,
+  // which the gateway's restart loop then picks up — `recovering`, never `blocked`.
+  if (err instanceof AdcServiceNotInstalledError) return { kind: "recovering", lastError: strings.status.adcNotInstalled };
+  if (err instanceof AdcServiceNotAnsweringError) {
+    return { kind: "recovering", lastError: err.disabled ? strings.status.adcServiceDisabled : strings.status.adcNotAnswering(err.layout.dataDir) };
+  }
+  if (err instanceof DaemonUnreachableError) return { kind: "recovering", lastError: err.message };
+  if (err instanceof SessionSocketMovedError) return { kind: "recovering", lastError: strings.status.sessionSocketMoved };
   if (err instanceof IngressHaltedError) return { kind: "recovering", lastError: strings.status.ingressHalted, ingressUnavailable: true };
   const name = err instanceof Error ? err.name || err.constructor.name : typeof err;
   return { kind: "recovering", lastError: `error: ${name}` };
@@ -92,4 +107,18 @@ export function patchFor(err: unknown): StatusPatch {
   const c = classifyError(err);
   if (c.kind === "blocked") return blockedPatch(c.lastError);
   return recoveringPatch(c.lastError, c.ingressUnavailable ? { ingressUnavailable: true } : {});
+}
+
+/** The `recovering` copy for a runtime attachment that found nothing answering (#712). */
+export function unreachableCopy(why: Unreachable): string {
+  switch (why) {
+    case "not_installed":
+      return strings.status.adcNotInstalled;
+    case "disabled":
+      return strings.status.adcServiceDisabled;
+    case "system_down":
+      return strings.status.systemDaemonDown;
+    case "not_running":
+      return strings.status.adcNotRunning;
+  }
 }

@@ -5,9 +5,12 @@
 // the user sees — QR, link, words, outcome — is rendered by host code; the model is told where to look
 // and what it must not do. Leases are bound to their creator (session key + sender + agent), expire
 // after 3 minutes, and are disposed on every terminal path and on plugin shutdown (registerService).
-// The daemon's words are the only words ever confirmed; a duplicate token label on a device this
-// ceremony created is our own earlier attempt and is replaced without ceremony (the wizard's reconnect
-// path keeps its explicit question).
+// The daemon's words are the only words ever confirmed. The ceremony runs over the daemon's
+// ENROLLMENT socket (ADC Phase 3b Phase B): `daemon_info` is read BEFORE the mint (the first mint
+// closes the connection), a mint whose reply was lost or whose label is taken is never retried with
+// `replace` (the operator mints a fresh label at the CLI and pastes it into the wizard's token door),
+// a config write that fails after the mint names the label to revoke, and a hardened host with no
+// ceremony possible answers with the operator ceremony (spec M20 a–d).
 import type { AdcClient, AdcClientOptions } from "@ademu/adc-client";
 import { ControlError, type FourWords, type PairingSnapshot } from "@ademu/adc-control";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -18,13 +21,14 @@ import { readStringParam } from "openclaw/plugin-sdk/channel-actions";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { Type } from "typebox";
 import { applyRouteBinding, findRouteBinding, RouteBindingConflictError } from "../bindings.js";
-import { createEnrollmentLease, EnrollmentError, mintAccountToken, probeIdentity, tokenLabelFor, type EnrollmentLease, type EnrollmentLeaseDeps } from "../ceremony.js";
-import { CHANNEL_ID, inspectAdemuAccount, listAdemuAccountIds } from "../config.js";
+import { createDeviceOrRefuse, createEnrollmentLease, EnrollmentError, mintAccountToken, probeIdentity, tokenLabelFor, type EnrollmentLease, type EnrollmentLeaseDeps } from "../ceremony.js";
+import { CHANNEL_ID, inspectAdemuAccountForEnrollment, listAdemuAccountIds } from "../config.js";
 import { accountExists, applyEnrollment } from "../enroll-config.js";
 import { enrollmentPageBaseUrl, enrollmentPageUrl, isLoopbackEnrollmentPageUrl } from "../enrollment-page.js";
 import { strings } from "../i18n/strings.js";
 import type { Qr } from "../qr.js";
-import { DaemonAbortedError } from "../monitor/daemon.js";
+import { DaemonAbortedError } from "../monitor/attach.js";
+import { revokeLabelCommand, type OperatorContext } from "../operator.js";
 import { remedyFor } from "../remedies.js";
 import { accountIdForAgentName } from "../config.js";
 
@@ -64,6 +68,8 @@ export type ActiveEnrollment = {
   terminal: Promise<PairingSnapshot>;
   terminalState: string | undefined;
   failure: string | undefined;
+  /** The human-facing outcome of a failed yes (a remedy, a revoke instruction) for the page's failed screen. */
+  failureMessage?: string | undefined;
 };
 
 export type EnrollToolDeps = {
@@ -409,21 +415,26 @@ async function admitAndStart(p: {
     return reportStatus(previous, p.deps, p.registry, { alreadyRunning: true });
   }
 
-  const account = inspectAdemuAccount(cfg, accountId);
+  const account = inspectAdemuAccountForEnrollment(cfg, accountId);
+  // A daemon identity error (an enrollment socket that is the control or session socket, a collision)
+  // is refused before any attachment, socket call or write.
+  if (account.configError) return text(strings.status.configCollision(account.configError), { ok: false, state: "config_error" });
+  // The operator context: a hardened host's refusal or a full enrollment budget answer with the
+  // operator ceremony naming this host's commands (M20 d).
+  const operator: OperatorContext = { identity: account.daemon, label: tokenLabelFor(accountId), agentName };
   let lease: EnrollmentLease;
   try {
     lease = await createEnrollmentLease({
       deps: p.deps.lease,
       accountId,
       identity: account.daemon,
-      server: account.server,
       beforeEffect: p.beforeEffect,
       signal: p.signal,
     });
   } catch (err) {
     if (err instanceof DaemonAbortedError) return text(strings.enroll.toolCancelled, { ok: false, state: "cancelled" });
-    // Known acquisition failures become fixed, instruct-only remedy text (never an install attempt).
-    const remedy = remedyFor(err);
+    // Known attach failures become fixed, instruct-only remedy text (never an install attempt).
+    const remedy = remedyFor(err, operator);
     if (remedy) return text(strings.enroll.toolUnavailable(remedy), { ok: false, state: "unavailable" });
     throw err;
   }
@@ -434,7 +445,7 @@ async function admitAndStart(p: {
     if (lease.deviceId) p.registry.delete(lease.deviceId);
     await lease.dispose("start-failed");
     if (err instanceof PageOpenFailedError) return text(strings.enroll.toolPageOpenFailed, { ok: false, state: "page_open_failed" });
-    const remedy = remedyFor(err);
+    const remedy = remedyFor(err, operator);
     if (remedy) return text(strings.enroll.toolUnavailable(remedy), { ok: false, state: "unavailable" });
     throw err;
   }
@@ -453,7 +464,7 @@ async function startWithLease(p: {
 }): Promise<ToolResult> {
   const { lease, agentName, accountId } = p;
   await p.beforeEffect();
-  const created = await lease.control.createDevice({ agent_name: agentName });
+  const created = await createDeviceOrRefuse(lease.control, agentName);
   lease.deviceId = created.device_id;
 
   const pageToken = newPageToken();
@@ -570,6 +581,16 @@ export async function cancelByHuman(active: ActiveEnrollment, registry: Enrollme
 
 async function confirmEnrollment(p: { active: ActiveEnrollment; deps: EnrollToolDeps; registry: EnrollmentRegistry }): Promise<ToolResult> {
   const { active } = p;
+  /** Set once a token exists: a failure after this point names the label to revoke (M20 c). */
+  let minted: { token: string; tokenId: string; tokenLabel: string } | undefined;
+  const operator: OperatorContext = {
+    identity: active.lease.attachment.identity,
+    deviceId: active.deviceId,
+    label: tokenLabelFor(normalizeAccountId(active.lease.accountId)),
+    agentName: active.agentName,
+  };
+  /** M20 (c): appended to every failure that happens after a successful mint. */
+  const orphaned = (msg: string) => (minted ? `${msg}\n\n${strings.enroll.orphanedToken(revokeLabelCommand({ ...operator, label: minted.tokenLabel }))}` : msg);
   // The liveness guard runs immediately before each durable effect: the enrollment is still live (not
   // cancelled/superseded) after the awaits that preceded it.
   const guard = async () => {
@@ -609,21 +630,14 @@ async function confirmEnrollment(p: { active: ActiveEnrollment; deps: EnrollTool
       return text(strings.enroll.toolStatus(phaseOf(active), active.agentName), { ok: false, state: phaseOf(active) });
     }
     assertStillActive(active, p.registry);
-    let minted: { token: string; tokenId: string };
-    try {
-      minted = await mintAccountToken({ ...common, deviceId: active.deviceId });
-    } catch (err) {
-      if (!(err instanceof EnrollmentError) || err.reason !== "label_exists") throw err;
-      // This device was created by THIS ceremony seconds ago, so the only token that can carry our label
-      // is our own earlier attempt (a retry after a retryable failure). Replace it: there is no foreign
-      // credential to protect, and the user must never hear about tokens.
-      await guard();
-      const m = await active.lease.control.tokenMint({ device_id: active.deviceId, label: tokenLabelFor(common.accountId), replace: true });
-      minted = { token: m.token, tokenId: m.token_id };
-    }
+    // `daemon_info` BEFORE the mint: the first successful mint closes the enrollment connection (M20 a).
     const info = await active.lease.control.daemonInfo();
     if (!info.session_socket_path) throw new EnrollmentError("daemon_too_old");
-    const identity = await probeIdentity({ ...common, deviceId: active.deviceId, token: minted.token, sessionSocketPath: info.session_socket_path });
+    // Exactly one mint, never `replace`: a lost reply or a taken label is `mint_lost`/`label_exists`,
+    // answered below with the mint-a-fresh-label instruction (M20 b).
+    const m = await mintAccountToken({ ...common, deviceId: active.deviceId });
+    minted = m;
+    const identity = await probeIdentity({ ...common, deviceId: active.deviceId, token: m.token, sessionSocketPath: info.session_socket_path });
 
     await guard();
     // The final guard runs INSIDE the mutation callback (when the host hands us its current draft),
@@ -643,20 +657,13 @@ async function confirmEnrollment(p: { active: ActiveEnrollment; deps: EnrollTool
         deviceId: active.deviceId,
         agentUserId: identity.agentUserId,
         ownerUserId: identity.ownerUserId,
-        token: minted.token,
+        token: m.token,
+        daemonScope: active.lease.attachment.identity.scope,
         grantOwnerAuthority: true, // the initiator is owner-by-scope and confirmed the words from the same phone
       });
       return applyRouteBinding(enrolled, { channel: CHANNEL_ID, accountId: common.accountId, agentId: routedAgentId });
     });
     active.state = "done";
-    // Tool-door accelerator: the account is committed → publish the setup-spawned daemon now.
-    if (active.lease.daemonLease.mode === "owned") {
-      try {
-        p.deps.lease.daemons.promotePendingPublication(active.lease.daemonLease.identity.dataDir);
-      } catch {
-        /* the runtime's next acquire promotes it anyway */
-      }
-    }
     p.registry.forget(active);
     await active.lease.dispose("done");
     return text(`${strings.enroll.toolConfirmed(active.agentName)}\n\n${strings.enroll.toolRouted(routedAgentId, common.accountId)}`, {
@@ -672,38 +679,58 @@ async function confirmEnrollment(p: { active: ActiveEnrollment; deps: EnrollTool
       (!(err instanceof EnrollmentError) && (active.lease.disposed || active.lease.signal.aborted));
     if (cancelled) {
       // It failed because the enrollment was cancelled/superseded underneath us: release, report cancelled.
+      // A NO or the expiry can land while the identity probe runs AFTER the mint: that token exists, so
+      // the answer (the page's /confirm reply) names it for revocation (M20 c).
+      if (minted) {
+        // Persisted on the enrollment, not only in this reply: the page's next poll or a reload must
+        // still show which token to revoke (a plain "cancelled" state would erase it).
+        active.state = "failed";
+        active.failure = "cancelled-after-mint";
+        active.failureMessage = orphaned(strings.enroll.toolCancelled);
+      }
       p.registry.forget(active);
       await active.lease.dispose("cancelled");
-      return text(strings.enroll.toolCancelled, { ok: false, state: "cancelled" });
+      return text(orphaned(strings.enroll.toolCancelled), { ok: false, state: "cancelled", ...(minted ? { deviceId: active.deviceId, tokenOrphaned: true } : {}) });
     }
     const fail = async (reason: string, msg: string, details: Record<string, unknown>) => {
       active.state = "failed";
       active.failure = reason;
+      active.failureMessage = msg;
       p.registry.forget(active);
       await active.lease.dispose(reason);
       return text(msg, { ok: false, ...details });
     };
     if (err instanceof AccountExistsError) {
-      return fail("account-exists", strings.enroll.toolAccountExists(err.accountId, [err.accountId]), { state: "account_exists" });
+      return fail("account-exists", orphaned(strings.enroll.toolAccountExists(err.accountId, [err.accountId])), { state: "account_exists" });
     }
     if (err instanceof EnrollingAgentUnknownError) {
       // The agent roster changed underneath the ceremony: the account is NOT written unrouted.
-      return fail("agent-unknown", strings.enroll.toolAgentUnknown, { state: "agent_unknown" });
+      return fail("agent-unknown", orphaned(strings.enroll.toolAgentUnknown), { state: "agent_unknown" });
     }
     if (err instanceof RouteBindingConflictError) {
-      return fail("routing-conflict", strings.enroll.toolRoutingConflict(err.accountId, err.existingAgentId), { state: "routing_conflict", accountId: err.accountId });
+      return fail("routing-conflict", orphaned(strings.enroll.toolRoutingConflict(err.accountId, err.existingAgentId)), { state: "routing_conflict", accountId: err.accountId });
     }
     if (err instanceof EnrollmentError) {
       if (err.reason === "words_mismatch") return fail("words_mismatch", strings.enroll.wordsMismatch, { state: "words_mismatch" });
-      if (err.reason === "device_attached") return text(strings.enroll.deviceAttachedRefused, { ok: false, state: "device_attached" });
+      // Post-mint only (the probe follows the mint), and the mint closed the enrollment connection: there
+      // is no retry — the ceremony ends, the minted token is named for revocation.
+      if (err.reason === "device_attached") return fail("device_attached", orphaned(strings.enroll.deviceAttachedRefused), { state: "device_attached", deviceId: active.deviceId });
+      if (err.reason === "mint_lost" || err.reason === "label_exists") {
+        return fail("mint_lost", remedyFor(err, operator)!, { state: "mint_lost", deviceId: active.deviceId });
+      }
     }
-    // Anything else is terminal for this enrollment: release the daemon/control resources now,
+    // A host write error after the mint (disk full, permissions): the outcome must reach the human
+    // through the page and the model through the result, never only a thrown exception (M20 c).
+    if (minted) {
+      return fail("commit-failed", orphaned(strings.enroll.toolCommitFailed), { state: "commit_failed", deviceId: active.deviceId });
+    }
+    // Anything else is terminal for this enrollment: release the daemon/enrollment resources now,
     // not at TTL.
     active.state = "failed";
     active.failure = err instanceof Error ? err.name : "confirm_failed";
     p.registry.forget(active);
     await active.lease.dispose("confirm-failed");
-    const remedy = remedyFor(err);
+    const remedy = remedyFor(err, operator);
     if (remedy) return text(strings.enroll.toolUnavailable(remedy), { ok: false, state: "failed" });
     throw err;
   }

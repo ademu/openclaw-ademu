@@ -2,19 +2,20 @@
 // actions/heartbeat + security posture report + the setup wizard (T12). Host runtime pieces are
 // pulled lazily from the runtime store so this module can be imported by tests without a gateway.
 import { connect as connectSessionReal } from "@ademu/adc-client";
-import { connect as connectControlReal } from "@ademu/adc-control";
+import { connectEnroll as connectEnrollReal } from "@ademu/adc-control";
 import type { ChannelPlugin } from "openclaw/plugin-sdk/channel-core";
 import { createChatChannelPlugin } from "openclaw/plugin-sdk/channel-core";
 import { ademuMessageActions } from "./actions.js";
 import type { ControlLike, EnrollmentLeaseDeps } from "./ceremony.js";
 import { CHANNEL_ID, resolveAdemuAccount, type ResolvedAdemuAccount } from "./config.js";
 import { clearAccountCredentials } from "./enroll-config.js";
+import { abortableSleep } from "./monitor/attach.js";
 import { startAccount, type StartAccountDeps } from "./monitor/index.js";
 import type { RuntimeChannelSurface } from "./monitor/ingress.js";
 import { realSessionDeps } from "./monitor/session.js";
 import { ademuMessageAdapter, ademuMessaging } from "./outbound.js";
 import { createQr } from "./qr.js";
-import { getAdemuRuntime, getAdemuStore, getDaemonManager, getPluginSettings, tryGetAdemuRuntime } from "./runtime.js";
+import { getAdemuRuntime, getAdemuStore, getDaemonAttacher, getPluginSettings, tryGetAdemuRuntime } from "./runtime.js";
 import { ademuSetupBase } from "./setup-plugin.js";
 import type { WizardDeps } from "./setup-wizard.js";
 
@@ -29,24 +30,24 @@ export function realStartAccountDeps(): StartAccountDeps {
   const runtime = getAdemuRuntime();
   return {
     store: getAdemuStore(),
-    daemons: getDaemonManager(hostLog),
+    attacher: getDaemonAttacher(hostLog),
     session: realSessionDeps(hostLog),
     runtime: runtime.channel as unknown as RuntimeChannelSurface,
     settings: getPluginSettings(),
     platform: process.platform,
     now: () => Date.now(),
-    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    sleep: abortableSleep,
     log: hostLog,
   };
 }
 
 export function realEnrollmentLeaseDeps(): EnrollmentLeaseDeps {
   return {
-    // Lazy: tool discovery / inspect must not open the store or build the manager (Codex #18).
-    get daemons() {
-      return getDaemonManager(hostLog);
+    // Lazy: tool discovery / inspect builds nothing (Codex #18).
+    get attacher() {
+      return getDaemonAttacher(hostLog);
     },
-    connectControl: async (socketPath) => (await connectControlReal({ socketPath })) as unknown as ControlLike,
+    connectEnroll: async (socketPath) => (await connectEnrollReal({ socketPath })) as unknown as ControlLike,
     now: () => Date.now(),
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),

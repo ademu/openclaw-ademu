@@ -63,6 +63,9 @@
           "socketPath": {
             "type": "string"
           },
+          "enrollSocketPath": {
+            "type": "string"
+          },
           "server": {
             "type": "object",
             "properties": {
@@ -303,6 +306,16 @@
                 },
                 "socketPath": {
                   "type": "string"
+                },
+                "enrollSocketPath": {
+                  "type": "string"
+                },
+                "daemonScope": {
+                  "type": "string",
+                  "enum": [
+                    "user",
+                    "system"
+                  ]
                 }
               },
               "additionalProperties": false
@@ -318,7 +331,7 @@
         "accounts.*.token": {
           "label": "Device token",
           "sensitive": true,
-          "help": "Minted by the enrollment wizard or the ademu_enroll tool; rotate with adc token rotate."
+          "help": "Minted by the enrollment wizard or the ademu_enroll tool; rotate it at the adc CLI and paste the new token via “I have a device token”."
         },
         "accounts.*.agentName": {
           "label": "Agent name on Ademú"
@@ -343,6 +356,15 @@
           "label": "Device host control socket (override)",
           "advanced": true
         },
+        "accounts.*.enrollSocketPath": {
+          "label": "Device host enrollment socket (override)",
+          "advanced": true
+        },
+        "accounts.*.daemonScope": {
+          "label": "Device host scope (written at enrollment)",
+          "advanced": true,
+          "help": "user: this user's own device host; system: the host's system-wide install. Enrollment writes it, so a system install added later never moves an enrolled account to a device host that does not know its token."
+        },
         "dataDir": {
           "label": "Device host data dir",
           "advanced": true
@@ -351,13 +373,19 @@
           "label": "Device host control socket",
           "advanced": true
         },
-        "server.restBaseUrl": {
-          "label": "Ademú REST base URL",
+        "enrollSocketPath": {
+          "label": "Device host enrollment socket",
           "advanced": true
         },
+        "server.restBaseUrl": {
+          "label": "Ademú REST base URL (deprecated, ignored)",
+          "advanced": true,
+          "help": "Ignored: the device host's own config (~/.config/adc/config.toml) names the server. Removed in a later release."
+        },
         "server.wsUrl": {
-          "label": "Ademú WebSocket URL",
-          "advanced": true
+          "label": "Ademú WebSocket URL (deprecated, ignored)",
+          "advanced": true,
+          "help": "Ignored: the device host's own config (~/.config/adc/config.toml) names the server. Removed in a later release."
         }
       }
     }

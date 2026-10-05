@@ -1,10 +1,10 @@
 // The `ademu_enroll` tool's test world, shared by the tool tests and the enrollment-page tests: a
-// scripted FakeControl, a fake daemon lease/manager, synchronous fake timers, a fake AdcClient, a QR
+// scripted FakeControl, a fake daemon attachment/attacher, synchronous fake timers, a fake AdcClient, a QR
 // stub, a config capture and a browser-open spy.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import type { EnrollmentLeaseDeps } from "../../src/ceremony.js";
-import { DaemonAbortedError, type DaemonManager, type Lease } from "../../src/monitor/daemon.js";
+import { DaemonAbortedError, type Attacher, type Attachment } from "../../src/monitor/attach.js";
 import { createEnrollTool, EnrollmentRegistry, type EnrollToolDeps } from "../../src/tools/enroll.js";
 import { FakeAdcClient, OWNER } from "./adc.js";
 import { FakeControl, NEW_AGENT, NEW_DEVICE } from "./control.js";
@@ -14,19 +14,20 @@ export const tick = (ms = 3) => new Promise((r) => setTimeout(r, ms));
 export function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?: unknown, acquireGate?: Promise<void>) {
   const control = new FakeControl();
   let released = 0;
-  const daemonLease: Lease = {
-    mode: "owned",
+  const attachment: Attachment = {
     role: "setup",
-    identity: { dataDir: "/d" } as never,
-    holderId: "h",
-    info: { controlSocketPath: "/d/adc.sock", sessionSocketPath: "/d/adc-session.sock" },
-    lost: new Promise<never>(() => {}),
+    identity: {
+      dataDir: "/d",
+      raw: { dataDir: "/d", controlSocket: "/d/adc.sock", sessionSocket: "/d/adc-session.sock", enrollSocket: "/d/adc-enroll.sock" },
+      explicit: { dataDir: true, socketPath: false, enrollSocketPath: false },
+      scope: "user",
+    } as never,
+    info: { enrollSocketPath: "/d/adc-enroll.sock", sessionSocketPath: "/d/adc-session.sock" },
     release: async () => void released++,
   };
   const acquires: unknown[] = [];
-  const promotions: string[] = [];
-  const daemons = {
-    acquire: async (p: unknown) => {
+  const attacher = {
+    attach: async (p: unknown) => {
       acquires.push(p);
       if (acquireError) throw acquireError;
       const signal = (p as { signal?: AbortSignal }).signal;
@@ -36,17 +37,14 @@ export function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?:
           new Promise<never>((_, reject) => signal?.addEventListener("abort", () => reject(new DaemonAbortedError()), { once: true })),
         ]);
       }
-      return daemonLease;
+      return attachment;
     },
-    promotePendingPublication: (dataDir: string) => {
-      promotions.push(dataDir);
-      return true;
-    },
-  } as unknown as DaemonManager;
+    resolveSessionSocket: async () => attachment.info.sessionSocketPath,
+  } satisfies Attacher;
   const timers: Array<{ fn: () => void; ms: number }> = [];
   const lease: EnrollmentLeaseDeps = {
-    daemons,
-    connectControl: async () => control,
+    attacher,
+    connectEnroll: async () => control,
     now: () => 0,
     setTimer: (fn, ms) => {
       timers.push({ fn, ms });
@@ -85,5 +83,5 @@ export function world(cfg: OpenClawConfig = {} as OpenClawConfig, acquireError?:
   const signal = new AbortController().signal;
   const call = async (args: Record<string, unknown>, over: Partial<OpenClawPluginToolContext> = {}, sig: AbortSignal | undefined = signal) =>
     tool(over).execute("call-1", args, sig);
-  return { control, deps, registry, tool, call, writes, opens, acquires, promotions, released: () => released, timers, current: () => current };
+  return { control, deps, registry, tool, call, writes, opens, acquires, released: () => released, timers, current: () => current };
 }

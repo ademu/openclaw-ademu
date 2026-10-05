@@ -3,7 +3,7 @@
 // the whole config — the wizard returns the result, the tool hands it to `mutateConfigFile`.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
-import { addOwnerAllowFrom, CHANNEL_ID, listAdemuAccountIds, pruneOwnerAllowFrom } from "./config.js";
+import { addOwnerAllowFrom, CHANNEL_ID, listAdemuAccountIds, pruneOwnerAllowFrom, type DaemonScope } from "./config.js";
 
 export type EnrolledAccountFields = {
   accountId: string;
@@ -13,6 +13,8 @@ export type EnrolledAccountFields = {
   ownerUserId: string;
   /** Plaintext token — written into config once (R5: plain string by default, SecretRef-capable). */
   token: string;
+  /** The scope of the device host that minted the token: the account stays there (`resolveDaemonIdentity` rule 2). */
+  daemonScope: DaemonScope;
   /** R3: also grant the owner `ademu:<ownerUserId>` in commands.ownerAllowFrom. */
   grantOwnerAuthority: boolean;
 };
@@ -32,6 +34,7 @@ export function applyEnrollment(cfg: OpenClawConfig, fields: EnrolledAccountFiel
     agentUserId: fields.agentUserId,
     ownerUserId: fields.ownerUserId,
     token: fields.token,
+    daemonScope: fields.daemonScope,
   };
   let next = {
     ...cfg,

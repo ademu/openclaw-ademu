@@ -12,23 +12,37 @@ export const strings = {
   status: {
     reconnecting: (attempt: number) => `reconnecting to the Ademú device host (attempt ${attempt})`,
     tokenRevoked:
-      "Ademú device token rejected (revoked or rotated). Re-enroll or reconnect this agent: openclaw channels add --channel ademu → Connect an already-enrolled agent.",
+      "Ademú device token rejected (revoked or rotated). Re-enroll or reconnect this agent: openclaw channels add --channel ademu → I have a device token.",
     notEnrolled:
       "This Ademú device is not enrolled yet. Finish enrollment from the Ademú app, or re-run: openclaw channels add --channel ademu.",
     displaced:
       "Another process attached to this Ademú device and took the session. Stop it, then restart this channel.",
     protocolViolation: "The Ademú device host answered with a malformed frame; restart the channel.",
     sessionRejected:
-      "The Ademú device host rejected this session. Check the device in the Ademú app, then reconnect: openclaw channels add --channel ademu → Connect an already-enrolled agent.",
+      "The Ademú device host rejected this session. Check the device in the Ademú app, then reconnect: openclaw channels add --channel ademu → I have a device token.",
     warmupFailed: "reconnected, but the conversation list could not be refreshed; restarting",
     noSessionSocket:
       "The Ademú device host did not report its session socket (too old, or not an adc daemon). Upgrade adc, or point channels.ademu at a current daemon.",
     identityMismatch:
       "The configured Ademú account does not match the device its token belongs to (deviceId/agentUserId/ownerUserId). Fix channels.ademu.accounts or reconnect the agent.",
     unsupportedPlatform: (platform: string) => `Ademú is not available on ${platform} yet.`,
-    daemonUnreachable: (logPath: string | undefined) =>
-      `The Ademú device host is not reachable. Check channels.ademu.server${logPath ? ` and the daemon log at ${logPath}` : ""}.`,
-    daemonLost: "The Ademú device host exited; restarting.",
+    // ----- the installed device host (AdemuMLS #712: the plugin attaches, never runs one) -----
+    adcNotInstalled:
+      "The Ademú device host (adc) is not set up as a background service for the user this OpenClaw gateway runs as. Install adc as that user (the adc installer sets up the service), or, if adc is already installed, run ~/.local/bin/adc service install.",
+    adcServiceDisabled:
+      "The adc background service is disabled for this user (on macOS: System Settings → General → Login Items). Re-enable it, then run ~/.local/bin/adc service start.",
+    adcNotRunning: "The Ademú device host (adc) is not running. Start it: ~/.local/bin/adc service start.",
+    adcNotRunningAt: (enrollSocket: string) =>
+      `Nothing answers at the configured Ademú device host (${enrollSocket}). Start that adc daemon; the plugin never starts one at a configured path.`,
+    adcNotAnswering: (dataDir: string) =>
+      `The adc background service was started but did not answer within 20 seconds. Check ~/.local/bin/adc service status and its log (macOS: ${dataDir}/daemon.log; Linux: journalctl --user -u adc).`,
+    systemDaemonDown: "This host's system-wide Ademú device host is not running. Ask the operator to start it: sudo adc --system service start.",
+    notEnrollSocket: (dialled: string, reported: string) =>
+      `The socket configured as the Ademú enrollment socket (${dialled}) is not the device host's enrollment socket (it reports ${reported}). Fix channels.ademu.enrollSocketPath, or remove it to use the installed service's own.`,
+    adcTooOld: "The Ademú device host (adc) is too old for this plugin. Upgrade it: re-run the adc installer (it restarts the service).",
+    sessionSocketMoved: "The Ademú device host moved its session socket; reconnecting.",
+    privilegeDenied:
+      "This host's Ademú device host refused this user: permission denied on its enrollment socket. Ask the operator to grant access, or point channels.ademu at a device host this user may use.",
     ingressHalted: "Inbound processing halted before a message was adopted; restarting to replay.",
     securityNotice: "An Ademú security notice was raised for a conversation; see the room.",
     configCollision: (detail: string) => detail,
@@ -46,14 +60,18 @@ export const strings = {
     configuredLabel: "enrolled",
     unconfiguredLabel: "not enrolled",
     configuredHint: "An agent is enrolled on Ademú; add another account to enroll a second agent.",
-    startingHost: "Starting the Ademú device host…",
+    startingHost: "Connecting to the Ademú device host…",
     waitingEnrollment: "Waiting for your phone to finish enrollment…",
     mintingToken: "Issuing the device token…",
     modeQuestion: "What do you want to do?",
     modeNew: "Enroll a new agent (scan a QR with the Ademú app)",
-    modeExisting: "Connect an already-enrolled agent",
-    pickDevice: "Which enrolled agent should this account use?",
-    noEnrolledDevices: "No enrolled agents were found on this device host. Choose “Enroll a new agent”.",
+    modeToken: "I have a device token (connect an already-enrolled agent)",
+    tokenPrompt: "Paste the device token (minted with `adc token mint` for the enrolled agent)",
+    tokenEmpty: "A device token is required.",
+    tokenRejected:
+      "The Ademú device host rejected that token (revoked, rotated, or mistyped). Mint a fresh one at the adc CLI for the enrolled agent and paste it again.",
+    attachingSystemDaemon: "Connecting to this host's Ademú device host (system install)…",
+    checkingToken: "Checking the device token with the Ademú device host…",
     agentNamePrompt: "Name for this agent on Ademú",
     agentNameFallback: "Ademú Agent",
     scanTitle: "Scan with the Ademú app",
@@ -65,17 +83,32 @@ export const strings = {
     wordsMismatch: "The words did not match. Enrollment was refused for your safety — nothing was enrolled. Start again when you are ready.",
     ownerGrantConfirm:
       "This makes your Ademú account an OpenClaw owner, so owner-only commands work from your phone. Say no if the phone belongs to someone other than you.",
-    replaceTokenConfirm: "An OpenClaw token for this account already exists on the device. Replace it? The old token stops working.",
     takeoverConfirm: "Another program is attached to this agent right now. Connecting will disconnect it. Continue?",
     enrolled: (name: string) => `Enrolled — ${name} is on Ademú now. Message it from your phone.`,
     connected: (name: string) => `Connected — ${name} answers on Ademú through this account now.`,
     cancelled: "Enrollment cancelled. Nothing was written. Run `openclaw channels add --channel ademu` to try again.",
     notEnrolledDevice: "That agent is not enrolled yet. Finish enrollment from the Ademú app first.",
     deviceAttachedRefused: "Another program is attached to this agent; connection was not forced.",
-    daemonUnreachable: (logPath: string | undefined) =>
-      `The Ademú device host could not start or answer. Check the Ademú server endpoints in channels.ademu.server${logPath ? ` and the daemon log at ${logPath}` : ""}.`,
-    notInstalled:
-      "The Ademú device host binary is not available for this platform. Install the plugin from npm with optional dependencies enabled, or set channels.ademu.socketPath to a running adc daemon.",
+    // ----- the operator's path (hardened host, lost mint, orphaned token; spec M20 b–d) -----
+    operatorSteps: (prefix: string, agentName: string, label: string) =>
+      [
+        "An operator (root, or a member of the adc group) can enroll the agent and hand over its token:",
+        "",
+        `  1. ${prefix} agent add ${agentName}`,
+        "     then scan the QR with the Ademú app and confirm the four safety words on the phone",
+        `  2. ${prefix} token mint <device_id> --label ${label}`,
+        "  3. openclaw channels add --channel ademu → “I have a device token” → paste the token",
+      ].join("\n"),
+    operatorInstructions: (steps: string) =>
+      `Enrollment is not possible from this account on this host: the Ademú device host is a system install and its enrollment socket refused this user. Nothing was created.\n\n${steps}`,
+    quotaFull: (prefix: string, steps: string) =>
+      `The Ademú device host's enrollment budget is full (too many unfinished enrollments on this host). Nothing was created. Cancel stale ones (\`${prefix} agent list\`, then \`${prefix} agent cancel <device_id>\`) or wait for them to expire, then try again.\n\n${steps}`,
+    mintLost: (command: string) =>
+      `Enrollment reached the end, but the device token could not be issued (its reply was lost, or the label is already taken) and that cannot be retried from here. Nothing was written. Mint a fresh token at the CLI:\n\n  ${command}\n\nthen run \`openclaw channels add --channel ademu\` and choose “I have a device token”.`,
+    orphanedToken: (command: string) => `A device token was issued but the configuration was not written, so that token is orphaned. Revoke it:\n\n  ${command}`,
+    enrollSocketUnreachable: (steps: string) =>
+      `The Ademú device host did not answer on its enrollment socket. If it is starting, try again in a moment; if it is not running, start it (~/.local/bin/adc service start, or check channels.ademu.dataDir / enrollSocketPath). Nothing was created.\n\n${steps}`,
+    toolCommitFailed: "The enrollment finished on the device host, but OpenClaw could not write the configuration; nothing was saved.",
     authorityExpired: "Ademú enrollment authority is no longer active.",
     toolDescription:
       "Enroll this agent on Ademú (end-to-end encrypted messaging). Use when the user wants to talk to you on Ademú or asks to enroll or connect the agent to the Ademú app. Actions: start (the plugin opens the enrollment page in a browser on the gateway machine; it shows a QR code and, later, the four safety words with Yes/No), status (where the enrollment stands; re-opens the page if no browser showed it). While an enrollment is in progress, start creates nothing and reports where it stands: only the user can end it, on the page. You are never given the page's address, the QR or the words, and you can neither confirm nor cancel an enrollment: only the user does, on the page.",

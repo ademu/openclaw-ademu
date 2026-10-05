@@ -65,6 +65,9 @@ different words on the phone than on the page. A mismatch means: click No.
 
 ## If the device host is not available
 
-The tool may answer that the Ademú device host (the `adc` daemon) could not start. Do not try to
-install anything yourself. Tell the user what the tool said (usually: check
-`channels.ademu.server` or the daemon log path it names) and stop.
+The plugin uses the Ademú device host (the `adc` daemon) installed on this machine; it never runs
+one itself. The tool may answer that adc is not installed as a background service, is disabled, is
+too old, or did not answer after it asked the system to start it. Tell the user exactly what the
+tool said (it names the command: installing adc as the user this gateway runs as, `adc service
+install`, `adc service start`, or re-running the adc installer) and stop. Do not install, start or
+upgrade anything yourself unless the user asks you to run that exact command.

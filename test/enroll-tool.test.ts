@@ -4,7 +4,8 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { describe, expect, it } from "vitest";
-import { DaemonUnreachableError } from "../src/monitor/daemon.js";
+import { pageStateFor } from "../src/enrollment-page.js";
+import { AdcServiceNotInstalledError } from "../src/monitor/attach.js";
 import { cancelByHuman, confirmByHuman, createEnrollTool, registerEnrollTool, TOOL_NAME } from "../src/tools/enroll.js";
 import { FakeAdcClient, OWNER } from "./fakes/adc.js";
 import { NEW_AGENT, NEW_DEVICE, QR, WORDS } from "./fakes/control.js";
@@ -105,7 +106,8 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
       bindings: unknown[];
     };
     expect(cfg.channels.ademu.enabled).toBe(true);
-    expect(cfg.channels.ademu.accounts.iris).toMatchObject({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_secret_1", agentName: "Iris" });
+    // the scope of the lease the ceremony ran on is recorded with the account
+    expect(cfg.channels.ademu.accounts.iris).toMatchObject({ deviceId: NEW_DEVICE, agentUserId: NEW_AGENT, ownerUserId: OWNER, token: "adc1_secret_1", agentName: "Iris", daemonScope: "user" });
     expect(cfg.commands.ownerAllowFrom).toEqual([`ademu:${OWNER}`]);
     expect(cfg.bindings).toEqual([{ agentId: "main", match: { channel: "ademu", accountId: "iris" } }]);
     expect(w.control.calls.find((c) => c.op === "token_mint")?.params).toEqual({ device_id: NEW_DEVICE, label: "openclaw-iris" });
@@ -148,11 +150,38 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     expect(w.released()).toBe(1);
   });
 
-  it("a duplicate token label on the device this ceremony created is replaced silently (our own earlier attempt)", async () => {
+  it("M20 a/b: daemon_info is read BEFORE the mint; a taken label or a lost mint reply is `mint_lost` — exactly one mint, never replace, nothing written, the fresh-label command named", async () => {
+    const { ControlError, ConnectionClosedError } = await import("@ademu/adc-control");
+    for (const thrown of [new ControlError("label_exists", "x"), new ConnectionClosedError({ op: "token_mint", id: "1" })]) {
+      const w = world();
+      w.control.tokenMintImpl = async () => {
+        throw thrown;
+      };
+      await w.call({ action: "start", agentName: "Iris" });
+      w.control.emit({ words: WORDS });
+      await tick();
+      const yesP = yes(w);
+      await tick(5);
+      w.control.finish("enrolled");
+      const done = await yesP;
+      expect(done).toMatchObject({ ok: false, state: "mint_lost" });
+      expect(done.message).toContain(`token mint ${NEW_DEVICE} --label openclaw-iris-2`);
+      expect(done.message).toContain("I have a device token");
+      expect(done.message).toContain("Nothing was written");
+      const ops = w.control.calls.map((c) => c.op);
+      expect(ops.indexOf("daemon_info")).toBeGreaterThan(-1);
+      expect(ops.indexOf("daemon_info")).toBeLessThan(ops.indexOf("token_mint"));
+      expect(w.control.calls.filter((c) => c.op === "token_mint").map((c) => c.params)).toEqual([{ device_id: NEW_DEVICE, label: "openclaw-iris" }]);
+      expect(w.writes).toHaveLength(0);
+      expect(w.released()).toBe(1);
+      expect(w.registry.size).toBe(0);
+    }
+  });
+
+  it("M20 c: a config write that fails after the mint names the label to revoke", async () => {
     const w = world();
-    w.control.tokenMintImpl = async (p) => {
-      if (!p.replace) throw new (await import("@ademu/adc-control")).ControlError("label_exists", "x");
-      return { token_id: "tid", label: p.label, token: "adc1_rotated", created_at_ms: 1 };
+    w.deps.writeConfig = async () => {
+      throw new Error("disk full");
     };
     await w.call({ action: "start", agentName: "Iris" });
     w.control.emit({ words: WORDS });
@@ -161,14 +190,40 @@ describe("ademu_enroll: the ceremony (start → the human's yes / no → outcome
     await tick(5);
     w.control.finish("enrolled");
     const done = await yesP;
-    expect(done).toMatchObject({ ok: true, state: "done" });
-    expect(done.message).not.toMatch(/token/i);
-    expect((w.current() as unknown as { channels: { ademu: { accounts: { iris: { token: string } } } } }).channels.ademu.accounts.iris.token).toBe("adc1_rotated");
-    expect(w.control.calls.filter((c) => c.op === "token_mint").map((c) => c.params)).toEqual([
-      { device_id: NEW_DEVICE, label: "openclaw-iris" },
-      { device_id: NEW_DEVICE, label: "openclaw-iris", replace: true },
-    ]);
-    expect(w.writes).toHaveLength(1);
+    expect(done).toMatchObject({ ok: false, state: "commit_failed" });
+    expect(done.message).toContain("could not write the configuration");
+    expect(done.message).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
+    expect(w.control.calls.filter((c) => c.op === "token_mint")).toHaveLength(1);
+    expect(w.released()).toBe(1);
+    expect(w.registry.size).toBe(0);
+  });
+
+  it("M20 d: a hardened host (PrivilegeError at acquisition) answers with the operator ceremony for THIS host, ok:false, never throws", async () => {
+    const { PrivilegeError } = await import("@ademu/adc-control");
+    const w = world({} as never, new PrivilegeError("permission denied opening the enrollment socket at /run/adc/adc-enroll.sock", "permission_denied"));
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(r.details).toMatchObject({ ok: false, state: "unavailable" });
+    const msg = r.content[0]!.text;
+    expect(msg).toContain("agent add 'Iris'");
+    expect(msg).toContain("token mint <device_id> --label openclaw-iris");
+    expect(msg).toContain("I have a device token");
+    expect(msg).not.toContain("permission denied opening");
+    expect(w.registry.size).toBe(0);
+  });
+
+  it("a full enrollment budget (enroll_quota) at create_device: nothing created, the lease disposed, the quota copy with the operator ceremony", async () => {
+    const { ControlError } = await import("@ademu/adc-control");
+    const w = world();
+    w.control.createDeviceImpl = async () => {
+      throw new ControlError("enroll_quota", "full");
+    };
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(r.details).toMatchObject({ ok: false, state: "unavailable" });
+    expect(r.content[0]!.text).toContain("enrollment budget is full");
+    expect(r.content[0]!.text).toContain("agent cancel");
+    expect(w.opens).toHaveLength(0);
+    expect(w.released()).toBe(1);
+    expect(w.registry.size).toBe(0);
   });
 
   it("a words mismatch (the daemon refuses the human's yes) disposes the lease and reports without writing", async () => {
@@ -407,7 +462,7 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.control.calls.some((c) => c.op === "cancel_pairing")).toBe(true);
   });
 
-  it("#14 a non-retryable failure during the yes (mint error) disposes the lease; a retryable one (device attached) keeps it", async () => {
+  it("#14 a failure during the yes (mint error) disposes the lease; a device attached after the mint is terminal too (the mint closed the ceremony) and names the label", async () => {
     const w = world();
     w.control.tokenMintImpl = async () => {
       throw new Error("mint exploded");
@@ -422,13 +477,31 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.registry.size).toBe(0);
     expect(w.released()).toBe(1);
     expect((await w.call({ action: "status" })).details.state).toBe("failed");
+
+    const { AlreadyAttachedError } = await import("@ademu/adc-client");
+    const a = world();
+    a.deps.connectSession = async () => {
+      throw new AlreadyAttachedError();
+    };
+    await a.call({ action: "start", agentName: "Iris" });
+    a.control.emit({ words: WORDS });
+    await tick();
+    const yesA = yes(a);
+    await tick(5);
+    a.control.finish("enrolled");
+    const r = await yesA;
+    expect(r).toMatchObject({ ok: false, state: "device_attached" });
+    expect(r.message).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
+    expect(a.registry.size).toBe(0);
+    expect(a.released()).toBe(1);
   });
 
-  it("#15 a known acquisition failure returns fixed remedy text (ok:false), never throws, never installs", async () => {
-    const w = world({} as OpenClawConfig, new DaemonUnreachableError("no daemon", "/var/log/adc.log"));
+  it("#15 a known attach failure returns fixed remedy text (ok:false), never throws, never installs", async () => {
+    const layout = { dataDir: "/d", enrollSocketPath: "/d/adc-enroll.sock" } as never;
+    const w = world({} as OpenClawConfig, new AdcServiceNotInstalledError(layout));
     const r = await w.call({ action: "start", agentName: "Iris" });
     expect(r.details).toMatchObject({ ok: false, state: "unavailable" });
-    expect(r.content[0]!.text).toContain("/var/log/adc.log");
+    expect(r.content[0]!.text).toContain("~/.local/bin/adc service install");
     expect(w.registry.size).toBe(0);
   });
 
@@ -560,8 +633,41 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     releaseProbe();
     const result = await yesP;
     expect(result).toMatchObject({ ok: false, state: "cancelled" });
+    // Codex branch pass 3: the token was minted before the NO — the yes's answer names it for revocation.
+    expect(result.message).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
+    // Codex branch pass 4: the page's next poll (or a reload) keeps the instruction — it is the
+    // enrollment's persisted outcome, not only the /confirm reply.
+    const polled = await pageStateFor(entry, w.deps.qr);
+    expect(polled).toMatchObject({ phase: "failed" });
+    expect((polled as { message: string }).message).toContain(`token revoke ${NEW_DEVICE} --label openclaw-iris`);
     expect(w.writes).toHaveLength(0);
     expect(w.released()).toBe(1);
+  });
+
+  it("close-out consult: the ceremony's own enrollment connection must be the daemon's enrollment socket (fail closed) — refused before any device", async () => {
+    for (const enroll_socket_path of ["/d/adc.sock", undefined]) {
+      const w = world();
+      const info = { ...w.control.info } as Record<string, unknown>;
+      if (enroll_socket_path === undefined) delete info.enroll_socket_path;
+      else info.enroll_socket_path = enroll_socket_path;
+      w.control.info = info as typeof w.control.info;
+      const r = await w.call({ action: "start", agentName: "Iris" });
+      expect(r.details, String(enroll_socket_path)).toMatchObject({ ok: false });
+      expect(w.control.calls.some((c) => c.op === "create_device")).toBe(false);
+      expect(w.writes).toHaveLength(0);
+      expect(w.control.closed).toBeGreaterThan(0);
+      expect(w.released()).toBe(1);
+    }
+  });
+
+  it("Codex branch pass 5: an enrollment socket configured as the control socket is refused at start — no attach, no socket call, no write", async () => {
+    const w = world({ channels: { ademu: { dataDir: "/d", enrollSocketPath: "/d/adc.sock" } } } as unknown as OpenClawConfig);
+    const r = await w.call({ action: "start", agentName: "Iris" });
+    expect(r.details).toMatchObject({ ok: false, state: "config_error" });
+    expect(r.content[0]!.text).toMatch(/must differ/);
+    expect(w.acquires).toEqual([]);
+    expect(w.control.calls).toEqual([]);
+    expect(w.writes).toHaveLength(0);
   });
 
   it("R4#1 a NO that lands after the words were confirmed but before the mint wins: no mint, no write", async () => {
@@ -577,6 +683,8 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(r).toMatchObject({ ok: true, state: "cancelled" });
     const result = await yesP;
     expect(result).toMatchObject({ ok: false, state: "cancelled" });
+    expect(result.message).not.toContain("token revoke"); // nothing was minted: nothing to revoke
+    expect(JSON.stringify(await pageStateFor(entry, w.deps.qr))).not.toContain("token revoke");
     expect(w.control.calls.some((c) => c.op === "token_mint")).toBe(false);
     expect(w.writes).toHaveLength(0);
     expect(w.released()).toBe(1);
@@ -703,15 +811,4 @@ describe("ademu_enroll: Codex branch-review folds", () => {
     expect(w.released()).toBe(1);
   });
 
-  it("#10 after the config write the setup-spawned daemon is promoted (pending-publication → bound)", async () => {
-    const w = world();
-    await w.call({ action: "start", agentName: "Iris" });
-    w.control.emit({ words: WORDS });
-    await tick();
-    const yesP = yes(w);
-    await tick(5);
-    w.control.finish("enrolled");
-    await yesP;
-    expect(w.promotions).toEqual(["/d"]);
-  });
 });

@@ -71,8 +71,9 @@ enrollments stay readable (bounded `#recent`) so the page renders its outcome an
 after a page-side yes says "done" instead of "nothing in progress". The wizard's hosted path keeps
 using the SDK's own hook for this idea, `prompter.openUrl` (V22).
 
-**Instruct-only install.** If the bundled binary is missing for a platform, the plugin says so and
-stops; it never downloads or installs anything on its own.
+**Instruct-only install.** The plugin bundles no daemon (AdemuMLS #712): when adc is not installed,
+not set up as a service, or too old, it says so and names the command; it never downloads, installs,
+starts on its own, stops or upgrades anything.
 
 **Decision 7 — release channel.** The plugin pins `openclaw@2026.9.1` as its build host and tracks
 `openclaw@beta` nightly (informational). Footnote, owner-ratified: the *derived* floor (2026.8.1)
@@ -271,72 +272,96 @@ on is only "core has taken durable ownership of the message's disposition at ado
 B is valid in both tiers. Two asks: a terminal disposition on `ChannelTurnResult`, and forwarding
 `onSettled` (or a deferred-completion handle) through `bindIngressLifecycleToReplyOptions`.
 
-## 4. The daemon — ownership, identity, lifecycle
+## 4. The daemon — identity and attachment
+
+**The plugin never runs a device host (AdemuMLS #712, `DECISIONS.md` §7.5).** It attaches to the adc
+the user installed as an OS-managed service (`adc service install`, which the adc installer runs by
+default) or to a system install, and never spawns, stops, kills or upgrades a daemon. There is no
+ownership record, no holder accounting and no bundled binary; `@ademu/adc-bin` is not a dependency.
+`src/monitor/attach.ts` is the whole mechanism.
 
 **Identity.** A daemon is identified by the canonicalized pair `(dataDir, controlSocket)` (realpath of
-the deepest existing ancestor + verbatim tail, because Ademú joins paths verbatim). Cross-axis
-collisions across accounts (one data dir with two sockets, one socket for two data dirs) are a config
-validation error that blocks `startAccount`. The **session** socket is what `daemon_info`
-reports whenever a daemon is reachable — never re-derived then (a squatter on a derived path would
-receive the bearer token); only an *unreachable* foreign acquisition keeps the deterministic configured
-path, and its session connect then fails until the daemon answers.
+the deepest existing ancestor + verbatim tail, because Ademú joins paths verbatim), plus its
+**enrollment socket** and a **scope**. With no explicit key the user-scope identity is the installed
+user service's layout (`@ademu/adc-control` `userServiceLayout`): the data dir read from the
+service's unit (`--data-dir` in the plist's `ProgramArguments` or the systemd `ExecStart=`), and all
+three sockets under it — `adc service install` pins them there, so `$XDG_RUNTIME_DIR` never moves one.
+An explicit `dataDir` keeps every socket under it; `socketPath`/`enrollSocketPath` override. Cross-axis
+collisions across accounts and a socket-role error (the enrollment socket naming the control or
+session socket) are config validation errors that block `startAccount` and the doors. The **session**
+socket is what `daemon_info` reports whenever a daemon is reachable — never re-derived then (a squatter
+on a derived path would receive the bearer token, `adc/PROTOCOL.md`); only when nothing answers does
+the identity's own path stand in.
 
-**Default isolation (approval rider R2).** Default `dataDir` = `<OPENCLAW_STATE_DIR>/ademu/adc`,
-control socket `<dataDir>/adc.sock`, session socket `<dataDir>/adc-session.sock`. Every owned spawn
-receives `ADC_DATA_DIR`, `ADC_SOCKET_PATH`, `ADC_SESSION_SOCKET_PATH` (all three — the Linux
-`$XDG_RUNTIME_DIR` rungs would otherwise collide with an operator daemon) plus `ADC_REST_BASE_URL` /
-`ADC_WS_URL` from `channels.ademu.server` (defaults = Ademú production; **R11** — a fresh plugin data
-dir has no `config.toml` and the daemon refuses to start without endpoints). An operator's own `adc`
-(e.g. `~/.local/share/adc`) is reached only by explicit config.
+**The plugin never opens the control socket.** The probe dials the ENROLLMENT socket
+(`connectEnroll`, `daemon_info`); the ceremony half opens only that socket (the seven ceremony ops,
+pinned to the device the connection created, one terminal mint); the runtime half opens only the
+session socket with the token. `PrivilegeError` (EACCES/EPERM) from the probe is "a daemon exists that
+this uid may not open" — never read as absent; `remedyFor` turns it into the operator ceremony,
+`classifyError` into `blocked`. The one exception to "never the control socket" is a connect-and-close
+(no byte spoken) on the control socket path when the enrollment socket is absent, to recognise a
+daemon from before the enrollment socket.
 
-**Durable ownership, two modes.** The ownership record is a row in the plugin's SQLite DB
-(`daemon_ownership`, keyed by canonical data dir) with a **closed** state enum
-`claimed | starting | pending-publication | bound | stopping | stopped | stale` and a generation counter
-(compare-and-swap on every transition). *Owned* (a bound row whose live facts — `data_dir`,
-`socket_path`, `session_socket_path`, `started_at_ms`, pid + pid start time, `adc daemon run` command
-— all match): the plugin may spawn, stop, respawn, and upgrade. *Foreign* (no row, or facts that do not
-match): **attach-only** — never spawn, never stop, never upgrade; on loss the status is `recovering`
-while the client's reconnect loop probes. Losing the DB degrades an owned daemon to foreign — the safe
-direction.
+**Scope `system`.** With nothing configured and the client's `detectSystemInstall()` firing (the
+platform's root-owned config AND its enrollment socket), the identity IS the system layout
+(`systemLayout(platform)`: Linux `/run/adc`, macOS `/private/var/db/adc/run`). It is attach-only: the
+probe decides only the session path, a refused enrollment socket still yields the attachment, and
+nothing is ever started. The recorded scope (`daemonScope`, written by both doors) keeps an account on
+the device host that minted its token: an explicit key → user scope at those paths; the recorded scope
+→ that scope whatever the host looks like now; nothing → the detector. The doors resolve with the
+recorded scope ignored, so re-enrolling is how an agent moves.
 
-**Roles and the fence.** A terminal wizard runs in the CLI process, so in-memory refcounts cannot see
-every user of a daemon; cross-process accounting lives in `daemon_holders` (heartbeat every 30 s, stale
-after 90 s or a dead pid). Only the gateway runtime (`role: "runtime"`) may stop a daemon, and only
-through an **atomic shutdown fence**: one transaction sweeps stale holders and, if none remain, CASes
-`bound → stopping`; acquisitions fail while `stopping`. Setup leases (wizard, tool) may spawn but never
-stop — an idle owned daemon is harmless and is adopted by the runtime later (`pending-publication →
-bound` promotion by the runtime's acquire; a 1 h sweep for never-published ones, through the same
-fence). Stop sequence: control `shutdown` op (the daemon's own verb; it is daemon-global, acceptable
-only because an owned data dir hosts nothing but this plugin's devices) → SIGTERM → SIGKILL, hard-capped
-at 2500 ms; still alive at the cap → `stale`.
+**Runtime role** (`startAccount`). Probe the enrollment socket once and attach — the reported session
+socket when it answers, else the identity's own path. The runtime never starts a service: a
+deliberate `adc service stop` is respected, and at login adc and the gateway start together. When
+nothing answered, the attachment carries why (`not_installed` / `disabled` / `not_running` /
+`system_down`, from the installed unit and, on launchd, `print-disabled`). A first session open that
+finds no listener (`ENOENT` / `ECONNREFUSED`) shows that copy while `recovering` and **waits in the
+task** — 2 s doubling to 30 s, then attaches again — instead of throwing. Thrown, the account
+belongs to the host: its restart loop gives up after 10 attempts (5 s → 300 s backoff, ~25 min), then
+only the health monitor brings it back (checks every 5 min, 10-min cooldown, ≤ 10 restarts an hour),
+and every exit replaces the status with the raw connect error, so the X1–X5 reason never shows and an
+adc that returns waits up to ~10 min for the account (#712 live leg, 2026-10-02). Once seated, the client's reconnect loop rides
+out a daemon restart. Every `REPROBE_AFTER_ATTEMPTS` (5) failed reconnects, for the whole
+outage and never two at once, the session path is re-resolved; a device host that came back on another session socket
+ends the lifetime (`SessionSocketMovedError`) so a fresh attachment takes the new path.
 
-**Signal divergence, recorded.** Signal's plugin owns its daemon unconditionally; we attach-if-running
-(adc is single-instance per socket) and decide owned/foreign before ever calling `ensureDaemon`.
+**Setup role** (the wizard, `ademu_enroll`). Probe; a current daemon attaches. A daemon below
+`MIN_ADC_VERSION` (0.6.0 — the first whose user service pins all three sockets under the data dir) is
+`AdcTooOldError` (`blocked`: re-run the installer). No enrollment socket but a control socket that
+accepts a connect is too old as well. Nothing answering, and the identity's enrollment socket IS the
+installed user service's: if the unit is absent → `AdcServiceNotInstalledError`; disabled →
+`AdcServiceNotAnsweringError(disabled)`; else the authority re-check (`beforeEffect`) runs, then
+`startUserService` asks the service manager to start the INSTALLED unit — launchd `print` →
+`bootstrap` when unloaded (`adc service stop` is a bootout) → `kickstart` without `-k`; systemd
+`systemctl --user --no-block start adc.service` — and the enrollment socket is polled for up to 20 s
+(abort-aware). An explicit path that is not the service's own, and a system install, are never
+started (`DaemonUnreachableError` with our own copy).
 
-**Upgrade.** Bundled `@ademu/adc-bin` version ≠ the bound daemon's parsed leading semver
-(`"0.2.4 (abc)"` → `0.2.4`; unparsable → never) → stop through the fence → respawn under a new
-generation. Runtime role only.
+**Signal divergence, recorded.** Signal's plugin owns its daemon unconditionally; we never own one —
+the daemon is the user's installed service.
 
 ## 5. The account lifecycle (`startAccount`)
 
 `starting` → preflight (disabled → stopped; identity collision / Windows / not configured → `blocked`)
-→ acquire a runtime lease → open the session (`connect({ takeover: true, reconnect: "auto" })`, then
+→ attach (runtime role, §4) → open the session (`connect({ takeover: true, reconnect: "auto" })`, then
 **identity binding fails closed**: `hello.device_id === self.device_id === account.deviceId`, the agent
 user ids agree, and the owner matches when configured) → warm the members cache → start the ingress
-loop → `ready` → race `[abort, loop lifetime, lease loss]`.
+loop → `ready` → race `[abort, loop lifetime, a moved session socket]`.
 
 **Outcome contract with the gateway supervisor.** Return normally for *abort* and for *blocked*
 (user-actionable, a restart cannot fix it: token revoked/rotated, device not enrolled, displaced by
 another mind, protocol violation, identity mismatch, unsupported platform). Throw for *restart*
-(daemon lost, ingress halted, transient failures) so the supervisor re-runs the account. `blocked` is
-sticky in OpenClaw until a gateway restart or an explicit ready patch, so it is used only for those
-cases; everything else is `recovering`. Foreign daemons never reject on daemon loss.
+(ingress halted, transient failures) so the supervisor re-runs the account; a device host with no
+listener on the session socket is waited for in the task (§4), never thrown to the supervisor. `blocked` is sticky in OpenClaw until a gateway restart or an explicit ready patch, so it is
+used only for those cases; everything else is `recovering`. The attachment never rejects on its own:
+the client's reconnect loop probes while the status is `recovering`.
 
 **Cleanup under one absolute deadline (K3).** The host abandons a stop at 5 s; we finish in ≤ 4500 ms by
 construction: stop the loop and abort only *un-adopted* turns (adopted ones inherit the lifecycle abort
 signal into execution — we never abort those, they are already acked) → wait for adopted deliveries up
 to `min(2000, remaining − 2500)` ms → close the session → release the lease within the reserved
-2500 ms tail (awaited, never detached; a later acquire of the same identity awaits the release).
+2500 ms tail (awaited, never detached).
 Recorded limitation: a gateway restart mid-turn can lose that turn's *reply*, never the message.
 
 **Status vocabulary** is one closed table from error classes to patches; `lastError` is always our own
@@ -359,7 +384,8 @@ daemon relays each tick as one frame (adc 0.3.0, AdemuMLS#621); no heartbeat typ
 
 ## 7. Configuration, secrets, owner authority
 
-- `channels.ademu` — root-level `dataDir`/`socketPath`/`server` inherited by accounts; `groups.<id>`
+- `channels.ademu` — root-level `dataDir`/`socketPath`/`enrollSocketPath` inherited by accounts (`server` is
+  accepted and ignored since #712: the device host's own config names the servers); `groups.<id>`
   (`requireMention`, `toolsBySender`, …); `accounts.<id>` with `agentName`, `deviceId`, `agentUserId`,
   `ownerUserId`, `token` (plain string by default — the wizard writes it — or a SecretRef;
   `uiHints` marks it sensitive). Schema built with `buildMultiAccountChannelSchema`, hybrid config
@@ -390,8 +416,24 @@ daemon relays each tick as one frame (adc 0.3.0, AdemuMLS#621); no heartbeat typ
   `AGENT_SELECTION_REQUIRED` → ingress halts before adoption → the account restart-loops with gray
   ticks and no reply; with implicit ownership the message reaches the default agent instead.
 - No `auth.login`: OpenClaw's login path may not mutate channel config. Reconnecting an enrolled device
-  is the wizard's "Connect an already-enrolled agent" (mints a new token under the same label; an
-  existing label asks for explicit replace consent → `replace: true`).
+  is the wizard's **"I have a device token"** (Phase B, 2026-09-30): an operator mints the token at the
+  CLI (`adc [--system] token mint <device_id> --label openclaw-<accountId>`), the wizard takes it as a
+  sensitive text before any daemon lease, checks it over the session socket (`get_self`; hello and self
+  must agree), and writes the account. No `list_devices`, no mint over the control socket, no replace
+  consent: the enrollment socket mints at most one token per device and refuses `replace`. The three
+  failure dispositions the plugin owes (spec M20): `daemon_info` is read before the mint (the mint
+  closes the connection); a lost mint reply or a taken label ends as `mint_lost` with the
+  mint-a-fresh-label instruction, never a `replace` retry; a config write that fails after the mint
+  names the label to revoke (the chat door returns `commit_failed`, and the page's failed screen shows
+  the same instruction; a wizard failure past the mint shows it whatever the error; the host's own
+  save of the returned config happens after `finalize` and is outside the plugin — a documented
+  residual); a hardened host with no ceremony possible (refused socket, full quota, an absent or silent
+  enrollment socket) prints the operator ceremony. The token door ignores an enrollment-socket refusal
+  at acquisition and probes the identity's own session socket without a lease. All copy is composed
+  from the daemon identity in `src/operator.ts` — `sudo adc --system` or `ADC_DATA_DIR` +
+  `ADC_SOCKET_PATH`, paths and names single-quoted — never from the client's message. On a detected
+  system install the broker keeps a refused enrollment socket from blocking a running account (the
+  session socket is its door; the refusal is logged); at user scope it is `blocked`.
 - Windows: guarded before any socket resolver (`process.geteuid` is absent there) → `blocked`.
 
 ## 8. Privacy
@@ -442,8 +484,9 @@ edit/unsend; residual R10 (at-most-once for callback-free zero-output completion
 
 ## 11. Versioning
 
-Semver from **0.1.0**. Each release pins the exact `@ademu/adc-bin` it was tested with (gate:
-dependency is exact). Plugin version bump = `package.json` + `CHANGELOG.md` + the version line below
+Semver from **0.1.0**. The plugin bundles no daemon (AdemuMLS #712): each release names the minimum
+adc it needs (gate: no `@ademu/adc-bin` dependency, and the CHANGELOG's "Requires adc ≥ X" equals
+`MIN_ADC_VERSION`). Releases up to 0.1.0 pinned the exact `@ademu/adc-bin` they were tested with. Plugin version bump = `package.json` + `CHANGELOG.md` + the version line below
 (gate: the three agree). **`beta.yml` went red — procedure:** (1) open an issue
 `beta: <symbol/subpath> — <what changed>` with the failing gate output; (2) check the beta's
 `plugin-sdk-subpath-records.ts` and `docs/plugins/sdk-migration.md` for the removal-ledger entry naming
@@ -725,3 +768,19 @@ the VPS (no production daemon there) — the Mac hazard remains recorded for leg
 ademu/openclaw-ademu issues #2 (leg 4 re-test), #3 (leg 5), #4 (leg 6 rotation step), #5 (leg 7),
 #6 (leg 8, Mac-only foreign mode), #7 (launch hardening: reply lost when the gateway restarts after
 adoption), #8 (acceptance lane: inspect with no account — would have caught finding #1).
+
+## 14. Attach-only (2026-10-02, AdemuMLS #712)
+
+The owner reversed `DECISIONS.md` §7.5: the plugin no longer bundles, spawns, owns, stops or upgrades
+an adc daemon; it attaches to the installed user service or a system install (§4). Why: the
+plugin-owned daemon was the source of most upgrade defects — a binary per install generation, a
+downgrade on a plugin rollback, the adc-bin 0.3.0 pin under a 0.5.0 floor on draft PR #13 — and adc
+now has one upgrade path (re-run the installer, which restarts the service). Kept: the multi-harness
+case (every harness attach-only) and "a plugin never migrates an operator's registry" (it never runs
+an adc binary). Given up: the zero-install path — an OpenClaw user installs adc first (plugin installs
+run with `--ignore-scripts`). Built on two PRs off main: the enrollment page (the
+`feature/adc-ceremony-web-page` commits), then attach-only (#13's enrollment-socket ceremony, token
+door, system attach and `daemonScope`, without its spawn/ownership/upgrade code; `daemon.ts`, the
+ownership tables and `@ademu/adc-bin` deleted). No migration for agents enrolled on the old
+plugin-owned data dir (no real users). Spec, probe and plan: AdemuMLS
+`docs/superpowers/{specs,plans}/2026-10-02-adc-user-service-attach.md`.
