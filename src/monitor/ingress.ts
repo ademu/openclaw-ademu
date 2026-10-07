@@ -3,7 +3,8 @@
 // One sequential loop per account owns the AdcClient event iterator and produces the session's
 // `lifetime`. Per `message_received`: validate → watermark replay check → self-sent → decision-only
 // access → mention decision → route → context-bound access → buildContext → dispatch with an
-// AdoptionTracker (whose `onAdopted` commits the watermark) → await the tracker → ack.
+// AdoptionTracker (whose `onAdopted` commits the watermark) → await the tracker → ack. A non-text
+// `ct` takes the same path with a described body (`content.ts`); nothing here waits for a file.
 //
 // Acks are CUMULATIVE and carry read-receipt weight, so: N+1 is never dispatched before N settled;
 // gated/malformed/self-sent/replayed messages ack immediately after the decision; any pre-adoption
@@ -32,6 +33,7 @@ import {
 import { IngressHaltedError, IngressProtocolError } from "../status.js";
 import type { AdemuStore } from "../store.js";
 import { AdoptionFailedError, AdoptionTracker, type TurnResultLike } from "./adoption.js";
+import { bodyForAgent, describeContent, escapeRuntimeContextDelimiters } from "./content.js";
 import type { Session } from "./session.js";
 
 export const MAX_INFLIGHT = 4;
@@ -165,8 +167,13 @@ export function startIngress(params: IngressParams): IngressHandle {
     const isGroup = shape.kind === "group";
     const senderRole = resolveSenderRole(ev.sender_user_id, params.account.ownerUserId);
     const sender = members.find((m) => normalizeId(m.user_id) === normalizeId(ev.sender_user_id));
-    const commandRequested = runtime.commands.shouldComputeCommandAuthorized(ev.body, cfg);
-    const isTextCommand = runtime.commands.isControlCommandMessage(ev.body, cfg);
+    // A non-text message (a file, or a kind this plugin does not handle) is never a command; its
+    // caption still counts for the mention decision below.
+    const content = describeContent(ev);
+    // Sender-controlled text never reaches the host with OpenClaw's runtime-context delimiters (content.ts).
+    const body = escapeRuntimeContextDelimiters(ev.body);
+    const commandRequested = content.kind === "text" && runtime.commands.shouldComputeCommandAuthorized(body, cfg);
+    const isTextCommand = content.kind === "text" && runtime.commands.isControlCommandMessage(body, cfg);
 
     // 4. Decision-only access (cheap drop of strangers in DMs).
     const pre = await resolveMessageAccess({
@@ -190,7 +197,7 @@ export function startIngress(params: IngressParams): IngressHandle {
       peer: { kind: shape.kind, id: conversationId },
     });
     const wasMentioned = computeWasMentioned({
-      text: ev.body,
+      text: body,
       senderRole,
       names,
       mentionRegexes: openclawMentionRegexes(cfg, route.agentId),
@@ -223,8 +230,9 @@ export function startIngress(params: IngressParams): IngressHandle {
       return;
     }
     // 7. Context (Tlon/SMS projection).
-    const senderName = sender ? displayNameOf(sender) : undefined;
-    const label = describeConversation(shape, params.account.agentName);
+    const described = content.kind === "text" ? undefined : bodyForAgent(body, content);
+    const senderName = sender ? escapeRuntimeContextDelimiters(displayNameOf(sender)) : undefined;
+    const label = escapeRuntimeContextDelimiters(describeConversation(shape, params.account.agentName));
     const ctxPayload = runtime.inbound.buildContext({
       channel: CHANNEL_ID,
       accountId,
@@ -234,7 +242,7 @@ export function startIngress(params: IngressParams): IngressHandle {
       sender: {
         id: normalizeId(ev.sender_user_id),
         ...(senderName ? { name: senderName } : {}),
-        ...(sender?.username ? { username: sender.username } : {}),
+        ...(sender?.username ? { username: escapeRuntimeContextDelimiters(sender.username) } : {}),
         roles: [senderRole],
         isBot: sender?.kind === "agent",
       },
@@ -254,10 +262,7 @@ export function startIngress(params: IngressParams): IngressHandle {
         to: `${CHANNEL_ID}:${conversationId}`,
         originatingTo: `${CHANNEL_ID}:${conversationId}`,
       },
-      message: {
-        rawBody: ev.body,
-        commandBody: ev.body,
-      },
+      message: described === undefined ? { rawBody: body, commandBody: body } : { rawBody: described, bodyForAgent: described, commandBody: described },
       access: {
         mentions: {
           canDetectMention: true,
@@ -268,7 +273,7 @@ export function startIngress(params: IngressParams): IngressHandle {
         },
         ...(commandRequested ? { commands: { authorized: access.commandAccess.authorized } } : {}),
       },
-      ...(isTextCommand ? { command: { kind: "text-slash", body: ev.body, authorized: access.commandAccess.authorized } } : {}),
+      ...(isTextCommand ? { command: { kind: "text-slash", body, authorized: access.commandAccess.authorized } } : {}),
       channelIngress: access,
       extra: { SenderRole: senderRole },
     });

@@ -479,8 +479,8 @@ bait-tree self-test).
 
 SDK durable ingress queue (trust-gated; Tier C note); Control UI QR parity (`loginWithQrStart/Wait`
 has no words step); `auth.login`; `accountScopedRestart`; ambient `room_event` injection; a proper
-icon (the shipped one is generated); npm/ClawHub publishing (launch calendar); Windows; media, threads,
-edit/unsend; residual R10 (at-most-once for callback-free zero-output completions). Using the enrollment page from the wizard's hosted (Control UI) path; an https universal link for the enrollment payload (Ademú side) so phone-only users on Telegram can tap it; nothing typed by the user beyond that.
+icon (the shipped one is generated); npm/ClawHub publishing (launch calendar); Windows; opening and
+sending media (receiving is described, §15; #22, #23), threads, edit/unsend; residual R10 (at-most-once for callback-free zero-output completions). Using the enrollment page from the wizard's hosted (Control UI) path; an https universal link for the enrollment payload (Ademú side) so phone-only users on Telegram can tap it; nothing typed by the user beyond that.
 
 ## 11. Versioning
 
@@ -784,3 +784,30 @@ door, system attach and `daemonScope`, without its spawn/ownership/upgrade code;
 ownership tables and `@ademu/adc-bin` deleted). No migration for agents enrolled on the old
 plugin-owned data dir (no real users). Spec, probe and plan: AdemuMLS
 `docs/superpowers/{specs,plans}/2026-10-02-adc-user-service-attach.md`.
+
+## 15. Media receive, step 1: dispatch on `ct` (2026-10-06, openclaw-ademu #22, AdemuMLS #440)
+
+A daemon that serves media (AdemuMLS #440) delivers a received file as `message_received` with
+`ct:"media"`, `body` = the caption (often empty) and `media[]` metadata; the bytes stay in the
+daemon. Before this step the plugin ignored `ct`, so a photo reached the agent as a caption-only or
+empty turn. Now ingress dispatches on `ct` (`src/monitor/content.ts`): `text`, or a frame without `ct`,
+takes the path it always took; `media` and any other `ct` take the same path — mention decision,
+access, dispatch, adoption, ack — with a described body. The description is one line per file
+(kind, position in an album, sanitized filename, size), then the caption, in `rawBody`,
+`bodyForAgent` and `commandBody`: OpenClaw drops media facts that carry no path or url, so the text is
+the only way the agent learns of a file, and with the lines first no caption can make the turn read as
+a slash command. Non-text messages are never commands; the caption alone decides the mention, so a
+guest's captionless photo in a room is skipped and acked like an unaddressed text. A sender-chosen
+filename loses control and format characters and brackets and is bounded at 80 characters.
+Every sender-controlled string the plugin hands OpenClaw — message text and captions, filenames,
+display names, usernames and the room label built from them — has OpenClaw's runtime-context
+delimiters (`<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>`, `<<<END_OPENCLAW_INTERNAL_CONTEXT>>>`) replaced
+with OpenClaw's own escaped forms: before 2026.9.3 the host did not escape inbound text and lifted any
+such block in a turn's prompt into hidden runtime context (openclaw/openclaw#140404), so a sender
+could forge one. The escaping does not depend on the host version.
+
+Nothing waits for a file in ingress: the loop's single seq order, the cumulative ack and the one
+watermark (§2 R2b) are unchanged, and a media message is acked at adoption like text. Step 2 adds the
+`ademu_get_media` tool, which reads a file inside the agent's own turn (`getBlob` acks nothing and
+uses no seq, and the daemon keeps files permanently), and points the description at it when the
+daemon advertises `get_blob`. Until then the description says this channel can't open files yet.
