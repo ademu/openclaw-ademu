@@ -197,6 +197,14 @@ A device host older than adc 0.6.0 — or one without the enrollment socket — 
   live under `channels.ademu.groups.<conversationId>` (`requireMention`, `toolsBySender`, …).
 - **Sending proactively:** the `message` tool with `channel: "ademu"` and a conversation id
   (`ademu:<uuid>` or the bare UUID). Reactions: `action: "react"`.
+- **Files people send** (photos, videos, voice notes, files): the agent sees one line per file and
+  the caption; the bytes stay with the device host. The agent opens a file with the
+  `ademu_get_media` tool inside its turn — a photo comes back as an image, any other file is saved
+  under OpenClaw's media store (`media/inbound`) and its path returned. Only files from the
+  conversation being answered can be opened, and the tool never waits for a download. Needs an adc
+  that serves files (AdemuMLS #440); with an older one the line says the channel can't open files.
+  Sending files is not supported yet (#23). The tool is in the `coding` and `messaging` tool
+  profiles; on `tools.profile: "minimal"` add it with `tools.alsoAllow: ["ademu_get_media"]`.
 - **Multiple agents:** one account per agent under `channels.ademu.accounts`, each routed to an
   OpenClaw agent by a `bindings` entry (`channel: "ademu"`, `accountId`). The wizard asks which agent
   to route to; enrolling from chat routes the account to the agent you are talking to, and refuses

@@ -32,8 +32,8 @@
     "ci:acceptance": "scripts/ci-acceptance.sh"
   },
   "dependencies": {
-    "@ademu/adc-client": "^0.3.0",
-    "@ademu/adc-control": "^0.3.0",
+    "@ademu/adc-client": "^0.4.0",
+    "@ademu/adc-control": "^0.4.0",
     "typebox": "^1.3.17",
     "zod": "4.4.3"
   },

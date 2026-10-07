@@ -13,8 +13,17 @@
   ],
   "contracts": {
     "tools": [
-      "ademu_enroll"
+      "ademu_enroll",
+      "ademu_get_media"
     ]
+  },
+  "toolMetadata": {
+    "ademu_get_media": {
+      "profiles": [
+        "coding",
+        "messaging"
+      ]
+    }
   },
   "configSchema": {
     "type": "object",

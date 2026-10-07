@@ -3,7 +3,7 @@ import {
   verifyChannelMessageAdapterCapabilityProofs,
   verifyChannelMessageReceiveAckPolicyAdapterProofs,
 } from "openclaw/plugin-sdk/channel-outbound";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AccountNotRunningError,
   TEXT_CHUNK_LIMIT,
@@ -38,6 +38,14 @@ describe("outbound: live-account registry", () => {
     expect(getLiveAccount("main")).toBe(b);
     unregisterLiveAccount("main", b);
     expect(() => getLiveAccount("main")).toThrow(AccountNotRunningError);
+  });
+
+  it("is process-wide: a fresh copy of the module (OpenClaw's tool-discovery pass) sees the same accounts", async () => {
+    const a = { client: new FakeAdcClient() };
+    registerLiveAccount("main", a);
+    vi.resetModules();
+    const fresh = await import("../src/outbound.js");
+    expect(fresh.getLiveAccount("main")).toBe(a);
   });
 });
 

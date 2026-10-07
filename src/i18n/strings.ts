@@ -57,13 +57,44 @@ export const strings = {
   // ----- inbound files (AdemuMLS #440): the turn text the agent reads for a non-text message -----
   media: {
     kinds: { photo: "photo", video: "video", voice: "voice note", file: "file" },
-    file: (f: { kind: string; ordinal: { index: number; count: number } | undefined; filename: string; size: string }) => {
+    file: (f: {
+      kind: string;
+      ordinal: { index: number; count: number } | undefined;
+      filename: string;
+      size: string;
+      open: { messageId: string; position: number } | undefined;
+    }) => {
       const head = f.ordinal ? `${f.kind} ${f.ordinal.index} of ${f.ordinal.count}` : f.kind;
       const facts = [f.filename, f.size].filter((s) => s.length > 0).join(", ");
-      return `[${head}${facts ? `: ${facts}` : ""} — this channel can't open files yet]`;
+      const how = f.open
+        ? `open it with ademu_get_media message_id=${f.open.messageId} position=${f.open.position}`
+        : "this channel can't open files yet";
+      return `[${head}${facts ? `: ${facts}` : ""} — ${how}]`;
     },
     anyFile: "[a file — this channel can't open files yet]",
     unknownKind: "[a message of a kind this channel can't show]",
+    // ----- the ademu_get_media tool -----
+    tool: {
+      label: "Ademú file",
+      description:
+        "Open a file someone sent in this Ademú conversation (photo, video, voice note or file). Each file appears in the message as a line naming the message_id and position to pass here. Photos come back as images; other files are saved and their path is returned. If a file is still downloading, ask again shortly.",
+      unnamed: "unnamed",
+      pending: (kind: string) => `This ${kind} is still downloading to this device. Ask again in a few seconds.`,
+      failedRequeued: (kind: string) => `Downloading this ${kind} failed; it has been queued again. Ask again in a few seconds.`,
+      unavailable: (kind: string) => `This ${kind} is no longer available: the server no longer has it, or this agent was not a recipient.`,
+      tooLarge: (kind: string) => `This ${kind} is larger than this device accepts, so it was not downloaded.`,
+      busy: "Too many files are being opened at once. Ask again in a moment.",
+      readFailed: "Reading the file failed (it may have just been deleted). Ask again.",
+      image: (f: { kind: string; name: string; size: string }, path: string) => `${f.kind} ${f.name}${f.size ? ` (${f.size})` : ""}, saved at ${path}`,
+      saved: (f: { kind: string; name: string; size: string }, mime: string, path: string) =>
+        `Saved the ${f.kind} ${f.name} (${[mime, f.size].filter((s) => s.length > 0).join(", ")}) at ${path}. Use your file tools to read it.`,
+      badArgs: "Pass message_id and position exactly as the file's line in the message shows them.",
+      noTurn: "Files can only be opened while answering an Ademú conversation.",
+      notRunning: "This Ademú account is not running, so its files cannot be opened right now.",
+      noGetBlob: "The Ademú device host (adc) on this machine is too old to serve files. Upgrade it: re-run the adc installer.",
+      notThisConversation: "That file is not in this conversation. Only files sent in the conversation you are answering can be opened.",
+      noSuchFile: "There is no such file: the message was deleted, or the message_id or position is wrong.",
+    },
   },
 
   // ----- enrollment (wizard + ademu_enroll tool) -----

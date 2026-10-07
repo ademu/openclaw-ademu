@@ -7,7 +7,7 @@ describe("describeContent", () => {
     expect(describeContent({})).toEqual({ kind: "text" });
     expect(describeContent({ ct: "media", media: [{ type: "voice", filename: "v.m4a", mime: "audio/mp4", size: 10 }] })).toEqual({
       kind: "media",
-      files: [{ type: "voice", filename: "v.m4a", mime: "audio/mp4", size: 10 }],
+      files: [{ position: 0, type: "voice", filename: "v.m4a", mime: "audio/mp4", size: 10 }],
     });
     expect(describeContent({ ct: "media" })).toEqual({ kind: "media", files: [] });
     expect(describeContent({ ct: "poll" })).toEqual({ kind: "unknown" });
@@ -17,8 +17,13 @@ describe("describeContent", () => {
   it("keeps a file with an unknown type and fills bad fields with blanks", () => {
     expect(describeContent({ ct: "media", media: [{ type: "hologram", filename: 1, mime: null, size: -5 }] })).toEqual({
       kind: "media",
-      files: [{ type: "hologram", filename: "", mime: "", size: 0 }],
+      files: [{ position: 0, type: "hologram", filename: "", mime: "", size: 0 }],
     });
+  });
+
+  it("takes each file's position from the daemon, else its index", () => {
+    const c = describeContent({ ct: "media", media: [{ type: "photo", position: 4 }, { type: "photo", position: -1 }] });
+    expect(c.kind === "media" && c.files.map((f) => f.position)).toEqual([4, 1]);
   });
 });
 
@@ -37,8 +42,14 @@ describe("rendering", () => {
   });
 
   it("an unknown file type reads as a file; a voice note by its name", () => {
-    expect(bodyForAgent("", { kind: "media", files: [{ type: "hologram", filename: "h", mime: "", size: 0 }] })).toBe("[file: h — this channel can't open files yet]");
-    expect(bodyForAgent("  ", { kind: "media", files: [{ type: "voice", filename: "", mime: "", size: 2048 }] })).toBe("[voice note: 2.0 KB — this channel can't open files yet]");
+    expect(bodyForAgent("", { kind: "media", files: [{ position: 0, type: "hologram", filename: "h", mime: "", size: 0 }] })).toBe("[file: h — this channel can't open files yet]");
+    expect(bodyForAgent("  ", { kind: "media", files: [{ position: 0, type: "voice", filename: "", mime: "", size: 2048 }] })).toBe("[voice note: 2.0 KB — this channel can't open files yet]");
+  });
+
+  it("with a message id, each line names the call that opens its file", () => {
+    expect(
+      bodyForAgent("", { kind: "media", files: [{ position: 0, type: "photo", filename: "a.jpg", mime: "image/jpeg", size: 0 }, { position: 1, type: "file", filename: "b.pdf", mime: "", size: 0 }] }, { messageId: "m-9" }),
+    ).toBe("[photo 1 of 2: a.jpg — open it with ademu_get_media message_id=m-9 position=0]\n[file 2 of 2: b.pdf — open it with ademu_get_media message_id=m-9 position=1]");
   });
 });
 

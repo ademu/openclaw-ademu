@@ -83,7 +83,7 @@ export class FakeAdcClient {
   }
 
   /** Pushes a message_received with the next seq (or an explicit one) and returns it. */
-  message(partial: Partial<MessageReceivedEvent> & { seq?: number; media?: unknown } = {}) {
+  message(partial: Omit<Partial<MessageReceivedEvent>, "media"> & { seq?: number; media?: unknown } = {}) {
     const seq = partial.seq ?? this.#seq++;
     const ev = {
       known: true as const,

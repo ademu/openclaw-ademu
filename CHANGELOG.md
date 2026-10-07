@@ -119,7 +119,12 @@ Requires adc ≥ **0.6.0** (the installed device host; the plugin bundles none).
   (photo, video, voice note, file) or a message of a kind the plugin does not handle reaches the agent as
   a turn whose text names each file — kind, name, size — before the caption, instead of a caption-only
   or empty turn. Such a message is never a command; it is acked at adoption like text, and ingress never
-  waits for a file. Opening the file is the next step (`ademu_get_media`).
+  waits for a file.
+- **`ademu_get_media`: the agent opens a file someone sent** (openclaw-ademu #22, AdemuMLS #440). With an
+  adc that serves files (`get_blob`), each file's line names the call that opens it. A photo comes back
+  as an image; any other file is saved under OpenClaw's media store and its path returned. The tool
+  answers at once — a file still downloading says so, a failed download is queued again — and opens only
+  files from the conversation the agent is answering. Needs `@ademu/adc-client` 0.4.0.
 - The **enrollment page**: a browser page served on the gateway itself (`/plugins/ademu/enroll/<token>`)
   that shows the QR, then the four safety words with **Yes — the words match** and **No — they differ**.
   The tool opens it in the gateway machine's browser, so a TUI user (no image rendering there) still

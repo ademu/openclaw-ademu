@@ -785,7 +785,7 @@ ownership tables and `@ademu/adc-bin` deleted). No migration for agents enrolled
 plugin-owned data dir (no real users). Spec, probe and plan: AdemuMLS
 `docs/superpowers/{specs,plans}/2026-10-02-adc-user-service-attach.md`.
 
-## 15. Media receive, step 1: dispatch on `ct` (2026-10-06, openclaw-ademu #22, AdemuMLS #440)
+## 15. Media receive (2026-10-06, openclaw-ademu #22, AdemuMLS #440)
 
 A daemon that serves media (AdemuMLS #440) delivers a received file as `message_received` with
 `ct:"media"`, `body` = the caption (often empty) and `media[]` metadata; the bytes stay in the
@@ -807,7 +807,41 @@ such block in a turn's prompt into hidden runtime context (openclaw/openclaw#140
 could forge one. The escaping does not depend on the host version.
 
 Nothing waits for a file in ingress: the loop's single seq order, the cumulative ack and the one
-watermark (§2 R2b) are unchanged, and a media message is acked at adoption like text. Step 2 adds the
-`ademu_get_media` tool, which reads a file inside the agent's own turn (`getBlob` acks nothing and
-uses no seq, and the daemon keeps files permanently), and points the description at it when the
-daemon advertises `get_blob`. Until then the description says this channel can't open files yet.
+watermark (§2 R2b) are unchanged, and a media message is acked at adoption like text. Holding the
+turn until the download finished was rejected: the loop is serial, so every later message on the
+account — every conversation — would wait behind one video.
+
+The agent opens a file with the `ademu_get_media` tool (`src/tools/media.ts`) inside its own turn.
+When the daemon advertises `get_blob`, each file's line names the call (`message_id`, `position`);
+without it the line says this channel can't open files. Reading acks nothing and uses no seq
+(`getBlob`), and the daemon keeps files permanently, so a file stays readable after its message was
+acked or the gateway restarted. The tool:
+- is offered only on Ademú turns (the factory returns `null` elsewhere);
+- opens only files of the conversation the turn answers — `deliveryContext.to`, else
+  `nativeChannelId` — checked before anything about the file is revealed, so a guest in a room cannot
+  make the agent pull a file out of the owner's DM;
+- never waits: `none`/`fetching` answer "still downloading", `failed` is re-queued with `fetch_media`
+  and answered the same way, `unavailable`/`too_large` are final. A long wait would lengthen the
+  turn, and a follow-up message in that conversation is adopted only when the turn ends, holding the
+  whole account's ingress (§2 R2b deferred handoff);
+- saves the bytes with OpenClaw's `saveMediaBuffer` under `media/inbound`, with an explicit ceiling
+  (the store's 5 MB default would refuse most videos); a JPEG/PNG/GIF/WebP comes back as an image
+  (`imageResultFromFile`, resized for the model), anything else as its path;
+- logs structural fields only (state, refusal code from a closed set, read-failure reason).
+
+The live-account registry moved to `globalThis`: OpenClaw registers the plugin again for tool
+discovery in the same process, and the tool runs in that pass (as the enrollment registry, §14).
+The manifest places the tool in the `coding` and `messaging` tool profiles
+(`toolMetadata.ademu_get_media.profiles`). The live leg found why: on a gateway with
+`tools.profile: "coding"` the factory returned the tool and the host still filtered it out, so the
+file lines named a tool the agent did not have and it retried the call in a loop. A `minimal`
+profile still needs `tools.alsoAllow: ["ademu_get_media"]` from the operator.
+
+Live leg (2026-10-06, local gateway on OpenClaw 2026.8.2, the system-scope adc 0.7.0 from #440 on
+staging, the Ademú STG app on a simulator): a captioned photo, an album of three, a PDF and a photo
+acked before two gateway restarts were each opened by the agent with the right content (the album's
+three reads in parallel over one blob connection; the PDF byte-identical). Not run live: delete for
+everyone followed by a tool call (unit-tested: `not_found` and a refused ticket).
+
+Not done here (#22): removing OpenClaw's saved copy when a message is deleted for everyone;
+transcribing voice notes; per-conversation queues; sending files (#23).
