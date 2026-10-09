@@ -31,6 +31,7 @@ import {
   type MessageAccessInput,
 } from "../security.js";
 import { IngressHaltedError, IngressProtocolError } from "../status.js";
+import { peekRefusalNote, type RefusalNotes } from "../outbound.js";
 import type { AdemuStore } from "../store.js";
 import { AdoptionFailedError, AdoptionTracker, type TurnResultLike } from "./adoption.js";
 import { bodyForAgent, describeContent, escapeRuntimeContextDelimiters } from "./content.js";
@@ -65,6 +66,10 @@ export type IngressParams = {
   typingKeepaliveMs: number;
   /** Sends a text reply into a conversation (the outbound adapter's text send). */
   sendText: (groupId: string, text: string) => Promise<{ message_id: string }>;
+  /** Sends a reply's files (and its text) into a conversation, reporting what did not go out; true = something visible went out. */
+  sendMedia: (groupId: string, text: string | undefined, urls: readonly string[], agentId: string) => Promise<boolean>;
+  /** Files that did not go out, per conversation: the agent's next turn there starts with a note (shared with outbound). */
+  refusalNotes?: RefusalNotes | undefined;
   /** Shutdown signal for the loop (NOT propagated to adopted turns). */
   signal: AbortSignal;
   /** A future `security_notice` live event: the caller sets a fixed status and posts a fixed room note. */
@@ -233,6 +238,12 @@ export function startIngress(params: IngressParams): IngressHandle {
     // A daemon that serves files (`get_blob`, AdemuMLS #440) lets the agent open them in its own turn.
     const described =
       content.kind === "text" ? undefined : bodyForAgent(body, content, client.capabilities.has("get_blob") ? { messageId: ev.message_id } : {});
+    // Files of the agent's that did not go out since its last turn here: the note opens this turn. A
+    // control command is answered by the host, not the agent, so the note waits for the next turn; it
+    // is cleared only once this turn is adopted (below).
+    const pendingNote = isTextCommand ? undefined : peekRefusalNote(params.refusalNotes, ev.group_id);
+    const note = pendingNote?.text;
+    const text = described ?? body;
     const senderName = sender ? escapeRuntimeContextDelimiters(displayNameOf(sender)) : undefined;
     const label = escapeRuntimeContextDelimiters(describeConversation(shape, params.account.agentName));
     const ctxPayload = runtime.inbound.buildContext({
@@ -264,7 +275,12 @@ export function startIngress(params: IngressParams): IngressHandle {
         to: `${CHANNEL_ID}:${conversationId}`,
         originatingTo: `${CHANNEL_ID}:${conversationId}`,
       },
-      message: described === undefined ? { rawBody: body, commandBody: body } : { rawBody: described, bodyForAgent: described, commandBody: described },
+      message: {
+        rawBody: text,
+        commandBody: text,
+        // The note is for the agent only: commands still parse from commandBody.
+        ...(described !== undefined || note !== undefined ? { bodyForAgent: note === undefined ? text : `${note}\n${text}` } : {}),
+      },
       access: {
         mentions: {
           canDetectMention: true,
@@ -312,7 +328,9 @@ export function startIngress(params: IngressParams): IngressHandle {
         }),
         delivery: {
           durable: () => ({ to: `${CHANNEL_ID}:${conversationId}` }),
-          deliver: async (payload: { text?: string }) => {
+          deliver: async (payload: { text?: string; mediaUrl?: string | null; mediaUrls?: readonly (string | null | undefined)[] | null }) => {
+            const urls = [...new Set([payload.mediaUrl, ...(payload.mediaUrls ?? [])].filter((u): u is string => typeof u === "string" && u.length > 0))];
+            if (urls.length > 0) return { visibleReplySent: await params.sendMedia(groupId, payload.text, urls, route.agentId) };
             if (!payload.text) return { visibleReplySent: false };
             await params.sendText(groupId, payload.text);
             return { visibleReplySent: true };
@@ -346,6 +364,8 @@ export function startIngress(params: IngressParams): IngressHandle {
       throw new IngressHaltedError(err instanceof AdoptionFailedError ? err : new AdoptionFailedError("dispatch_rejected", err));
     }
     if (outcome.kind === "adopted-equivalent") log(outcome.reason === "callback_free_completion" ? "callback_free_completion" : "adopted_equivalent", { seq });
+    // The agent read the note unless core declined the turn; then it stays for the next one.
+    if (!(outcome.kind === "adopted-equivalent" && outcome.reason === "declined")) pendingNote?.consume();
     ack(seq);
 
     // 10. Bound on concurrent runs (deferred turns are released from the bound at adoption).
@@ -406,6 +426,8 @@ export function startIngress(params: IngressParams): IngressHandle {
           case "message_status_changed":
           // A file's download progress (live-only, never acked): the media tool reads the state when asked.
           case "media_fetch_changed":
+          // An own media send's outcome (live-only, never acked): the client's waitForMediaSend consumes it.
+          case "media_send_changed":
             break;
         }
       }

@@ -17,7 +17,7 @@ v2026.8.{1,2}, v2026.9.1. The OpenClaw `extended-stable` line is 2026.6.34 (2026
 ## Derived floor: **2026.8.1**
 
 The floor exceeds `extended-stable` (2026.6.34). Extended-stable users can install once that line
-passes 2026.8.1 (the next extended-stable cut of a month ≥ 2026.8 carries it). Eighteen items pin it
+passes 2026.8.1 (the next extended-stable cut of a month ≥ 2026.8 carries it). Twenty-one items pin it
 (bold below); dropping any one does not lower it.
 
 Not a plugin-sdk import, but pinned against the installed host all the same: `src/bindings.ts` mirrors
@@ -45,7 +45,7 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `channel-setup` | 07d9f725b61 (2026-03-18) | v2026.3.22 |
 | `core` | a4850b1b8f2 (2026-03-04) | v2026.3.7 |
 | `gateway-runtime` | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
-| `media-runtime` (QR helpers; recorded exception) | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
+| `media-runtime` (QR helpers, recorded exception; outbound media loading, #27) | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
 | `runtime-store` | 8d7778d1d6c (2026-03-08) | v2026.3.8 |
 | `secret-input` | 07d9f725b61 (2026-03-18) | v2026.3.22 |
 | `setup` | 53ccc78c636 (2026-03-15) | v2026.3.22 |
@@ -98,6 +98,7 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `channel-ingress-runtime` → `createChannelIngressResolver` | value | a0fb7fb0454 (2026-05-10) | v2026.5.12 |
 | `channel-ingress-runtime` → `defineStableChannelIngressIdentity` | value | a0fb7fb0454 (2026-05-10) | v2026.5.12 |
 | `channel-outbound` → `ChannelIngressMonitorLifecycle` | type | 7562b79465c (2026-07-19) | **v2026.8.1** |
+| `channel-outbound` → `ChannelMessageSendMediaContext` | type | 1507a9701b8 (2026-05-27) | v2026.5.27 |
 | `channel-outbound` → `ChannelMessageSendResult` | type | 1507a9701b8 (2026-05-27) | v2026.5.27 |
 | `channel-outbound` → `ChannelMessageSendTextContext` | type | 1507a9701b8 (2026-05-27) | v2026.5.27 |
 | `channel-outbound` → `DEFAULT_INGRESS_ADOPTION_STALL_MS` | value | 16c14e5bbfc (2026-07-16) | **v2026.8.1** |
@@ -117,8 +118,11 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `core` → `resolveGatewayPort` | value | ac7ca520908 (2026-03-12) | v2026.3.24 |
 | `gateway-runtime` → `channelBlockedPatch` | value | f9d9d1225a1 (2026-08-03) | **v2026.8.1** |
 | `gateway-runtime` → `channelReadyPatch` | value | f9d9d1225a1 (2026-08-03) | **v2026.8.1** |
+| `media-runtime` → `extractOriginalFilename` | value | dde90a345a6 (2026-07-16) | **v2026.8.1** |
+| `media-runtime` → `getAgentScopedMediaLocalRoots` | value | dde90a345a6 (2026-07-16) | **v2026.8.1** |
 | `media-runtime` → `renderQrPngDataUrl` | value | dde90a345a6 (2026-07-16) | **v2026.8.1** |
 | `media-runtime` → `renderQrTerminal` | value | dde90a345a6 (2026-07-16) | **v2026.8.1** |
+| `media-runtime` → `resolveOutboundAttachmentFromUrl` | value | dde90a345a6 (2026-07-16) | **v2026.8.1** |
 | `runtime-store` → `createPluginRuntimeStore` | value | 8d7778d1d6c (2026-03-08) | v2026.3.8 |
 | `secret-input` → `SecretInputStringResolutionMode` | type | 1769fb2aa1d (2026-04-14) | v2026.4.15 |
 | `secret-input` → `buildOptionalSecretInputSchema` | value | 07d9f725b61 (2026-03-18) | v2026.3.22 |
@@ -130,7 +134,8 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 
 Note on the QR helpers: the functions themselves are older (`renderQrPngDataUrl` v2026.3.24,
 `renderQrTerminal` v2026.4.23) but their export from the `media-runtime` barrel dates to
-dde90a345a6 (2026-07-16) → v2026.8.1; the barrel is what we import, so the barrel date counts.
+dde90a345a6 (2026-07-16) → v2026.8.1; the barrel is what we import, so the barrel date counts. The
+media-send helpers (#27, re-derived 2026-10-09 against `cc3c4f36a9d`) share that barrel commit.
 
 ## Host runtime / type surfaces (used through `api.runtime`, not imported)
 

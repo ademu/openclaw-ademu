@@ -13,7 +13,7 @@ import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract
 import { CHANNEL_ID, type ResolvedAdemuAccount } from "../config.js";
 import { classifyConversation, type ConversationKind } from "../grammar.js";
 import { strings } from "../i18n/strings.js";
-import { registerLiveAccount, sendAdemuText, unregisterLiveAccount, type LiveAccount } from "../outbound.js";
+import { createReplyMediaSender, registerLiveAccount, sendAdemuText, unregisterLiveAccount, type LiveAccount, type RefusalNotes } from "../outbound.js";
 import { createAdemuIngressResolver } from "../security.js";
 import { blockedPatch, classifyError, patchFor, readyPatch, recoveringPatch, unreachableCopy, type StatusPatch } from "../status.js";
 import type { AdemuStore } from "../store.js";
@@ -225,9 +225,12 @@ async function runWithLease(
 
     const ownerUserId = account.ownerUserId ?? session.self.owner_user_id;
     const members = session.members;
+    const refusalNotes: RefusalNotes = new Map();
     live = {
       client: session.client,
       media: session.client,
+      refusalNotes,
+      log,
       conversationKind: (groupId: string): ConversationKind | undefined => {
         const list = members.peek(groupId);
         return list ? classifyConversation({ members: list, agentUserId: account.agentUserId!, ownerUserId }).kind : undefined;
@@ -251,6 +254,8 @@ async function runWithLease(
         const chunks = await sendAdemuText({ client: session!.client, groupId, text });
         return { message_id: chunks[0]!.result.message_id };
       },
+      sendMedia: createReplyMediaSender({ client: session.client, cfg, notes: refusalNotes, log }),
+      refusalNotes,
       signal: loopAbort.signal,
       log,
       onSecurityNotice: (groupId) => {

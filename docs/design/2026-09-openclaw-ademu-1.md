@@ -369,7 +369,7 @@ copy — never an error's `.message`/`.detail` (peer-controlled text).
 
 ## 6. Outbound and actions
 
-`message` adapter: durable-final `text`, receive policy `after_agent_dispatch`. Texts are split at
+`message` adapter: durable-final `text` and `media` (files, §16), receive policy `after_agent_dispatch`. Texts are split at
 **4000 characters** (`chunkTextForOutbound`; no daemon body cap exists — the ceiling is the 1 MiB
 session line — 4000 is the conservative default); each chunk is one `send_text` reported through
 `onDeliveryResult`; a failure after the first accepted chunk throws `createChannelPartialDeliveryError`
@@ -479,8 +479,8 @@ bait-tree self-test).
 
 SDK durable ingress queue (trust-gated; Tier C note); Control UI QR parity (`loginWithQrStart/Wait`
 has no words step); `auth.login`; `accountScopedRestart`; ambient `room_event` injection; a proper
-icon (the shipped one is generated); npm/ClawHub publishing (launch calendar); Windows; opening and
-sending media (receiving is described, §15; #22, #23), threads, edit/unsend; residual R10 (at-most-once for callback-free zero-output completions). Using the enrollment page from the wizard's hosted (Control UI) path; an https universal link for the enrollment payload (Ademú side) so phone-only users on Telegram can tap it; nothing typed by the user beyond that.
+icon (the shipped one is generated); npm/ClawHub publishing (launch calendar); Windows; media
+(receiving §15, sending §16), threads, edit/unsend; residual R10 (at-most-once for callback-free zero-output completions). Using the enrollment page from the wizard's hosted (Control UI) path; an https universal link for the enrollment payload (Ademú side) so phone-only users on Telegram can tap it; nothing typed by the user beyond that.
 
 ## 11. Versioning
 
@@ -861,4 +861,71 @@ three reads in parallel over one blob connection; the PDF byte-identical). Not r
 everyone followed by a tool call (unit-tested: `not_found` and a refused ticket).
 
 Not done here (#22): removing OpenClaw's saved copy when a message is deleted for everyone;
-transcribing voice notes; per-conversation queues; sending files (#23).
+transcribing voice notes; per-conversation queues. Sending files is §16 (#27).
+
+## 16. Media send (2026-10-09, openclaw-ademu #27 and #23, AdemuMLS #441)
+
+A reply's files go out as one `send_media` album. Requires `@ademu/adc-client` 0.7.0: its
+`sendMedia(…, {awaitOutcome})` declares, pushes the bytes and waits for the daemon's outcome; the
+outcome event is live-only, and the client re-reads it after a reconnect. The plugin holds no tracker
+of its own. Nothing is in production, so a daemon whose hello has no `media_send` advert is a version
+mismatch: the send throws (no fallback).
+
+One core, `sendAdemuMedia` (`src/outbound.ts`), serves both paths:
+
+- final replies, through ingress `deliver` (the host's durable path needs `messageSendingHooks`,
+  which the plugin does not declare, so final replies always come this way), with the agent's
+  workspace as a local root;
+- the `send.media` adapter (the agent's own `message` sends), with the host's media access fields
+  passed through as they are.
+
+Per URL: the host's `resolveOutboundAttachmentFromUrl` stages a local copy (capped at the advert's
+`max_bytes`); JPEG/PNG go through `preparePhoto`, and everything else, or a photo the client can't
+decode, through `prepareFile`. The name the recipient sees is the original one (`extractOriginalFilename`),
+not the store's. The advert's `types` and `max_items` are checked before the send. The reply text is
+never lost: it is the caption when it fits in one text chunk; otherwise, or when every file was refused,
+or the album failed, it goes as text.
+
+A file that does not go out has a reason from one closed list (wording, log `code`, tests):
+`load_failed`, `too_many`, the daemon's declare refusals, the final failure codes, `cancelled`,
+`disconnected`, and `other`. On the reply path, the chat gets one bracketed line per reason, and the
+agent's next turn in that conversation opens with a note. The note goes in `bodyForAgent` only, so
+commands still parse. Ingress drops the agent's own messages, so the line alone would never reach it.
+The adapter throws the line instead, so the agent's tool call sees it; it is a partial delivery when
+text already went out. Getting the caption out is best effort: if resending it fails, the refusals are
+still reported.
+
+When the note is cleared: a control command is answered by the host, not the agent, so it doesn't get
+the note; the next ordinary turn does. The note is cleared once that turn is adopted, and only the
+entries that were read (a late failure can add more meanwhile). A turn core declines keeps it. Notes
+live in memory per account (at most 20 per conversation, oldest dropped) and a restart loses them; the
+chat line stays.
+
+Waiting for the outcome: a reply waits 30 s (`REPLY_MEDIA_WAIT_MS`), because `deliver` holds one of the
+ingress loop's in-flight slots. A tool send waits 120 s (`MEDIA_SEND_WAIT_MS`). After the wait, a still
+pending send counts as sent. A detached `waitForMediaSend` keeps watching it, and a later failure is
+reported as a failure in time: the caption is resent (best effort), then the line and the note. Only the
+wait itself ending without an outcome (restart, end of session) logs `media_send_wait_lost`.
+`media_send_changed` is an explicit no-op in the event loop; the client's wait consumes it.
+
+Logs, with closed-set fields only (the privacy audit covers optional `log?.(` calls too):
+- `media_send_result {status: queued|pending|failed|cancelled|refused, items, refused, urls, code?}`:
+  - `items` = files declared in the album, `refused` = files that did not go out, `urls` = files in the reply;
+  - `refused` status = nothing was declared;
+  - `code` = the album's failure reason, else the first refusal's;
+  - a daemon with no advert logs `refused`/`other` and then throws.
+- `media_send_pending`, `media_send_late_failure {status, code, items}`, `media_send_caption_resend_failed`,
+  `media_send_report_failed` and `media_send_wait_lost`, the last three with `errorClass` only.
+
+Tool-path sends log through the account's logger (`LiveAccount.log`). The reply path's sender is one
+factory, `createReplyMediaSender`. It loads from the routed agent's local roots
+(`getAgentScopedMediaLocalRoots`), then sends and reports. startAccount and the ingress tests both use it.
+
+Decisions recorded at the implementation check (2026-10-09):
+- The reply sender, not `deliver`, posts the lines and records the notes; `deliver` only routes.
+- One line per reason, naming all its files: a failed 20-file album is one line, not twenty.
+- A daemon without the advert throws a sentence asking the person to upgrade adc. The reply is lost,
+  text included; there are no fallbacks for older versions.
+- The `max_items` cap counts the reply's files before any load, so no more than the cap is ever fetched.
+- No URL-basename fallback for the filename: `extractOriginalFilename` always returns a name (falling
+  back to the stored copy's basename).

@@ -115,6 +115,18 @@ Requires adc ≥ **0.6.0** (the installed device host; the plugin bundles none).
 
 ### Added
 
+- **The agent sends files** (openclaw-ademu #27 and #23, AdemuMLS #441). A reply's files, and the
+  agent's own `message` sends, go out as one message: JPEG and PNG as photos, anything else as files,
+  under their original names, with the reply text as the caption when it fits. The reply text is never
+  lost: when it is too long for a caption, every file was refused, or the send failed, it goes as text.
+  Needs `@ademu/adc-client` 0.7.0 (`sendMedia` waits for the daemon's outcome) and an adc that sends
+  files; an adc without it is a version mismatch and the send fails.
+  - A file that does not go out (unreadable, too large, a kind the device host doesn't take, a failed
+    upload) leaves a short line in the chat, and the agent's next turn there opens with a note naming the
+    file and why. A control command doesn't use up the note. On the agent's own sends, the tool call fails
+    with that line.
+  - A reply waits up to 30 s for the device host's outcome, and a tool send up to 120 s. A send still
+    pending after that counts as sent; if it fails later, the chat line and the note follow then.
 - **Messages that are not text are described to the agent** (openclaw-ademu #22, AdemuMLS #440). A file
   (photo, video, voice note, file) or a message of a kind the plugin does not handle reaches the agent as
   a turn whose text names each file — kind, name, size — before the caption, instead of a caption-only

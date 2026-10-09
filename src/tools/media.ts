@@ -19,7 +19,7 @@ import { CHANNEL_ID } from "../config.js";
 import { normalizeId, normalizeTarget } from "../grammar.js";
 import { strings } from "../i18n/strings.js";
 import { formatSize, sanitizeFilename } from "../monitor/content.js";
-import { getLiveAccount, resolveOutboundAccountId, type MediaClient } from "../outbound.js";
+import { getLiveAccount, resolveOutboundAccountId, untilAborted, type MediaClient } from "../outbound.js";
 
 export const MEDIA_TOOL_NAME = "ademu_get_media";
 
@@ -64,22 +64,6 @@ async function fileSizeOnDisk(path: string): Promise<number | undefined> {
   } catch {
     return undefined;
   }
-}
-
-/**
- * Runs `work` unless the turn is already aborted, and stops waiting for it the moment the turn is. The
- * client takes no signal, so an abandoned read still finishes on the blob connection; the size limit
- * bounds how long that is.
- */
-function untilAborted<T>(work: () => Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  signal?.throwIfAborted();
-  const running = work();
-  if (!signal) return running;
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    running.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-  });
 }
 
 export type MediaToolDeps = {
