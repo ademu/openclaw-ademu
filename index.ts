@@ -8,7 +8,7 @@ import { ademuConfigSchema, CHANNEL_ID } from "./src/config.js";
 import { openInBrowser, pageOriginListening, registerEnrollmentPage } from "./src/enrollment-page.js";
 import { strings } from "./src/i18n/strings.js";
 import { createQr } from "./src/qr.js";
-import { applyPluginSettings, setAdemuRuntime } from "./src/runtime.js";
+import { applyPluginSettings, getPluginSettings, setAdemuRuntime } from "./src/runtime.js";
 import { cancelByHuman, confirmByHuman, type EnrollToolDeps, registerEnrollTool } from "./src/tools/enroll.js";
 import { registerMediaTool } from "./src/tools/media.js";
 
@@ -46,6 +46,7 @@ export default defineChannelPluginEntry({
     // Received files (AdemuMLS #440): the store is resolved per call, so registering touches nothing.
     registerMediaTool(api, {
       saveMediaBuffer: (...args) => api.runtime.channel.media.saveMediaBuffer(...args),
+      maxOpenBytes: () => getPluginSettings().mediaMaxOpenMb * 1024 * 1024,
       log: hostLog,
     });
     // The browser enrollment page (QR → words → Yes / No) shares the tool's registry and decision paths.

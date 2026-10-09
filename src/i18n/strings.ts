@@ -72,6 +72,8 @@ export const strings = {
       return `[${head}${facts ? `: ${facts}` : ""} — ${how}]`;
     },
     anyFile: "[a file — this channel can't open files yet]",
+    // After the file lines when they name the tool: a host tool policy can still hide it from this agent.
+    openNote: "[if ademu_get_media is not among your tools, say you can't open files here; don't call it]",
     unknownKind: "[a message of a kind this channel can't show]",
     // ----- the ademu_get_media tool -----
     tool: {
@@ -83,6 +85,8 @@ export const strings = {
       failedRequeued: (kind: string) => `Downloading this ${kind} failed; it has been queued again. Ask again in a few seconds.`,
       unavailable: (kind: string) => `This ${kind} is no longer available: the server no longer has it, or this agent was not a recipient.`,
       tooLarge: (kind: string) => `This ${kind} is larger than this device accepts, so it was not downloaded.`,
+      overLimit: (kind: string, limit: string) =>
+        `This ${kind} is larger than this gateway opens (${limit}), so it was not read. The gateway's owner can raise the Ademú plugin's mediaMaxOpenMb setting.`,
       busy: "Too many files are being opened at once. Ask again in a moment.",
       readFailed: "Reading the file failed (it may have just been deleted). Ask again.",
       image: (f: { kind: string; name: string; size: string }, path: string) => `${f.kind} ${f.name}${f.size ? ` (${f.size})` : ""}, saved at ${path}`,
@@ -94,6 +98,8 @@ export const strings = {
       noGetBlob: "The Ademú device host (adc) on this machine is too old to serve files. Upgrade it: re-run the adc installer.",
       notThisConversation: "That file is not in this conversation. Only files sent in the conversation you are answering can be opened.",
       noSuchFile: "There is no such file: the message was deleted, or the message_id or position is wrong.",
+      hiddenByPolicy: (where: string) =>
+        `ademu_get_media is kept from agents by ${where}: agents see the files people send but cannot open them. Add "ademu_get_media" to tools.alsoAllow (or to that agent's tools.alsoAllow), or remove it from the deny list.`,
     },
   },
 

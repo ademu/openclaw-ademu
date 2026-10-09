@@ -203,8 +203,12 @@ A device host older than adc 0.6.0 — or one without the enrollment socket — 
   under OpenClaw's media store (`media/inbound`) and its path returned. Only files from the
   conversation being answered can be opened, and the tool never waits for a download. Needs an adc
   that serves files (AdemuMLS #440); with an older one the line says the channel can't open files.
+  Files above `mediaMaxOpenMb` (default 50 MiB) are refused without being read, because a file is held
+  in the gateway's memory while it is saved; opening the same file again reuses the saved copy.
   Sending files is not supported yet (#23). The tool is in the `coding` and `messaging` tool
-  profiles; on `tools.profile: "minimal"` add it with `tools.alsoAllow: ["ademu_get_media"]`.
+  profiles; on `tools.profile: "minimal"` add it with `tools.alsoAllow: ["ademu_get_media"]`. The
+  plugin logs a warning at startup when the config plainly keeps the tool from agents, and the file
+  lines tell an agent without the tool to say it can't open files rather than try.
 - **Multiple agents:** one account per agent under `channels.ademu.accounts`, each routed to an
   OpenClaw agent by a `bindings` entry (`channel: "ademu"`, `accountId`). The wizard asks which agent
   to route to; enrolling from chat routes the account to the agent you are talking to, and refuses
@@ -231,7 +235,7 @@ A device host older than adc 0.6.0 — or one without the enrollment socket — 
       }
     }
   },
-  "plugins": { "entries": { "ademu": { "config": { "typingKeepaliveMs": 2000, "mentionAliases": ["iris"] } } } }
+  "plugins": { "entries": { "ademu": { "config": { "typingKeepaliveMs": 2000, "mentionAliases": ["iris"], "mediaMaxOpenMb": 50 } } } }
 }
 ```
 

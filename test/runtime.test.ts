@@ -30,6 +30,9 @@ describe("runtime", () => {
     expect(applyPluginSettings({ typingKeepaliveMs: 3000 }).typingKeepaliveMs).toBe(2500);
     expect(applyPluginSettings({ typingKeepaliveMs: 10_000 }).typingKeepaliveMs).toBe(2500);
     expect(applyPluginSettings({ typingKeepaliveMs: 2000 }).typingKeepaliveMs).toBe(2000);
+    expect(applyPluginSettings(undefined).mediaMaxOpenMb).toBe(50);
+    expect(applyPluginSettings({ mediaMaxOpenMb: 200 }).mediaMaxOpenMb).toBe(200);
+    for (const bad of [0, 1025, 2.5, "100"]) expect(applyPluginSettings({ mediaMaxOpenMb: bad }).mediaMaxOpenMb).toBe(50);
     expect(applyPluginSettings({ typingKeepaliveMs: 2500 }).typingKeepaliveMs).toBe(2500);
   });
 });

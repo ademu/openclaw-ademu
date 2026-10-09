@@ -125,6 +125,18 @@ Requires adc ≥ **0.6.0** (the installed device host; the plugin bundles none).
   as an image; any other file is saved under OpenClaw's media store and its path returned. The tool
   answers at once — a file still downloading says so, a failed download is queued again — and opens only
   files from the conversation the agent is answering. Needs `@ademu/adc-client` 0.4.0.
+  - A file above the new `mediaMaxOpenMb` plugin setting (default 50 MiB) is refused without being read:
+    the file is held in the gateway's memory while it is saved.
+  - Opening the same file again reuses the copy already saved instead of writing another one.
+  - The tool stops waiting the moment the turn is aborted.
+  - A photo that does not decode comes back as its saved path, and a failed download whose message was
+    deleted before the re-queue answers "no such file".
+  - Only a file with the daemon's own position is named to the tool; the plugin never guesses one from
+    the file's order.
+  - When the tool is offered, the file lines also tell an agent that doesn't have it to say it can't open
+    files instead of calling it. At startup the plugin warns once if `tools` (or an agent's `tools`)
+    plainly keeps the tool from agents: a `deny` naming it, an `allow` without it, or the `minimal`
+    profile without an `alsoAllow`.
 - The **enrollment page**: a browser page served on the gateway itself (`/plugins/ademu/enroll/<token>`)
   that shows the QR, then the four safety words with **Yes — the words match** and **No — they differ**.
   The tool opens it in the gateway machine's browser, so a TUI user (no image rendering there) still

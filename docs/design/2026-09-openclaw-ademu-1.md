@@ -812,7 +812,8 @@ turn until the download finished was rejected: the loop is serial, so every late
 account — every conversation — would wait behind one video.
 
 The agent opens a file with the `ademu_get_media` tool (`src/tools/media.ts`) inside its own turn.
-When the daemon advertises `get_blob`, each file's line names the call (`message_id`, `position`);
+When the daemon advertises `get_blob`, each file's line names the call (`message_id`, `position` —
+the daemon's own, never the file's order: a file without one is described as unopenable);
 without it the line says this channel can't open files. Reading acks nothing and uses no seq
 (`getBlob`), and the daemon keeps files permanently, so a file stays readable after its message was
 acked or the gateway restarted. The tool:
@@ -824,9 +825,20 @@ acked or the gateway restarted. The tool:
   and answered the same way, `unavailable`/`too_large` are final. A long wait would lengthen the
   turn, and a follow-up message in that conversation is adopted only when the turn ends, holding the
   whole account's ingress (§2 R2b deferred handoff);
-- saves the bytes with OpenClaw's `saveMediaBuffer` under `media/inbound`, with an explicit ceiling
-  (the store's 5 MB default would refuse most videos); a JPEG/PNG/GIF/WebP comes back as an image
-  (`imageResultFromFile`, resized for the model), anything else as its path;
+- reads a file whole into the gateway, so a file above the `mediaMaxOpenMb` plugin setting (default
+  50 MiB; the daemon's own `[media] max_media_bytes` default is 100 MiB) is refused before a byte is
+  read, using `stored_len`, else the sender's size, and the bytes read are checked again;
+- saves the bytes with OpenClaw's `saveMediaBuffer` under `media/inbound`, with that limit as the
+  ceiling (the store's 5 MB default would refuse most videos); a JPEG/PNG/GIF/WebP comes back as an
+  image (`imageResultFromFile`, resized for the model), anything else as its path. An image that does not
+  decode falls back to its path;
+- remembers the copy it saved, per account + message + position (on `globalThis`, bounded at 256). A
+  file opened again reuses that copy while it is on disk at the same size: the store names every save
+  with a fresh UUID, so a second save would be a second full copy. Scope and fetch state are still
+  checked first, so a deleted message is "no such file" even when its copy is still on disk;
+- stops waiting the moment the turn is aborted. The client's requests take no signal, so an abandoned
+  read still finishes on the session's one blob connection and later reads queue behind it; the size
+  limit bounds that. A client-side abort that closes the blob connection is the full fix;
 - logs structural fields only (state, refusal code from a closed set, read-failure reason).
 
 The live-account registry moved to `globalThis`: OpenClaw registers the plugin again for tool
@@ -835,7 +847,12 @@ The manifest places the tool in the `coding` and `messaging` tool profiles
 (`toolMetadata.ademu_get_media.profiles`). The live leg found why: on a gateway with
 `tools.profile: "coding"` the factory returned the tool and the host still filtered it out, so the
 file lines named a tool the agent did not have and it retried the call in a loop. A `minimal`
-profile still needs `tools.alsoAllow: ["ademu_get_media"]` from the operator.
+profile still needs `tools.alsoAllow: ["ademu_get_media"]` from the operator. The plugin cannot
+resolve the host's effective tool policy (profiles, per-agent and per-provider policies, group
+policies), so it covers the rest in two ways. When the lines name the tool, one note after them tells
+an agent without it to say it can't open files and not to call it. And at startup it warns once, on
+the host logger, when the config plainly keeps the tool from agents: a `deny` naming it, an `allow`
+without it, or the `minimal` profile without an `alsoAllow` (`mediaToolHiddenBy`).
 
 Live leg (2026-10-06, local gateway on OpenClaw 2026.8.2, the system-scope adc 0.7.0 from #440 on
 staging, the Ademú STG app on a simulator): a captioned photo, an album of three, a PDF and a photo

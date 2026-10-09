@@ -20,9 +20,11 @@ export const tryGetAdemuRuntime = runtimeStore.tryGetRuntime;
 export type AdemuPluginSettings = {
   typingKeepaliveMs: number;
   mentionAliases: readonly string[];
+  /** The largest received file `ademu_get_media` reads into the gateway (MiB); bigger ones are refused unread. */
+  mediaMaxOpenMb: number;
 };
 
-export const DEFAULT_SETTINGS: AdemuPluginSettings = { typingKeepaliveMs: 2000, mentionAliases: [] };
+export const DEFAULT_SETTINGS: AdemuPluginSettings = { typingKeepaliveMs: 2000, mentionAliases: [], mediaMaxOpenMb: 50 };
 
 /** The runtime ceiling for `typingKeepaliveMs` — below Ademú's ~3 s receiver TTL (AdemuMLS#621). */
 export const TYPING_KEEPALIVE_MAX_MS = 2500;
@@ -32,6 +34,7 @@ let settings: AdemuPluginSettings = DEFAULT_SETTINGS;
 export function applyPluginSettings(raw: Record<string, unknown> | undefined): AdemuPluginSettings {
   const ms = raw?.typingKeepaliveMs;
   const aliases = raw?.mentionAliases;
+  const maxOpen = raw?.mediaMaxOpenMb;
   settings = {
     // The manifest keeps accepting 500–10000 (a lowered schema maximum would reject existing configs at
     // OpenClaw's plugin-config validation); the RUNTIME clamps to ≤ 2500 because since adc 0.3.0 the daemon
@@ -42,6 +45,8 @@ export function applyPluginSettings(raw: Record<string, unknown> | undefined): A
         ? Math.min(Math.round(ms), TYPING_KEEPALIVE_MAX_MS)
         : DEFAULT_SETTINGS.typingKeepaliveMs,
     mentionAliases: Array.isArray(aliases) ? aliases.filter((a): a is string => typeof a === "string" && a.trim().length > 0) : [],
+    mediaMaxOpenMb:
+      typeof maxOpen === "number" && Number.isInteger(maxOpen) && maxOpen >= 1 && maxOpen <= 1024 ? maxOpen : DEFAULT_SETTINGS.mediaMaxOpenMb,
   };
   return settings;
 }

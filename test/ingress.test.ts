@@ -552,7 +552,9 @@ describe("a daemon that serves files (get_blob, AdemuMLS #440)", () => {
     w.client.capabilities.add("get_blob");
     w.client.message({ message_id: "m-photo", ct: "media", body: "", media: [{ position: 0, type: "photo", mime: "image/jpeg", size: 2048, filename: "a.jpg" }] });
     const d = await w.rt.nextDispatch();
-    expect((ctxOf(d).message as { bodyForAgent: string }).bodyForAgent).toBe("[photo: a.jpg, 2.0 KB — open it with ademu_get_media message_id=m-photo position=0]");
+    expect((ctxOf(d).message as { bodyForAgent: string }).bodyForAgent).toBe(
+      "[photo: a.jpg, 2.0 KB — open it with ademu_get_media message_id=m-photo position=0]\n[if ademu_get_media is not among your tools, say you can't open files here; don't call it]",
+    );
   });
 
   it("media_fetch_changed is ignored and never acked", async () => {
