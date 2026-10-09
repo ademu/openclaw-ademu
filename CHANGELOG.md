@@ -124,7 +124,7 @@ Requires adc ≥ **0.6.0** (the installed device host; the plugin bundles none).
   adc that serves files (`get_blob`), each file's line names the call that opens it. A photo comes back
   as an image; any other file is saved under OpenClaw's media store and its path returned. The tool
   answers at once — a file still downloading says so, a failed download is queued again — and opens only
-  files from the conversation the agent is answering. Needs `@ademu/adc-client` 0.4.0.
+  files from the conversation the agent is answering. Needs `@ademu/adc-client` 0.6.0 (the first published client with `get_blob`).
   - A file above the new `mediaMaxOpenMb` plugin setting (default 50 MiB) is refused without being read:
     the file is held in the gateway's memory while it is saved.
   - Opening the same file again reuses the copy already saved instead of writing another one.
