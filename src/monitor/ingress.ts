@@ -230,7 +230,9 @@ export function startIngress(params: IngressParams): IngressHandle {
       return;
     }
     // 7. Context (Tlon/SMS projection).
-    const described = content.kind === "text" ? undefined : bodyForAgent(body, content);
+    // A daemon that serves files (`get_blob`, AdemuMLS #440) lets the agent open them in its own turn.
+    const described =
+      content.kind === "text" ? undefined : bodyForAgent(body, content, client.capabilities.has("get_blob") ? { messageId: ev.message_id } : {});
     const senderName = sender ? escapeRuntimeContextDelimiters(displayNameOf(sender)) : undefined;
     const label = escapeRuntimeContextDelimiters(describeConversation(shape, params.account.agentName));
     const ctxPayload = runtime.inbound.buildContext({
@@ -402,6 +404,8 @@ export function startIngress(params: IngressParams): IngressHandle {
             break;
           case "reaction_changed":
           case "message_status_changed":
+          // A file's download progress (live-only, never acked): the media tool reads the state when asked.
+          case "media_fetch_changed":
             break;
         }
       }

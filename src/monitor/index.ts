@@ -227,6 +227,7 @@ async function runWithLease(
     const members = session.members;
     live = {
       client: session.client,
+      media: session.client,
       conversationKind: (groupId: string): ConversationKind | undefined => {
         const list = members.peek(groupId);
         return list ? classifyConversation({ members: list, agentUserId: account.agentUserId!, ownerUserId }).kind : undefined;

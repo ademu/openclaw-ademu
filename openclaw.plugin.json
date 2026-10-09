@@ -13,8 +13,17 @@
   ],
   "contracts": {
     "tools": [
-      "ademu_enroll"
+      "ademu_enroll",
+      "ademu_get_media"
     ]
+  },
+  "toolMetadata": {
+    "ademu_get_media": {
+      "profiles": [
+        "coding",
+        "messaging"
+      ]
+    }
   },
   "configSchema": {
     "type": "object",
@@ -35,6 +44,13 @@
         },
         "default": [],
         "description": "Extra names that count as addressing the agent in a room."
+      },
+      "mediaMaxOpenMb": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1024,
+        "default": 50,
+        "description": "The largest received file (in MiB) the agent can open with ademu_get_media. The file is held in the gateway's memory while it is saved, so larger files are refused without being read."
       }
     }
   },
@@ -45,6 +61,10 @@
     },
     "mentionAliases": {
       "label": "Mention aliases"
+    },
+    "mediaMaxOpenMb": {
+      "label": "Largest file the agent opens (MiB)",
+      "advanced": true
     }
   },
   "channelConfigs": {

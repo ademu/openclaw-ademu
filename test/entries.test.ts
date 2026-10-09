@@ -1,7 +1,7 @@
 // The two plugin entries as OpenClaw loads them: the setup entry must expose the enrollment wizard
 // (Codex #1), and full/tool-discovery registration must register the tool + service WITHOUT touching
 // the SQLite store or the daemon manager (Codex #18).
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -66,6 +66,7 @@ describe("entries", () => {
       const { api, calls } = fakeApi(mode, tmp);
       fullEntry.register(api);
       expect(calls.some((c) => c[0] === "registerTool" && (c[1] as { name: string }).name === "ademu_enroll")).toBe(true);
+      expect(calls.some((c) => c[0] === "registerTool" && (c[1] as { name: string }).name === "ademu_get_media")).toBe(true);
       expect(calls.some((c) => c[0] === "registerService" && c[1] === "ademu-enroll-leases")).toBe(true);
       // The enrollment page route registers in BOTH passes, replacing itself (the route table is process-wide).
       expect(calls.filter((c) => c[0] === "registerHttpRoute").map((c) => c[1])).toEqual([
@@ -91,5 +92,20 @@ describe("entries", () => {
 describe("typing surfaces (AdemuMLS#621)", () => {
   it("offers no heartbeat typing surface — heartbeats are invisible unless they produce a message", () => {
     expect(ademuPlugin.heartbeat).toBeUndefined();
+  });
+});
+
+describe("the manifest's tool declarations", () => {
+  // Live leg 2026-10-06: a gateway on `tools.profile: "coding"` dropped the tool ("Tool ademu_get_media
+  // not found") until the manifest placed it in that profile; the file lines then named a tool the
+  // agent did not have.
+  const manifest = JSON.parse(readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8")) as {
+    contracts: { tools: string[] };
+    toolMetadata?: Record<string, { profiles?: string[] }>;
+  };
+
+  it("declares ademu_get_media and places it in the coding and messaging tool profiles", () => {
+    expect(manifest.contracts.tools).toContain("ademu_get_media");
+    expect(manifest.toolMetadata?.ademu_get_media?.profiles).toEqual(["coding", "messaging"]);
   });
 });

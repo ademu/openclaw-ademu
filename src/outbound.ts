@@ -34,13 +34,27 @@ export class AccountNotRunningError extends Error {
 /** The subset of the session client outbound needs (the fake in tests implements it too). */
 export type OutboundClient = Pick<AdcClient, "sendText" | "sendReaction" | "sendTyping">;
 
+/** The read side the `ademu_get_media` tool needs (AdemuMLS #440); the session client is the full AdcClient. */
+export type MediaClient = Pick<AdcClient, "getMessage" | "getBlob" | "fetchMedia" | "capabilities">;
+
 export type LiveAccount = {
   client: OutboundClient;
+  /** Reads a received file's state and bytes (the media tool). */
+  media?: MediaClient;
   /** Conversation kind lookup from the session's members cache (undefined = unknown). */
   conversationKind?: (groupId: string) => ConversationKind | undefined;
 };
 
-const live = new Map<string, LiveAccount>();
+/**
+ * OpenClaw registers the plugin again in the same gateway process for tool discovery, and the media
+ * tool runs in that pass; it must see the accounts the startup pass registered, so the map lives on
+ * `globalThis` (as the enrollment registry does, `src/tools/enroll.ts`).
+ */
+const LIVE_ACCOUNTS_KEY = Symbol.for("ademu.openclaw.liveAccounts");
+const live: Map<string, LiveAccount> = ((globalThis as { [LIVE_ACCOUNTS_KEY]?: Map<string, LiveAccount> })[LIVE_ACCOUNTS_KEY] ??= new Map<
+  string,
+  LiveAccount
+>());
 
 export function registerLiveAccount(accountId: string, account: LiveAccount): void {
   live.set(accountId, account);

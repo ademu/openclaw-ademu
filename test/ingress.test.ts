@@ -544,6 +544,31 @@ describe("non-text content (AdemuMLS #440): described, acked at adoption, never 
   });
 });
 
+describe("a daemon that serves files (get_blob, AdemuMLS #440)", () => {
+  const ctxOf = (d: Dispatch) => (d.plan.ctxPayload as { ctx: Record<string, unknown> }).ctx;
+
+  it("the file line names the ademu_get_media call; without get_blob it says the channel can't open files", async () => {
+    const w = await world();
+    w.client.capabilities.add("get_blob");
+    w.client.message({ message_id: "m-photo", ct: "media", body: "", media: [{ position: 0, type: "photo", mime: "image/jpeg", size: 2048, filename: "a.jpg" }] });
+    const d = await w.rt.nextDispatch();
+    expect((ctxOf(d).message as { bodyForAgent: string }).bodyForAgent).toBe(
+      "[photo: a.jpg, 2.0 KB — open it with ademu_get_media message_id=m-photo position=0]\n[if ademu_get_media is not among your tools, say you can't open files here; don't call it]",
+    );
+  });
+
+  it("media_fetch_changed is ignored and never acked", async () => {
+    const w = await world();
+    w.client.live({ event: "media_fetch_changed", group_id: ROOM_DM, message_id: "m-1", position: 0, state: "fetched" });
+    w.client.message({ body: "after" });
+    const d = await w.rt.nextDispatch();
+    await d.lifecycle.onAdopted();
+    await w.settle();
+    expect(w.client.acks).toEqual([1]);
+    expect(w.logs.some((l) => l.event === "event_unknown")).toBe(false);
+  });
+});
+
 describe("runtime-context delimiters never pass through (openclaw/openclaw#140404)", () => {
   const BEGIN = "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>";
   const END = "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>";

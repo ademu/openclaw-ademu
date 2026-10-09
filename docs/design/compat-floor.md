@@ -17,7 +17,7 @@ v2026.8.{1,2}, v2026.9.1. The OpenClaw `extended-stable` line is 2026.6.34 (2026
 ## Derived floor: **2026.8.1**
 
 The floor exceeds `extended-stable` (2026.6.34). Extended-stable users can install once that line
-passes 2026.8.1 (the next extended-stable cut of a month ≥ 2026.8 carries it). Sixteen items pin it
+passes 2026.8.1 (the next extended-stable cut of a month ≥ 2026.8 carries it). Eighteen items pin it
 (bold below); dropping any one does not lower it.
 
 Not a plugin-sdk import, but pinned against the installed host all the same: `src/bindings.ts` mirrors
@@ -64,6 +64,7 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `agent-scope-runtime` → `listAgentIds` | value | da4a656cdba (2026-08-08) | **v2026.8.1** |
 | `agent-scope-runtime` → `resolveAgentConfig` | value | 5ebfbbf8d78 (2026-08-17) | **v2026.8.1** |
 | `agent-scope-runtime` → `tryResolveDefaultAgentId` | value | 5ebfbbf8d78 (2026-08-17) | **v2026.8.1** |
+| `channel-actions` → `imageResultFromFile` | value | f2d7a825b12 (2026-04-03) | v2026.4.5 |
 | `channel-actions` → `jsonResult` | value | f2d7a825b12 (2026-04-03) | v2026.4.5 |
 | `channel-actions` → `optionalPositiveIntegerSchema` | value | 091e15139bd (2026-05-28) | v2026.5.28 |
 | `channel-actions` → `readPositiveIntegerParam` | value | b0e9569ebdb (2026-05-28) | v2026.5.28 |
@@ -139,6 +140,11 @@ dde90a345a6 (2026-07-16) → v2026.8.1; the barrel is what we import, so the bar
 | `buildContext` → `message.bodyForAgent` (mapped to `BodyForAgent`; checked at v2026.5.27 `src/channels/inbound-event/context.ts:473`) | 1507a9701b8 (2026-05-27) | v2026.5.27 |
 | `api.runtime.channel.inbound.dispatch` | 8ee945b9070 (2026-08-09) | **v2026.8.1** |
 | `api.runtime.channel.routing.resolveAgentRoute` / `commands.*` | 1507a9701b8 (2026-05-27) | v2026.5.27 |
+| `api.runtime.channel.media.saveMediaBuffer` (`ademu_get_media`) | 5b4651d9ed1 (2026-01-18) | v2026.1.20 |
+| tool context `agentAccountId` | cf0c72a557a (2026-01-11) | v2026.1.11 |
+| tool context `messageChannel` | 90342a4f3a5 (2026-01-13) | v2026.1.12 |
+| tool context `deliveryContext` | 44defeb71b3 (2026-03-27) | v2026.3.28 |
+| tool context `nativeChannelId` (the scope check's fallback) | fbd330b7aa4 (2026-07-10) | **v2026.8.1** |
 | `api.runtime.config.mutateConfigFile` | 7f3f108521f (2026-04-27) | v2026.4.26 |
 | `api.registerHttpRoute` (`replaceExisting` 7a7eee920a1 2026-03-02) | c96ffa7186a (2026-01-29) | v2026.3.2 |
 | `api.runtime.logging.getChildLogger` | a4850b1b8f2 (2026-03-04) | v2026.3.7 |
@@ -149,6 +155,7 @@ dde90a345a6 (2026-07-16) → v2026.8.1; the barrel is what we import, so the bar
 | manifest `channelConfigs` / `contracts` | 40bd36e35d3 / ba7804df50d (2026-03-27) | v2026.3.28 |
 | manifest `skills` | 51a90533874 (2026-01-23) | v2026.1.22 |
 | manifest `activation` | 79c3dbecd12 (2026-04-11) | v2026.4.11 |
+| manifest `toolMetadata.<tool>.profiles` (`ademu_get_media` joins the `coding`/`messaging` tool profiles) | 13872f43386 (2026-08-16) | **v2026.8.1** |
 
 The trust gate on `api.runtime.state.*` (bundled/official plugins only) is NOT an import of this
 plugin — see the design entry, "Option B".
