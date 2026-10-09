@@ -115,6 +115,11 @@ Requires adc ≥ **0.6.0** (the installed device host; the plugin bundles none).
 
 ### Added
 
+- **Messages that are not text are described to the agent** (openclaw-ademu #22, AdemuMLS #440). A file
+  (photo, video, voice note, file) or a message of a kind the plugin does not handle reaches the agent as
+  a turn whose text names each file — kind, name, size — before the caption, instead of a caption-only
+  or empty turn. Such a message is never a command; it is acked at adoption like text, and ingress never
+  waits for a file. Opening the file is the next step (`ademu_get_media`).
 - The **enrollment page**: a browser page served on the gateway itself (`/plugins/ademu/enroll/<token>`)
   that shows the QR, then the four safety words with **Yes — the words match** and **No — they differ**.
   The tool opens it in the gateway machine's browser, so a TUI user (no image rendering there) still
@@ -124,6 +129,10 @@ Requires adc ≥ **0.6.0** (the installed device host; the plugin bundles none).
 
 ### Fixed
 
+- **A sender can no longer forge OpenClaw runtime context.** Message text, captions, filenames, display
+  names and usernames reach OpenClaw with its `<<<BEGIN_/END_OPENCLAW_INTERNAL_CONTEXT>>>` delimiters
+  escaped. OpenClaw before 2026.9.3 did not escape inbound text and lifted such blocks into hidden
+  runtime context (openclaw/openclaw#140404).
 - Enrolling from chat (`ademu_enroll`) now writes the routing binding for the enrolling agent
   (`bindings: [{ agentId, match: { channel: "ademu", accountId } }]`) in the same config write as the
   account, like the wizard's routing step. Without it, a multi-agent install refused the new account's

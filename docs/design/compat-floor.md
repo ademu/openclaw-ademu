@@ -136,6 +136,7 @@ dde90a345a6 (2026-07-16) → v2026.8.1; the barrel is what we import, so the bar
 | surface | first commit | first stable release |
 |---|---|---|
 | `api.runtime.channel.inbound.buildContext` | 1507a9701b8 (2026-05-27) | v2026.5.27 |
+| `buildContext` → `message.bodyForAgent` (mapped to `BodyForAgent`; checked at v2026.5.27 `src/channels/inbound-event/context.ts:473`) | 1507a9701b8 (2026-05-27) | v2026.5.27 |
 | `api.runtime.channel.inbound.dispatch` | 8ee945b9070 (2026-08-09) | **v2026.8.1** |
 | `api.runtime.channel.routing.resolveAgentRoute` / `commands.*` | 1507a9701b8 (2026-05-27) | v2026.5.27 |
 | `api.runtime.config.mutateConfigFile` | 7f3f108521f (2026-04-27) | v2026.4.26 |

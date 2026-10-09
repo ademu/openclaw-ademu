@@ -54,6 +54,18 @@ export const strings = {
     securityNotice: "Ademú flagged this conversation with a security notice. Decline to converse here until it is cleared.",
   },
 
+  // ----- inbound files (AdemuMLS #440): the turn text the agent reads for a non-text message -----
+  media: {
+    kinds: { photo: "photo", video: "video", voice: "voice note", file: "file" },
+    file: (f: { kind: string; ordinal: { index: number; count: number } | undefined; filename: string; size: string }) => {
+      const head = f.ordinal ? `${f.kind} ${f.ordinal.index} of ${f.ordinal.count}` : f.kind;
+      const facts = [f.filename, f.size].filter((s) => s.length > 0).join(", ");
+      return `[${head}${facts ? `: ${facts}` : ""} — this channel can't open files yet]`;
+    },
+    anyFile: "[a file — this channel can't open files yet]",
+    unknownKind: "[a message of a kind this channel can't show]",
+  },
+
   // ----- enrollment (wizard + ademu_enroll tool) -----
   enroll: {
     wizardIntro: "Ademú — enroll an agent",
