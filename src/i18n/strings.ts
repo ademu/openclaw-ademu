@@ -75,6 +75,25 @@ export const strings = {
     // After the file lines when they name the tool: a host tool policy can still hide it from this agent.
     openNote: "[if ademu_get_media is not among your tools, say you can't open files here; don't call it]",
     unknownKind: "[a message of a kind this channel can't show]",
+    // ----- sending files (#27) -----
+    send: {
+      why: {
+        unsupported: "this kind of file can't be sent here",
+        tooLarge: "it is too large",
+        tooMany: "too many files at once",
+        unreadable: "the file couldn't be read",
+        uploadFailed: "the upload failed",
+        notMember: "the agent is not in this conversation",
+        disconnected: "the connection to the Ademú device host was lost",
+        cancelled: "the send was cancelled",
+        other: "something went wrong",
+      },
+      // In the chat, where the reply's file would have been.
+      refused: (names: string, why: string) => `[couldn't send ${names}: ${why}]`,
+      // At the top of the agent's next turn in that conversation (it never sees its own chat lines).
+      agentNote: (names: string, why: string) => `[your earlier file ${names} was not delivered: ${why}]`,
+      noAdvert: "The Ademú device host (adc) on this machine is too old to send files. Upgrade it: re-run the adc installer.",
+    },
     // ----- the ademu_get_media tool -----
     tool: {
       label: "Ademú file",

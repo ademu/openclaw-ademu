@@ -8,9 +8,12 @@ import { AdoptionFailedError } from "../src/monitor/adoption.js";
 import { startIngress, MAX_INFLIGHT, type RuntimeChannelSurface } from "../src/monitor/ingress.js";
 import { openSession } from "../src/monitor/session.js";
 import { createAdemuIngressResolver } from "../src/security.js";
+import { getAgentScopedMediaLocalRoots } from "openclaw/plugin-sdk/media-runtime";
+import { createReplyMediaSender, type MediaLoader, type RefusalNotes } from "../src/outbound.js";
 import { IngressHaltedError, IngressProtocolError } from "../src/status.js";
 import { AdemuStore } from "../src/store.js";
 import { AGENT, DEVICE, FakeAdcClient, fakeConnect, GUEST, member, OWNER, ROOM_DM, ROOM_GROUP } from "./fakes/adc.js";
+import { fakeLoader, tinyPng } from "./fakes/media-files.js";
 
 const cfg = {
   channels: { ademu: { accounts: { iris: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER, token: "t" } } } },
@@ -66,6 +69,7 @@ async function world(
     watermark?: { deviceId: string; adoptedSeq: number };
     agentName?: string;
     onSecurityNotice?: (groupId: string | undefined) => void;
+    load?: MediaLoader;
   } = {},
 ) {
   const client = new FakeAdcClient({ lastAckedSeq: opts.lastAckedSeq });
@@ -78,6 +82,9 @@ async function world(
   const session = await openSession({ token: "t", sessionSocketPath: "/s", account: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER }, deps: { connect, now: () => 0, log: () => {} } });
   const rt = fakeRuntime();
   const ac = new AbortController();
+  const refusalNotes: RefusalNotes = new Map();
+  /** What reached the host's loader (the attachment resolver) on the reply path. */
+  const resolved: Array<{ url: string; localRoots?: readonly string[] | undefined }> = [];
   const handle = startIngress({
     accountId: "iris",
     cfg,
@@ -89,13 +96,25 @@ async function world(
     mentionAliases: [],
     typingKeepaliveMs: 2000,
     sendText: async (group_id, body) => client.sendText({ group_id, body }),
+    // The sender startAccount wires, with the test's loader behind the host resolver's seam.
+    sendMedia: createReplyMediaSender({
+      client: session.client,
+      cfg,
+      notes: refusalNotes,
+      resolve: async (url, maxBytes, o) => {
+        resolved.push({ url, localRoots: o?.localRoots });
+        if (!opts.load) throw new Error("no loader");
+        return opts.load(url, maxBytes);
+      },
+    }),
+    refusalNotes,
     signal: ac.signal,
     log: (event, fields) => logs.push({ event, fields }),
     stallMs: 60_000,
     ...(opts.onSecurityNotice ? { onSecurityNotice: opts.onSecurityNotice } : {}),
   });
   const settle = () => new Promise((r) => setTimeout(r, 5));
-  return { client, store, session, rt, handle, logs, ac, settle };
+  return { client, store, session, rt, handle, logs, ac, settle, refusalNotes, resolved };
 }
 
 describe("ack at adoption, in order", () => {
@@ -604,5 +623,110 @@ describe("runtime-context delimiters never pass through (openclaw/openclaw#14040
     const ctx = ctxOf(d);
     expect(leaks(ctx)).toBe(false);
     expect((ctx.sender as { name: string }).name).toBe("Marios [[OPENCLAW_INTERNAL_CONTEXT_END]]");
+  });
+});
+
+describe("replies with files (#27)", () => {
+  type Deliver = (p: { text?: string; mediaUrl?: string; mediaUrls?: string[] }) => Promise<{ visibleReplySent: boolean }>;
+  const deliverOf = (d: Dispatch) => (d.plan.delivery as { deliver: Deliver }).deliver;
+  const ctxOf = (d: Dispatch) => (d.plan.ctxPayload as { ctx: Record<string, unknown> }).ctx;
+  const files = { "chart.png": { bytes: tinyPng(), contentType: "image/png" }, "a.pdf": { bytes: Buffer.from("%PDF"), contentType: "application/pdf" } };
+
+  it("a reply that is only a file is sent, and counts as a visible reply", async () => {
+    const w = await world({ load: fakeLoader(files) });
+    w.client.message({ body: "send me the chart" });
+    const d = await w.rt.nextDispatch();
+    expect(await deliverOf(d)({ mediaUrl: "https://files.test/chart.png" })).toEqual({ visibleReplySent: true });
+    expect(w.client.mediaSends).toHaveLength(1);
+    expect(w.client.mediaSends[0]!.items[0]).toMatchObject({ type: "photo", filename: "chart.png" });
+    expect(w.client.sent).toEqual([]);
+  });
+
+  it("text and files go as one captioned album; duplicate URLs are sent once", async () => {
+    const w = await world({ load: fakeLoader(files) });
+    w.client.message({ body: "both please" });
+    const d = await w.rt.nextDispatch();
+    await deliverOf(d)({ text: "here you go", mediaUrl: "https://files.test/chart.png", mediaUrls: ["https://files.test/chart.png", "https://files.test/a.pdf"] });
+    expect(w.client.mediaSends).toHaveLength(1);
+    expect(w.client.mediaSends[0]!.caption).toBe("here you go");
+    expect(w.client.mediaSends[0]!.items.map((i) => i.filename)).toEqual(["chart.png", "a.pdf"]);
+    expect(w.client.sent).toEqual([]);
+  });
+
+  it("the reply path loads from the routed agent's local roots", async () => {
+    const w = await world({ load: fakeLoader(files) });
+    w.client.message({ body: "chart" });
+    const d = await w.rt.nextDispatch();
+    await deliverOf(d)({ mediaUrl: "/workspace/chart.png" });
+    expect(w.resolved).toEqual([{ url: "/workspace/chart.png", localRoots: getAgentScopedMediaLocalRoots(cfg, "main") }]);
+  });
+
+  it("a refused file posts a line in the chat, and the agent's next turn there opens with a note, given once", async () => {
+    const w = await world({ load: fakeLoader(files) });
+    w.client.message({ body: "the missing one" });
+    const d1 = await w.rt.nextDispatch();
+    expect(await deliverOf(d1)({ text: "attached", mediaUrl: "https://files.test/missing.pdf" })).toEqual({ visibleReplySent: true });
+    expect(w.client.sent.map((s) => s.body)).toEqual(["attached", "[couldn't send missing.pdf: the file couldn't be read]"]);
+    await d1.lifecycle.onAdopted();
+
+    w.client.message({ body: "why?" });
+    const d2 = await w.rt.nextDispatch();
+    expect(ctxOf(d2).message).toEqual({
+      rawBody: "why?",
+      commandBody: "why?",
+      bodyForAgent: "[your earlier file missing.pdf was not delivered: the file couldn't be read]\nwhy?",
+    });
+    await d2.lifecycle.onAdopted();
+
+    w.client.message({ body: "and again" });
+    const d3 = await w.rt.nextDispatch();
+    expect(ctxOf(d3).message).toEqual({ rawBody: "and again", commandBody: "and again" });
+  });
+
+  it("a control command (answered by the host) does not use up the note; the next turn gets it (H5)", async () => {
+    const w = await world();
+    w.refusalNotes.set(ROOM_DM, [{ name: "x.pdf", reason: "too_large" }]);
+    w.client.message({ body: "/status" });
+    const d1 = await w.rt.nextDispatch();
+    expect(ctxOf(d1).message).toEqual({ rawBody: "/status", commandBody: "/status" });
+    await d1.lifecycle.onAdopted();
+
+    w.client.message({ body: "hello" });
+    const d2 = await w.rt.nextDispatch();
+    expect((ctxOf(d2).message as { bodyForAgent: string }).bodyForAgent).toBe("[your earlier file x.pdf was not delivered: it is too large]\nhello");
+  });
+
+  it("a turn core declines keeps the note for the next one (H5)", async () => {
+    const w = await world();
+    w.refusalNotes.set(ROOM_DM, [{ name: "x.pdf", reason: "too_large" }]);
+    w.client.message({ body: "first" });
+    const d1 = await w.rt.nextDispatch();
+    d1.resolve({ dispatched: false });
+    await w.settle();
+    expect(w.refusalNotes.has(ROOM_DM)).toBe(true);
+
+    w.client.message({ body: "second" });
+    const d2 = await w.rt.nextDispatch();
+    expect((ctxOf(d2).message as { bodyForAgent: string }).bodyForAgent).toBe("[your earlier file x.pdf was not delivered: it is too large]\nsecond");
+    await d2.lifecycle.onAdopted();
+    await w.settle();
+    expect(w.refusalNotes.has(ROOM_DM)).toBe(false);
+  });
+
+  it("a note is kept for its own conversation only", async () => {
+    const w = await world();
+    w.refusalNotes.set(ROOM_GROUP, [{ name: "x.pdf", reason: "too_large" }]);
+    w.client.message({ body: "dm" });
+    const d = await w.rt.nextDispatch();
+    expect(ctxOf(d).message).toEqual({ rawBody: "dm", commandBody: "dm" });
+    expect(w.refusalNotes.has(ROOM_GROUP)).toBe(true);
+  });
+
+  it("media_send_changed is ignored and never acked (the client's wait consumes it)", async () => {
+    const w = await world();
+    w.client.live({ event: "media_send_changed", message_id: "media-1", state: "queued" });
+    await w.settle();
+    expect(w.client.acks).toEqual([]);
+    expect(w.logs.map((l) => l.event)).not.toContain("event_unknown");
   });
 });

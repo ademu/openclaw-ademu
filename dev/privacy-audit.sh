@@ -8,7 +8,8 @@
 #     shapes; the pattern is matched LOWERCASED against the call CONTENT only (never the path);
 #   - the log-call scope gains OpenClaw's structured logger forms — `log.info(`, `logger.warn(`,
 #     `ctx.log?.error(`, `api.logger.debug(`, `runtime.log(`, `runtime.error(` — on top of console.*,
-#     process.std{out,err}.write and bare log()/fail() wrappers.
+#     process.std{out,err}.write and bare log()/fail() wrappers, called directly or optionally
+#     (`log?.(`, `params.log?.(`).
 # Multiline calls are joined until their parens balance (string-, comment-, bracket- and escape-
 # aware, 10-line cap). The self-test (test/gates/privacy-audit.test.ts) drives this script over a
 # bait tree via PRIVACY_AUDIT_TS_ROOT.
@@ -17,7 +18,7 @@ cd "$(dirname "$0")/.."
 FAILED=0
 
 TS_PATTERN='password|passphrase|refresh_token|bearer|plaintext|ciphertext|dsn|access_token|api_secret|adc1_|qr_payload|qrpayload|qrdataurl|agent_name|agentname|\.detail([^a-z0-9_]|$)|\.raw([^a-z0-9_]|$)|(^|[^a-z0-9_])token[[:space:]]*[,})+:=]|[.{$]token([^a-z0-9_]|$)|(^|[^a-z0-9_])words[[:space:]]*[,})+:=]|[.{$]words([^a-z0-9_]|$)'
-TS_LOG_SCOPE='console\.(log|info|warn|error|debug)\(|process\.std(out|err)\.write\(|(^|[^a-zA-Z_.])(log|fail)\(|(^|[^a-zA-Z_])(log|logger|runtime)[?]?\.(info|warn|error|debug|log)\(|getChildLogger\([^)]*\)\.(info|warn|error|debug)\(|hostLog\('
+TS_LOG_SCOPE='console\.(log|info|warn|error|debug)\(|process\.std(out|err)\.write\(|(^|[^a-zA-Z_.])(log|fail)(\?\.)?\(|[.]log\?\.\(|(^|[^a-zA-Z_])(log|logger|runtime)[?]?\.(info|warn|error|debug|log)\(|getChildLogger\([^)]*\)\.(info|warn|error|debug)\(|hostLog\('
 export TS_PATTERN TS_LOG_SCOPE
 
 # Roots: files or directories (unquoted on purpose — several roots). The self-test overrides the

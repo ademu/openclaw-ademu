@@ -1,8 +1,5 @@
 import { isChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
-import {
-  verifyChannelMessageAdapterCapabilityProofs,
-  verifyChannelMessageReceiveAckPolicyAdapterProofs,
-} from "openclaw/plugin-sdk/channel-outbound";
+import { verifyChannelMessageReceiveAckPolicyAdapterProofs } from "openclaw/plugin-sdk/channel-outbound";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AccountNotRunningError,
@@ -137,22 +134,7 @@ describe("outbound: message adapter", () => {
     expect(err.message).not.toContain("alice-secret-value"); // never reflect caller data into (loggable) errors
   });
 
-  it("proves the declared durable-final text capability", async () => {
-    const client = new FakeAdcClient();
-    registerLiveAccount("main", { client });
-    const results = await verifyChannelMessageAdapterCapabilityProofs({
-      adapterName: "ademu",
-      adapter: ademuMessageAdapter,
-      proofs: {
-        text: async () => {
-          const r = await ademuMessageAdapter.send.text!({ cfg, to: ROOM_DM, text: "proof", accountId: "main" });
-          expect(r.receipt.platformMessageIds).toEqual(["out-1"]);
-        },
-      },
-    });
-    expect(results.find((r) => r.capability === "text")?.status).toBe("verified");
-    expect(results.filter((r) => r.capability !== "text").every((r) => r.status === "not_declared")).toBe(true);
-  });
+  // The declared text + media capability proofs live in media-send.test.ts (the host verifies both together).
 
   it("declares exactly the after_agent_dispatch ack policy (rider R4)", async () => {
     const results = await verifyChannelMessageReceiveAckPolicyAdapterProofs({

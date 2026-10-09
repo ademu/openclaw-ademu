@@ -6,6 +6,8 @@ import type {
   ConversationSummary,
   DeviceEvent,
   DeviceHello,
+  MediaItemInput,
+  MediaSendSettled,
   MemberEntry,
   MessageReceivedEvent,
   RetryInfo,
@@ -18,6 +20,9 @@ export const GUEST = "16fd2706-8baf-433b-82eb-8c7fada847da";
 export const DEVICE = "3d594650-3436-4c91-9f6b-2a3e19b4c8d1";
 export const ROOM_DM = "9b2b6d1e-3c1a-4f8e-9a1b-2c3d4e5f6a7b";
 export const ROOM_GROUP = "5f0c9a1e-8d2b-4c3a-9e1f-0a1b2c3d4e5f";
+
+/** A #441 daemon's send advert (small max_bytes so tests can cross it). */
+export const MEDIA_SEND_ADVERT = { max_bytes: 1_000_000, max_items: 20, types: { file: ["*"], photo: ["image/jpeg", "image/png"] } };
 
 export const member = (user_id: string, kind = "human", display_name = "", username = ""): MemberEntry => ({ user_id, kind, display_name, username });
 
@@ -72,7 +77,7 @@ export class FakeAdcClient {
   constructor(opts: { deviceId?: string | undefined; agentUserId?: string | undefined; ownerUserId?: string | undefined; lastAckedSeq?: number | undefined } = {}) {
     const deviceId = opts.deviceId ?? DEVICE;
     const agentUserId = opts.agentUserId ?? AGENT;
-    this.hello = { v: 1, type: "hello", device_id: deviceId, agent_user_id: agentUserId, proto: 1, last_acked_seq: opts.lastAckedSeq ?? -1, capabilities: [] };
+    this.hello = { v: 1, type: "hello", device_id: deviceId, agent_user_id: agentUserId, proto: 1, last_acked_seq: opts.lastAckedSeq ?? -1, capabilities: [], media_send: MEDIA_SEND_ADVERT };
     this.self = { user_id: agentUserId, device_id: deviceId, username: "iris", display_name: "Iris", owner_user_id: opts.ownerUserId ?? OWNER };
   }
 
@@ -179,6 +184,20 @@ export class FakeAdcClient {
   async sendText(params: { group_id: string; body: string }) {
     this.sent.push(params);
     return { message_id: `out-${this.sent.length}`, status: "queued" };
+  }
+  /** Every album declared: the declared items (no bytes) and the caption. */
+  mediaSends: Array<{ group_id: string; caption?: string; items: Array<Omit<MediaItemInput, "source">> }> = [];
+  /** How the next `sendMedia` ends: an outcome status (+ code) after the wait, or an error it throws. */
+  mediaOutcome: { status: MediaSendSettled["status"]; code?: string } | Error = { status: "queued" };
+  /** What a later `waitForMediaSend` (no deadline) settles on; never, by default. */
+  lateOutcome: Promise<MediaSendSettled> = new Promise(() => {});
+  async sendMedia(params: { group_id: string; caption?: string; items: MediaItemInput[] }): Promise<MediaSendSettled> {
+    this.mediaSends.push({ group_id: params.group_id, ...(params.caption !== undefined ? { caption: params.caption } : {}), items: params.items.map(({ source: _s, ...item }) => item) });
+    if (this.mediaOutcome instanceof Error) throw this.mediaOutcome;
+    return { message_id: `media-${this.mediaSends.length}`, ...this.mediaOutcome };
+  }
+  waitForMediaSend(): Promise<MediaSendSettled> {
+    return this.lateOutcome;
   }
   async sendReaction() {
     return { status: "queued" };

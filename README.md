@@ -205,10 +205,15 @@ A device host older than adc 0.6.0 — or one without the enrollment socket — 
   that serves files (AdemuMLS #440); with an older one the line says the channel can't open files.
   Files above `mediaMaxOpenMb` (default 50 MiB) are refused without being read, because a file is held
   in the gateway's memory while it is saved; opening the same file again reuses the saved copy.
-  Sending files is not supported yet (#23). The tool is in the `coding` and `messaging` tool
+  The tool is in the `coding` and `messaging` tool
   profiles; on `tools.profile: "minimal"` add it with `tools.alsoAllow: ["ademu_get_media"]`. The
   plugin logs a warning at startup when the config plainly keeps the tool from agents, and the file
   lines tell an agent without the tool to say it can't open files rather than try.
+- **Files the agent sends:** a reply's files (and its `message` tool sends) go out as one message;
+  JPEG and PNG as photos, everything else as files, with the reply text as the caption. Needs an adc
+  that sends files (AdemuMLS #441). A file that can't go out (unreadable, too large, a kind the device
+  host doesn't take, a failed upload) leaves a short line in the chat, and the agent's next turn there
+  tells it which file and why.
 - **Multiple agents:** one account per agent under `channels.ademu.accounts`, each routed to an
   OpenClaw agent by a `bindings` entry (`channel: "ademu"`, `accountId`). The wizard asks which agent
   to route to; enrolling from chat routes the account to the agent you are talking to, and refuses
