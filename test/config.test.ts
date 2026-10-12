@@ -123,6 +123,14 @@ describe("accounts and inheritance", () => {
     expect(resolveAdemuAccount(cfg({ accounts: { a: { deviceId: "d", token: "t" } } }), "a", ENV, () => false).serverConfigured).toBe(false);
   });
 
+  it("historyLimit: a whole number ≥ 0 at the root or on an account; the account inherits the root's", () => {
+    expect(AdemuChannelSchema.safeParse({ historyLimit: 20, accounts: { a: { historyLimit: 0 } } }).success).toBe(true);
+    expect(AdemuChannelSchema.safeParse({ historyLimit: -1 }).success).toBe(false);
+    expect(AdemuChannelSchema.safeParse({ accounts: { a: { historyLimit: 2.5 } } }).success).toBe(false);
+    expect(resolveAdemuAccount(cfg({ historyLimit: 20, accounts: { a: { deviceId: "d", token: "t" } } }), "a", ENV, () => false).historyLimit).toBe(20);
+    expect(resolveAdemuAccount(cfg({ accounts: { a: { deviceId: "d", token: "t" } } }), "a", ENV, () => false).historyLimit).toBeUndefined();
+  });
+
   it("slugs an agent name into a normalized account id", () => {
     expect(accountIdForAgentName("Iris")).toBe("iris");
     expect(accountIdForAgentName("Ademú Helper #2")).toBe("ademu-helper-2");

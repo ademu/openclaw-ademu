@@ -18,6 +18,7 @@ import { createAdemuIngressResolver } from "../security.js";
 import { blockedPatch, classifyError, patchFor, readyPatch, recoveringPatch, unreachableCopy, type StatusPatch } from "../status.js";
 import type { AdemuStore } from "../store.js";
 import { DaemonAbortedError, SessionSocketMovedError, type Attacher, type Attachment } from "./attach.js";
+import { resolveHistoryLimit } from "./history.js";
 import { startIngress, type IngressHandle, type RuntimeChannelSurface } from "./ingress.js";
 import { openSession, type Session, type SessionDeps } from "./session.js";
 
@@ -256,6 +257,8 @@ async function runWithLease(
       },
       sendMedia: createReplyMediaSender({ client: session.client, cfg, notes: refusalNotes, log }),
       refusalNotes,
+      roomHistory: new Map(),
+      historyLimit: resolveHistoryLimit(cfg, account),
       signal: loopAbort.signal,
       log,
       onSecurityNotice: (groupId) => {

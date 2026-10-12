@@ -929,3 +929,28 @@ Decisions recorded at the implementation check (2026-10-09):
 - The `max_items` cap counts the reply's files before any load, so no more than the cap is ever fetched.
 - No URL-basename fallback for the filename: `extractOriginalFilename` always returns a name (falling
   back to the stored copy's basename).
+
+## 17. Room history (2026-10-12)
+
+In a room with `requireMention` on (the default), a message that does not address the agent used to be
+acked and dropped, so an addressed turn saw only itself and the owner's messages. That reverses the
+round-3 wording above ("unaddressed messages are filtered before the model"): such a message still does
+not start a turn, but the agent's next turn in that room gets it as `message.inboundHistory`, which core
+renders as "Chat history since last reply" (the newest 20). This matches what OpenClaw does for its own
+mention-gated channels (LINE, Signal, Slack); core leaves the buffering to each channel.
+
+- `src/monitor/history.ts` keeps the skipped messages per conversation, in memory per lease, like the
+  refusal notes: sender (display name, else username, else id, escaped for the runtime-context
+  delimiters), the described body (a file line for media), time and message id. Only senders that
+  passed access reach the skip, and the agent's own messages are dropped before it.
+- The turn reads the history without clearing it; it is cleared once the turn is adopted, and only the
+  entries that were read. A turn core declines keeps it; a control command neither gets nor clears it.
+  The ingress loop settles each turn before reading the next event, so no reservation is needed.
+- `historyLimit` (account, then `channels.ademu`, then `messages.groupChat.historyLimit`, then 50; `0` =
+  off) is resolved once per lease and passed to ingress; a missing value there means 50, so the buffer
+  is always bounded. `sessionTranscript` is not used: the agent's own turns are already in its session.
+- `removed_from_group` drops the room's history, so a re-added agent does not get chatter from before
+  its removal. There is no age limit; a changed `historyLimit` applies from the next account start.
+- A restart loses unread history: skipped messages are acked at once, so the daemon never replays them.
+  A durable version needs a daemon query for messages since the agent's last reply.
+
