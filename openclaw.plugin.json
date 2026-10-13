@@ -100,6 +100,11 @@
             },
             "additionalProperties": false
           },
+          "historyLimit": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
           "groups": {
             "type": "object",
             "propertyNames": {
@@ -336,6 +341,11 @@
                     "user",
                     "system"
                   ]
+                },
+                "historyLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
                 }
               },
               "additionalProperties": false
@@ -384,6 +394,14 @@
           "label": "Device host scope (written at enrollment)",
           "advanced": true,
           "help": "user: this user's own device host; system: the host's system-wide install. Enrollment writes it, so a system install added later never moves an enrolled account to a device host that does not know its token."
+        },
+        "accounts.*.historyLimit": {
+          "label": "Room history (messages)",
+          "advanced": true
+        },
+        "historyLimit": {
+          "label": "Room history (messages)",
+          "help": "Room messages that did not address the agent, kept for its next turn there (default 50; 0 = none)."
         },
         "dataDir": {
           "label": "Device host data dir",

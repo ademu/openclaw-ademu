@@ -115,6 +115,13 @@ Requires adc ≥ **0.6.0** (the installed device host; the plugin bundles none).
 
 ### Added
 
+- **Room history for mention-gated rooms.** A room message that does not address the agent still
+  starts no turn, but the agent's next turn in that room gets it as "chat history since last reply"
+  (core shows the newest 20), so it knows what was said in between. `channels.ademu.historyLimit` and
+  `channels.ademu.accounts.<id>.historyLimit` (then `messages.groupChat.historyLimit`, else 50) set how
+  many are kept per room; `0` turns it off. Kept in memory: a restart, or removing the agent from the
+  room, drops what it had not seen. This reverses the earlier "filtered before the model" wording in
+  the README and the ademu skill.
 - **The agent sends files** (openclaw-ademu #27 and #23, AdemuMLS #441). A reply's files, and the
   agent's own `message` sends, go out as one message: JPEG and PNG as photos, anything else as files,
   under their original names, with the reply text as the caption when it fits. The reply text is never

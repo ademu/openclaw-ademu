@@ -111,6 +111,7 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `channel-secret-basic-runtime` → `createSimpleChannelSecretContract` | value | 10e60fa0ce6 (2026-08-07) | **v2026.8.1** |
 | `channel-setup` → `ChannelSetupWizard` | type | 07d9f725b61 (2026-03-18) | v2026.3.22 |
 | `core` → `ChannelMessagingAdapter` | type | 826c592debf (2026-03-18) | v2026.3.22 |
+| `core` → `HistoryEntry` | type | e4b5027c5e2 (2026-04-04) | v2026.4.5 |
 | `core` → `OpenClawPluginApi` | type | a4850b1b8f2 (2026-03-04) | v2026.3.7 |
 | `core` → `OpenClawPluginToolContext` | type | aa78a0c00e5 (2026-03-20) | v2026.3.22 |
 | `core` → `PluginRuntime` | type | a4850b1b8f2 (2026-03-04) | v2026.3.7 |

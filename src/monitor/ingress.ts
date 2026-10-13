@@ -35,6 +35,7 @@ import { peekRefusalNote, type RefusalNotes } from "../outbound.js";
 import type { AdemuStore } from "../store.js";
 import { AdoptionFailedError, AdoptionTracker, type TurnResultLike } from "./adoption.js";
 import { bodyForAgent, describeContent, escapeRuntimeContextDelimiters } from "./content.js";
+import { forgetRoomHistory, peekRoomHistory, recordSkipped, type RoomHistory } from "./history.js";
 import type { Session } from "./session.js";
 
 export const MAX_INFLIGHT = 4;
@@ -70,6 +71,10 @@ export type IngressParams = {
   sendMedia: (groupId: string, text: string | undefined, urls: readonly string[], agentId: string) => Promise<boolean>;
   /** Files that did not go out, per conversation: the agent's next turn there starts with a note (shared with outbound). */
   refusalNotes?: RefusalNotes | undefined;
+  /** Room messages skipped for not addressing the agent, per conversation: its next turn there gets them as history. */
+  roomHistory?: RoomHistory | undefined;
+  /** How many skipped messages a conversation keeps (0 = none; missing = the default). */
+  historyLimit?: number | undefined;
   /** Shutdown signal for the loop (NOT propagated to adopted turns). */
   signal: AbortSignal;
   /** A future `security_notice` live event: the caller sets a fixed status and posts a fixed room note. */
@@ -215,7 +220,23 @@ export function startIngress(params: IngressParams): IngressHandle {
       hasControlCommand: isTextCommand,
       commandAuthorized: pre.commandAccess.authorized,
     });
+    // A daemon that serves files (`get_blob`, AdemuMLS #440) lets the agent open them in its own turn.
+    const described =
+      content.kind === "text" ? undefined : bodyForAgent(body, content, client.capabilities.has("get_blob") ? { messageId: ev.message_id } : {});
+    const senderName = sender ? escapeRuntimeContextDelimiters(displayNameOf(sender)) : undefined;
     if (mention.shouldSkip) {
+      // Not for the agent, but part of the room: its next turn here gets it as history.
+      recordSkipped(
+        params.roomHistory,
+        ev.group_id,
+        {
+          sender: senderName || escapeRuntimeContextDelimiters(ev.sender_username?.trim() || normalizeId(ev.sender_user_id)),
+          body: described ?? body,
+          timestamp: ev.created_at_ms,
+          messageId: ev.message_id,
+        },
+        params.historyLimit,
+      );
       log("ingress_unaddressed_skipped", { seq });
       ack(seq);
       return;
@@ -235,16 +256,13 @@ export function startIngress(params: IngressParams): IngressHandle {
       return;
     }
     // 7. Context (Tlon/SMS projection).
-    // A daemon that serves files (`get_blob`, AdemuMLS #440) lets the agent open them in its own turn.
-    const described =
-      content.kind === "text" ? undefined : bodyForAgent(body, content, client.capabilities.has("get_blob") ? { messageId: ev.message_id } : {});
     // Files of the agent's that did not go out since its last turn here: the note opens this turn. A
     // control command is answered by the host, not the agent, so the note waits for the next turn; it
-    // is cleared only once this turn is adopted (below).
+    // is cleared only once this turn is adopted (below). The room's skipped messages follow the same rule.
     const pendingNote = isTextCommand ? undefined : peekRefusalNote(params.refusalNotes, ev.group_id);
     const note = pendingNote?.text;
+    const pendingHistory = isTextCommand ? undefined : peekRoomHistory(params.roomHistory, ev.group_id);
     const text = described ?? body;
-    const senderName = sender ? escapeRuntimeContextDelimiters(displayNameOf(sender)) : undefined;
     const label = escapeRuntimeContextDelimiters(describeConversation(shape, params.account.agentName));
     const ctxPayload = runtime.inbound.buildContext({
       channel: CHANNEL_ID,
@@ -280,6 +298,7 @@ export function startIngress(params: IngressParams): IngressHandle {
         commandBody: text,
         // The note is for the agent only: commands still parse from commandBody.
         ...(described !== undefined || note !== undefined ? { bodyForAgent: note === undefined ? text : `${note}\n${text}` } : {}),
+        ...(pendingHistory ? { inboundHistory: pendingHistory.entries } : {}),
       },
       access: {
         mentions: {
@@ -364,8 +383,11 @@ export function startIngress(params: IngressParams): IngressHandle {
       throw new IngressHaltedError(err instanceof AdoptionFailedError ? err : new AdoptionFailedError("dispatch_rejected", err));
     }
     if (outcome.kind === "adopted-equivalent") log(outcome.reason === "callback_free_completion" ? "callback_free_completion" : "adopted_equivalent", { seq });
-    // The agent read the note unless core declined the turn; then it stays for the next one.
-    if (!(outcome.kind === "adopted-equivalent" && outcome.reason === "declined")) pendingNote?.consume();
+    // The agent read the note and the room history unless core declined the turn; then they stay for the next one.
+    if (!(outcome.kind === "adopted-equivalent" && outcome.reason === "declined")) {
+      pendingNote?.consume();
+      pendingHistory?.consume();
+    }
     ack(seq);
 
     // 10. Bound on concurrent runs (deferred turns are released from the bound at adoption).
@@ -420,6 +442,7 @@ export function startIngress(params: IngressParams): IngressHandle {
             break;
           case "removed_from_group":
             session.members.markInactive(ev.group_id);
+            forgetRoomHistory(params.roomHistory, ev.group_id);
             log("removed_from_group", { seq: ev.seq });
             break;
           case "reaction_changed":

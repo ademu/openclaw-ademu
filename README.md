@@ -191,10 +191,18 @@ A device host older than adc 0.6.0 — or one without the enrollment socket — 
 - **Direct chats:** only the owner (the Ademú account that enrolled the agent) is heard; anyone
   else's DM is dropped before the model sees it.
 - **Rooms:** the device receives all room traffic. By default a message that does not address the
-  agent is acknowledged and filtered before the model ever sees it (set
-  `channels.ademu.groups.<conversationId>.requireMention: false` to let every message through); the agent answers when addressed by name, by an alias from
+  agent does not start a turn (set `channels.ademu.groups.<conversationId>.requireMention: false` to
+  let every message through); the agent answers when addressed by name, by an alias from
   `plugins.entries.ademu.config.mentionAliases`, or by the owner (always heard). Per-room settings
   live under `channels.ademu.groups.<conversationId>` (`requireMention`, `toolsBySender`, …).
+- **Room history:** the messages a room let through without addressing the agent are kept, and the
+  agent's next turn in that room gets them as "chat history since last reply", so it knows what was
+  said in between. `channels.ademu.historyLimit` (or `channels.ademu.accounts.<id>.historyLimit`)
+  sets how many are kept per room; unset, `messages.groupChat.historyLimit` applies, else 50. OpenClaw
+  shows the agent the newest 20. `0` turns it off: unaddressed messages then never reach the model.
+  The kept messages live in memory, so a gateway restart drops the ones the agent had not seen yet,
+  and removing the agent from a room drops that room's. The limit is read when the account starts:
+  a change takes effect once the account (or the gateway) restarts.
 - **Sending proactively:** the `message` tool with `channel: "ademu"` and a conversation id
   (`ademu:<uuid>` or the bare UUID). Reactions: `action: "react"`.
 - **Files people send** (photos, videos, voice notes, files): the agent sees one line per file and

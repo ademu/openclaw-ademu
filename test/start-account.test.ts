@@ -11,7 +11,7 @@ import type { RuntimeChannelSurface } from "../src/monitor/ingress.js";
 import { strings } from "../src/i18n/strings.js";
 import { getLiveAccount, resetLiveAccountsForTests } from "../src/outbound.js";
 import { AdemuStore } from "../src/store.js";
-import { AGENT, DEVICE, FakeAdcClient, fakeConnect, GUEST, member, OWNER, ROOM_DM } from "./fakes/adc.js";
+import { AGENT, DEVICE, FakeAdcClient, fakeConnect, GUEST, member, OWNER, ROOM_DM, ROOM_GROUP } from "./fakes/adc.js";
 
 const cfg = { channels: { ademu: { accounts: { iris: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER, token: "t" } } } } } as unknown as OpenClawConfig;
 
@@ -79,7 +79,15 @@ function runtimeSurface(): RuntimeChannelSurface {
 }
 
 function world(
-  opts: { platform?: string; connectError?: unknown; acquireError?: unknown; unreachable?: Unreachable; releaseHangs?: boolean; resolved?: string | Array<string | "hang"> } = {},
+  opts: {
+    platform?: string;
+    connectError?: unknown;
+    acquireError?: unknown;
+    unreachable?: Unreachable;
+    releaseHangs?: boolean;
+    resolved?: string | Array<string | "hang">;
+    account?: Partial<ResolvedAdemuAccount>;
+  } = {},
 ) {
   const client = new FakeAdcClient();
   client.room(ROOM_DM, [member(OWNER, "human", "Marios"), member(AGENT, "agent", "Iris")]);
@@ -119,7 +127,7 @@ function world(
   const ctx = {
     cfg,
     accountId: "iris",
-    account: account(),
+    account: account(opts.account),
     runtime: { log: () => {}, error: () => {}, exit: () => {} },
     abortSignal: ac.signal,
     getStatus: () => ({ accountId: "iris" }),
@@ -152,6 +160,24 @@ describe("startAccount: happy path and abort", () => {
     expect(w.statuses.at(-1)).toMatchObject({ running: false, lifecycle: "stopped" });
     // the drain wait never exceeds the cap and leaves the release tail
     expect(DRAIN_CAP_MS).toBeLessThanOrEqual(STOP_DEADLINE_MS - RELEASE_TAIL_MS);
+  });
+});
+
+describe("startAccount: room history", () => {
+  it("the account's historyLimit reaches ingress (account 1 → only the newest skipped message)", async () => {
+    const w = world({ account: { historyLimit: 1 } });
+    w.client.room(ROOM_GROUP, [member(OWNER, "human", "Marios"), member(GUEST, "human", "Jhessy"), member(AGENT, "agent", "Iris")]);
+    const built: Array<Record<string, unknown>> = [];
+    const surface = runtimeSurface();
+    w.deps.runtime = { ...surface, inbound: { ...surface.inbound, buildContext: (p) => (built.push(p), { ctx: p }) } };
+    const run = startAccount(w.ctx, w.deps);
+    await settle();
+    for (const body of ["a", "b", "Iris, hi"]) w.client.message({ group_id: ROOM_GROUP, sender_user_id: GUEST, body });
+    await settle();
+    expect(built).toHaveLength(1);
+    expect((built[0]!.message as { inboundHistory: Array<{ body: string }> }).inboundHistory.map((e) => e.body)).toEqual(["b"]);
+    w.ac.abort();
+    await run;
   });
 });
 

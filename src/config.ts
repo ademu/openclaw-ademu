@@ -63,6 +63,7 @@ export const AdemuAccountSchema = z
     enrollSocketPath: z.string().optional(),
     /** The device host scope this account was enrolled at; written by both enrollment doors, never inherited. */
     daemonScope: z.enum(["user", "system"]).optional(),
+    historyLimit: z.number().int().min(0).optional(),
   })
   .strict();
 
@@ -74,6 +75,8 @@ const AdemuBaseSchema = z
     socketPath: z.string().optional(),
     enrollSocketPath: z.string().optional(),
     server: ServerSchema.optional(),
+    /** Room messages kept for the agent's next turn when they do not address it (0 = none). */
+    historyLimit: z.number().int().min(0).optional(),
     groups: z.record(z.string(), buildGroupEntrySchema()).optional(),
   })
   .strict();
@@ -106,6 +109,11 @@ export const ADEMU_UI_HINTS = {
     label: "Device host scope (written at enrollment)",
     advanced: true,
     help: "user: this user's own device host; system: the host's system-wide install. Enrollment writes it, so a system install added later never moves an enrolled account to a device host that does not know its token.",
+  },
+  "accounts.*.historyLimit": { label: "Room history (messages)", advanced: true },
+  historyLimit: {
+    label: "Room history (messages)",
+    help: "Room messages that did not address the agent, kept for its next turn there (default 50; 0 = none).",
   },
   dataDir: { label: "Device host data dir", advanced: true },
   socketPath: { label: "Device host control socket", advanced: true },
@@ -307,6 +315,8 @@ export type ResolvedAdemuAccount = {
   tokenStatus: TokenStatus;
   tokenSource: "config" | "secretRef" | "none";
   daemon: DaemonIdentity;
+  /** Room messages kept for the next turn (account, else channel); unset = the global default. */
+  historyLimit?: number;
   /** `channels.ademu.server` is set: accepted and IGNORED (deprecated, AdemuMLS #712) — logged once. */
   serverConfigured: boolean;
   /** Set when this account's daemon identity collides with another account's (R1). */
@@ -386,6 +396,7 @@ function readAccount(
     tokenStatus: token.status,
     tokenSource,
     daemon,
+    ...(typeof merged.historyLimit === "number" ? { historyLimit: merged.historyLimit } : {}),
     serverConfigured: serverConfigured(channel),
   };
 }

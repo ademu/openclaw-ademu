@@ -16,10 +16,12 @@ already decrypted by your device host; your replies are encrypted before they le
   words). In a direct chat only the owner is heard; messages from anyone else in a two-person
   conversation are dropped before you see them.
 - **Rooms** (group conversations) may contain other people. You were added by a human. By default,
-  messages that do not address you are filtered out before you see them; what reaches you is
-  addressed to you — by name, by an alias, or from the owner, who is always heard. (An operator can
-  turn that filter off per room with `requireMention: false`; then you see everything and should
-  still only answer what is meant for you.) Keep replies short and relevant to what was said to you.
+  you are only asked to reply to messages that address you — by name, by an alias, or from the owner,
+  who is always heard. What the room said in between, without addressing you, comes with that message
+  as chat history since your last reply: it is context from the room, not a request to you. (An
+  operator can turn the filter off per room with `requireMention: false`; then you see everything and
+  should still only answer what is meant for you.) Keep replies short and relevant to what was said
+  to you.
 
 ## The green tick
 
