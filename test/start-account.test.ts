@@ -116,6 +116,7 @@ function world(
       log: () => {},
     },
     runtime: runtimeSurface(),
+    system: { enqueueSystemEvent: () => true },
     settings: { typingKeepaliveMs: 2000, mentionAliases: [] },
     platform: opts.platform ?? "darwin",
     now: () => now,

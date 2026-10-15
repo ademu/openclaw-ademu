@@ -122,6 +122,16 @@ export const strings = {
     },
   },
 
+  // ----- reactions: one queued line per reaction, read by the agent at its next turn there -----
+  reactions: {
+    yourMessage: "your message",
+    someonesMessage: (author: string) => `${author}'s message`,
+    aMessage: "a message",
+    someone: "someone",
+    line: (r: { emoji: string | undefined; reactor: string; target: string; messageId: string; quote: string | undefined }) =>
+      `${r.emoji === undefined ? `Ademú reaction removed by ${r.reactor}` : `Ademú reaction added: ${r.emoji} by ${r.reactor}`} on ${r.target} ${r.messageId}${r.quote ? ` "${r.quote}"` : ""}`,
+  },
+
   // ----- enrollment (wizard + ademu_enroll tool) -----
   enroll: {
     wizardIntro: "Ademú — enroll an agent",

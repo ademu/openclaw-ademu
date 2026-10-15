@@ -19,7 +19,7 @@ function isTerminalClientError(err: unknown): boolean {
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { bindIngressLifecycleToReplyOptions, createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-outbound";
 import { CHANNEL_ID } from "../config.js";
-import { classifyConversation, describeConversation, displayNameOf, looksLikeId, normalizeId } from "../grammar.js";
+import { describeConversation, displayNameOf, looksLikeId, normalizeId } from "../grammar.js";
 import { resolveSenderRole } from "../roles.js";
 import {
   agentNames,
@@ -36,6 +36,8 @@ import type { AdemuStore } from "../store.js";
 import { AdoptionFailedError, AdoptionTracker, type TurnResultLike } from "./adoption.js";
 import { bodyForAgent, describeContent, escapeRuntimeContextDelimiters } from "./content.js";
 import { forgetRoomHistory, peekRoomHistory, recordSkipped, type RoomHistory } from "./history.js";
+import { gateSender } from "./sender-gate.js";
+import { createReactionQueue, DEFAULT_REACTION_NOTIFICATIONS, type ReactionNotificationMode, type RuntimeSystemSurface } from "./reactions.js";
 import type { Session } from "./session.js";
 
 export const MAX_INFLIGHT = 4;
@@ -59,6 +61,10 @@ export type IngressParams = {
   accountId: string;
   cfg: OpenClawConfig;
   runtime: RuntimeChannelSurface;
+  /** The host's system-event queue: reactions become lines the agent reads at its next turn (reactions.ts). */
+  system: RuntimeSystemSurface;
+  /** Which reactions are queued (missing = the default, all). */
+  reactionNotifications?: ReactionNotificationMode | undefined;
   session: Session;
   store: AdemuStore;
   resolver: MessageAccessInput["resolver"];
@@ -127,6 +133,20 @@ export function startIngress(params: IngressParams): IngressHandle {
   });
   lifetime.catch(() => {});
 
+  // Reactions: decided in the loop like a message, delivered beside it (reactions.ts). Declared before
+  // halt/stop, which close it.
+  const reactions = createReactionQueue({
+    accountId,
+    cfg,
+    mode: params.reactionNotifications ?? DEFAULT_REACTION_NOTIFICATIONS,
+    session,
+    resolver: params.resolver,
+    account: { agentUserId: params.account.agentUserId, ownerUserId: params.account.ownerUserId },
+    resolveAgentRoute: runtime.routing.resolveAgentRoute,
+    system: params.system,
+    log,
+  });
+
   // Halt: close every tracker generation and end the lifetime. Adoption/ack integrity failures are
   // IngressHaltedError (recovering → restart replays); a TERMINAL client error surfacing from the
   // iterator (revoked token, displaced, protocol violation …) is passed through unwrapped so the
@@ -135,6 +155,7 @@ export function startIngress(params: IngressParams): IngressHandle {
     if (stopped) return;
     stopped = true;
     for (const t of trackers) t.close();
+    reactions.stop();
     rejectLifetime(cause instanceof Error ? cause : new IngressHaltedError(cause));
   };
 
@@ -171,12 +192,6 @@ export function startIngress(params: IngressParams): IngressHandle {
       ack(seq);
       return;
     }
-    // 3. Conversation shape from membership (unknown sender → one refresh).
-    const members = await session.members.getWithSender(ev.group_id, ev.sender_user_id);
-    const shape = classifyConversation({ members, agentUserId: params.account.agentUserId, ownerUserId: params.account.ownerUserId });
-    const isGroup = shape.kind === "group";
-    const senderRole = resolveSenderRole(ev.sender_user_id, params.account.ownerUserId);
-    const sender = members.find((m) => normalizeId(m.user_id) === normalizeId(ev.sender_user_id));
     // A non-text message (a file, or a kind this plugin does not handle) is never a command; its
     // caption still counts for the mention decision below.
     const content = describeContent(ev);
@@ -185,14 +200,19 @@ export function startIngress(params: IngressParams): IngressHandle {
     const commandRequested = content.kind === "text" && runtime.commands.shouldComputeCommandAuthorized(body, cfg);
     const isTextCommand = content.kind === "text" && runtime.commands.isControlCommandMessage(body, cfg);
 
-    // 4. Decision-only access (cheap drop of strangers in DMs).
-    const pre = await resolveMessageAccess({
+    // 3–4. Conversation shape from membership (unknown sender → one refresh), then the decision-only
+    // access (cheap drop of strangers in DMs) — the sender gate reactions share (sender-gate.ts).
+    const { members, shape, access: pre } = await gateSender({
+      members: session.members,
       resolver: params.resolver,
+      account: params.account,
+      groupId: ev.group_id,
       senderUserId: ev.sender_user_id,
-      ownerUserId: params.account.ownerUserId,
-      conversation: { kind: shape.kind, id: ev.group_id },
       commandRequested,
     });
+    const isGroup = shape.kind === "group";
+    const senderRole = resolveSenderRole(ev.sender_user_id, params.account.ownerUserId);
+    const sender = members.find((m) => normalizeId(m.user_id) === normalizeId(ev.sender_user_id));
     if (!pre.senderAccess.allowed) {
       log("ingress_sender_dropped", { seq, kind: shape.kind });
       ack(seq);
@@ -446,6 +466,10 @@ export function startIngress(params: IngressParams): IngressHandle {
             log("removed_from_group", { seq: ev.seq });
             break;
           case "reaction_changed":
+            // Live-only: queued for the agent's next turn there, never acked, never a halt. Decided here
+            // like a message; the target lookup runs beside the loop, so it never holds up a message.
+            await reactions.admit(ev);
+            break;
           case "message_status_changed":
           // A file's download progress (live-only, never acked): the media tool reads the state when asked.
           case "media_fetch_changed":
@@ -466,6 +490,7 @@ export function startIngress(params: IngressParams): IngressHandle {
     inflight,
     stop: () => {
       stopped = true;
+      reactions.stop();
       for (const t of trackers) {
         t.abort();
         t.close();

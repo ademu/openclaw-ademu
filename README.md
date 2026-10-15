@@ -203,6 +203,12 @@ A device host older than adc 0.6.0 — or one without the enrollment socket — 
   The kept messages live in memory, so a gateway restart drops the ones the agent had not seen yet,
   and removing the agent from a room drops that room's. The limit is read when the account starts:
   a change takes effect once the account (or the gateway) restarts.
+- **Reactions people add or remove** never start a turn. Each becomes one line in that conversation's
+  session (for example `Ademú reaction added: 👍 by Marios on your message <id> "…"`), which the agent
+  reads at its next turn there and is not asked to answer. `channels.ademu.reactionNotifications` (or
+  per account) picks which: `all` (default), `own` (only reactions on the agent's messages), or `off`.
+  The lines are held in the gateway's memory: a restart before the agent's next turn drops them, and a
+  reaction that arrives while the account is not running is never seen.
 - **Sending proactively:** the `message` tool with `channel: "ademu"` and a conversation id
   (`ademu:<uuid>` or the bare UUID). Reactions: `action: "react"`.
 - **Files people send** (photos, videos, voice notes, files): the agent sees one line per file and

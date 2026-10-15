@@ -954,3 +954,68 @@ mention-gated channels (LINE, Signal, Slack); core leaves the buffering to each 
 - A restart loses unread history: skipped messages are acked at once, so the daemon never replays them.
   A durable version needs a daemon query for messages since the agent's last reply.
 
+## 18. Reactions as system events (2026-10-14)
+
+The device host emits `reaction_changed` (`{group_id, message_id, reactor_user_id, emoji}`, `emoji:""` =
+removal) when a reaction is applied. Until now the loop dropped it, so the agent never learned that
+anyone reacted (the slice-1 plan's "→ cache" was never built either). The owner's decisions: every
+reaction reaches the agent's session as context, without a turn and without telling the agent to
+answer; all reactions by default, removals included; no wake.
+
+- `src/monitor/reactions.ts` queues ONE line with `api.runtime.system.enqueueSystemEvent(text, {sessionKey,
+  contextKey})`, the mechanism OpenClaw's own channels use for reactions (Telegram, Slack, Matrix,
+  iMessage, Mattermost, Teams). Queuing never starts a run; core drains the queue into the session's
+  next turn as `System: [ts] <line>`. No heartbeat is requested: the agent sees the reaction when the
+  conversation next gives it a turn. The skill text tells it these lines need no answer.
+- The line is `Ademú reaction added: <emoji> by <name> on your message <id> "<quote>"`, or
+  `Ademú reaction removed by <name> on <author>'s message <id> "<quote>"`. The daemon does not say which
+  emoji a removal removed, so the line does not either. The quote is the first 80 characters of the
+  target's text (none for a deleted or caption-less message), read with `get_message`. Every
+  peer-controlled part (emoji, names, quote) is escaped for the runtime-context delimiters and put on one
+  line, because core prefixes each line of an event with `System:` and a newline would let a peer start
+  a line of its own.
+- The session is the conversation's, from the same `resolveAgentRoute` peer as its messages. The
+  `contextKey` is one per daemon event (`ademu:reaction:<seq>:<added|removed>:<group>:<message>:<reactor>:<emoji>`):
+  core drops a queued event whose key and text repeat one still pending, so a key without the `seq`
+  lost the second add of add → remove → add (Codex pass 1). The daemon emits only applied changes and
+  never replays them, so nothing needs deduplicating.
+- Filters, in order: `reactionNotifications` (`off` | `own` | `all`, default `all`; account, then
+  `channels.ademu`); the agent's own reaction (the daemon echoes `send_reaction` as `reaction_changed`);
+  the same decision-only sender gate as a message, one function both call (`src/monitor/sender-gate.ts`:
+  a stranger's two-person room is a DM the allowlist drops; in a room, membership is the gate); under `own`, a target that is not the agent's or cannot be
+  read. There is no mention gate: a reaction has no text.
+- The loop decides a reaction exactly where it decides a message, after the reconnect barrier: mode,
+  own echo, membership and the sender gate, and the route. Only the `get_message` lookup and the line
+  run on a sequential queue beside the loop (`createReactionQueue`), so a daemon slow to answer it (up
+  to the client's 30 s request timeout) delays later reactions, never messages (Codex pass 1). Keeping
+  membership in the loop matters: a queue that read the members cache itself could pass the reconnect
+  barrier and write back a member list that a `membership_changed` had just invalidated (Codex pass 2).
+  Order among reactions is kept. At most 20 admitted reactions are undelivered per account (the one
+  being looked up plus those waiting; the host's own per-session cap); past that the newest is skipped
+  (`backlog`). After the account stops nothing is queued: a lookup that a closing session rejects is
+  skipped (`stopped`), never read as "no target" (Codex pass 2).
+- Live-only, so never acked (an ack carries read-receipt weight). A failed target lookup is not a
+  failure: under `all` the line goes out without a quote and with "a message"; under `own` the reaction
+  is skipped (`lookup_failed`). Any other failure is logged (`reaction_failed`, error class only) and
+  dropped; a reaction never halts ingress. The logs carry
+  `seq` and a closed reason or `deduped`, never emoji, text or ids.
+- Limits, recorded: neither the daemon's event nor the host's queue is durable, so a reaction that
+  arrives while the account is not running, or before a gateway restart drains it, is lost; the host
+  keeps at most 20 queued lines per session (oldest dropped); an external plugin cannot tag the line
+  with an agent (`enqueueRoutedSystemEvent` is bundled-only), so any agent reading that session takes it.
+- Live leg (2026-10-15, throwaway and local): the AdemuMLS stack at `4b520cde` as compose project
+  `ademu-leg` on its own ports, adc 0.7.0 on its own data dir and sockets, an isolated OpenClaw 2026.9.9
+  state dir and gateway loading this branch, a recording mock model (OpenAI-compatible) instead of a
+  provider, and the Ademú DEV app (the 2026-10-07 build, repointed and re-signed for the simulator,
+  because `main` does not compile with Xcode 27) on its own simulator as the owner. Reacting 👍 to the
+  agent's reply queued `Ademú reaction added: 👍 by Leg Owner on your message <id> "pong-2"` in the
+  conversation's session and started no turn (the mock's request count did not move); removing it
+  queued `Ademú reaction removed by Leg Owner on your message <id> "pong-2"`, again without a turn. The
+  next message's turn carried both lines as `System: [ts] …`, in order, and the agent answered only the
+  message. The agent's `message` → `react` call (through `tool_call`) put a 👍 on the owner's message,
+  and its echo was skipped (`reaction_skipped`, `self`). Not exercised live: rooms, `own`/`off`, the
+  backlog cap and the stop fence (unit-tested).
+- The `react` action's account lookup (the shared live-account map, §15) gained a regression test that
+  re-imports the action in a fresh module graph, as OpenClaw does per tool call; with the map
+  module-local it fails with "account … is not running", the error an agent on an older build reported
+  on 2026-10-14.
