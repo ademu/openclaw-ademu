@@ -10,6 +10,7 @@ import type {
   MediaSendSettled,
   MemberEntry,
   MessageReceivedEvent,
+  MessageSummary,
   RetryInfo,
   SelfInfo,
 } from "@ademu/adc-client";
@@ -67,6 +68,11 @@ export class FakeAdcClient {
   members = new Map<string, MemberEntry[]>();
   conversations: ConversationSummary[] = [];
   getMembersCalls = 0;
+  /** What `getMessage` answers, by message id; a missing id is the daemon's `not_found`. */
+  messages = new Map<string, MessageSummary>();
+  getMessageFails = false;
+  /** While set, `getMessage` waits on it (a daemon that does not answer). */
+  stallGetMessage: Promise<void> | undefined;
   seated = true;
   closed = false;
   self: SelfInfo;
@@ -235,8 +241,34 @@ export class FakeAdcClient {
   async getMessages() {
     return { messages: [] };
   }
-  async getMessage() {
-    throw new Error("not used");
+  async getMessage(params: { message_id: string }) {
+    if (this.stallGetMessage) await this.stallGetMessage;
+    if (this.getMessageFails) throw new Error("get_message failed");
+    const found = this.messages.get(params.message_id);
+    if (!found) throw new Error("not_found");
+    return found;
+  }
+
+  /** A stored message `getMessage` returns (defaults: a text from the owner in the DM). */
+  stored(partial: Partial<MessageSummary> & { message_id: string }): MessageSummary {
+    const m: MessageSummary = {
+      group_id: ROOM_DM,
+      sender_user_id: OWNER,
+      sender_username: "marios",
+      is_outgoing: false,
+      ct: "text",
+      body: "",
+      created_at_ms: 1_700_000_000_000,
+      reactions: [],
+      ...partial,
+    };
+    this.messages.set(m.message_id, m);
+    return m;
+  }
+
+  /** Pushes a live reaction_changed (never acked; `emoji: ""` is a removal). */
+  reaction(r: { group_id?: string; message_id: string; reactor_user_id: string; emoji: string }) {
+    this.live({ event: "reaction_changed", group_id: r.group_id ?? ROOM_DM, message_id: r.message_id, reactor_user_id: r.reactor_user_id, emoji: r.emoji });
   }
   async getMessageStatus() {
     throw new Error("not used");

@@ -151,6 +151,7 @@ media-send helpers (#27, re-derived 2026-10-09 against `cc3c4f36a9d`) share that
 | tool context `messageChannel` | 90342a4f3a5 (2026-01-13) | v2026.1.12 |
 | tool context `deliveryContext` | 44defeb71b3 (2026-03-27) | v2026.3.28 |
 | tool context `nativeChannelId` (the scope check's fallback) | fbd330b7aa4 (2026-07-10) | **v2026.8.1** |
+| `api.runtime.system.enqueueSystemEvent` (reactions) | ee6e534ccba (2026-01-18) | v2026.1.20 |
 | `api.runtime.config.mutateConfigFile` | 7f3f108521f (2026-04-27) | v2026.4.26 |
 | `api.registerHttpRoute` (`replaceExisting` 7a7eee920a1 2026-03-02) | c96ffa7186a (2026-01-29) | v2026.3.2 |
 | `api.runtime.logging.getChildLogger` | a4850b1b8f2 (2026-03-04) | v2026.3.7 |

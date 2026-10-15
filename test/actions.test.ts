@@ -1,5 +1,5 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ademuMessageActions } from "../src/actions.js";
 import { registerLiveAccount, resetLiveAccountsForTests } from "../src/outbound.js";
 import { FakeAdcClient, ROOM_DM } from "./fakes/adc.js";
@@ -80,6 +80,30 @@ describe("actions: react", () => {
     await expect(
       ademuMessageActions.handleAction!({ channel: "ademu", action: "send", cfg: configured, params: {}, accountId: "main" } as never),
     ).rejects.toThrow(/not supported/);
+  });
+
+  it("finds an account started by another plugin instance (the tool-call registration)", async () => {
+    // OpenClaw registers the plugin again for each tool call; the react action runs in that fresh
+    // module graph and must still see the account the startup pass registered (#22, ff55cef).
+    const client = new FakeAdcClient();
+    const calls: unknown[] = [];
+    client.sendReaction = async (p?: unknown) => {
+      calls.push(p);
+      return { status: "queued" };
+    };
+    registerLiveAccount("nemo", { client });
+    vi.resetModules();
+    const fresh = await import("../src/actions.js");
+    expect(fresh.ademuMessageActions).not.toBe(ademuMessageActions);
+    const result = await fresh.ademuMessageActions.handleAction!({
+      channel: "ademu",
+      action: "react",
+      cfg: configured,
+      params: { to: ROOM_DM, messageId: "m-voice", emoji: "👍" },
+      accountId: "nemo",
+    } as never);
+    expect(calls).toEqual([{ group_id: ROOM_DM, target_message_id: "m-voice", emoji: "👍" }]);
+    expect(result.details).toEqual({ ok: true, added: "👍", status: "queued" });
   });
 
   it("fails clearly when the account is not running", async () => {
