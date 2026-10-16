@@ -261,7 +261,7 @@ async function runWithLease(
       barrier: () => session!.barrier(),
       sessionSocketPath: lease.info.sessionSocketPath,
       resolver,
-      account: { agentUserId: account.agentUserId!, ownerUserId },
+      account: { agentUserId: account.agentUserId!, ownerUserId, agentName: account.agentName },
       resolveAgentRoute: deps.runtime.routing.resolveAgentRoute,
       startEngine: account.calls.enabled ? deps.callEngine?.(account.calls, cfg) : undefined,
       group: account.calls.enabled ? deps.groupCall?.(account.calls, cfg) : undefined,

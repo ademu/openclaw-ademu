@@ -71,7 +71,8 @@ export type CallControllerParams = {
   /** The session socket the session is seated on: the audio connection dials exactly this path. */
   sessionSocketPath: string;
   resolver: MessageAccessInput["resolver"];
-  account: { agentUserId: string; ownerUserId: string };
+  /** `agentName`: the agent's name on Ademú (the account's), the default name that addresses it in a group call. */
+  account: { agentUserId: string; ownerUserId: string; agentName?: string | undefined };
   resolveAgentRoute: (input: Record<string, unknown>) => { agentId: string; sessionKey: string };
   /** Undefined = no voice engine in this process (the agent then never takes calls). */
   startEngine: CallEngineStarter | undefined;
@@ -665,8 +666,13 @@ export class CallController {
     return call.kind === "group" && this.#namedGroups() ? this.#p.group : undefined;
   }
 
-  /** The agent's name as its config gives it (OpenClaw's own activation-name source), else "OpenClaw". */
+  /**
+   * The agent's name: its name on Ademú (the account's `agentName`, what people in the room see and
+   * say), else the OpenClaw agent's configured name (OpenClaw's own activation-name source), else "OpenClaw".
+   */
   #agentName(agentId: string): string {
+    const own = this.#p.account.agentName?.trim();
+    if (own) return own;
     const agents = (this.#p.cfg as { agents?: { list?: Array<{ id?: string; name?: string; identity?: { name?: string } }> } }).agents;
     const agent = agents?.list?.find((a) => a.id === agentId);
     return agent?.name?.trim() || agent?.identity?.name?.trim() || "OpenClaw";
