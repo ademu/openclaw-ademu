@@ -153,6 +153,14 @@ export const strings = {
     line: (c: { outgoing: boolean; who: string; outcome: string; video: boolean; duration: string | undefined; callId: string }) =>
       `Ademú ${c.video ? "video " : ""}call ${c.outgoing ? "you placed" : `from ${c.who}`}: ${c.outcome}${c.duration ? `, ${c.duration}` : ""} (call ${c.callId})`,
     unreadable: (callId: string) => `Ademú call record ${callId} (details unreadable)`,
+    // #874 group calls, "named" mode: the realtime voice model's standing instructions.
+    groupInstructions: (agentName: string) =>
+      [
+        `You are ${agentName}, an AI assistant in an Ademú group voice call with several people and possibly other AI agents.`,
+        "You hear everything that is said, but you speak only when asked: each time a person addresses you by name, you receive a message listing what was said since you last spoke, labelled with who said it, and naming who is asking.",
+        "Answer that person, using everything said in the call, in one or two short spoken sentences. Never answer other AI agents, and never speak unless such a message asks you to.",
+      ].join("\n"),
+    groupSurface: "the Ademú group call",
     // The agent consult of a live call (OpenClaw's meeting consult surface).
     consult: {
       surface: "an Ademú voice call",

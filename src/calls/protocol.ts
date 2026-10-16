@@ -23,6 +23,12 @@ export type CallEntry = {
   state: CallState;
   direction: CallDirection;
   media: string;
+  /**
+   * Who placed the call (#874 G1). The daemon always sends it; only lines older than the field lack
+   * it. While `ringing` it is also `participants[0]`; once answered, `participants` is the room.
+   */
+  caller_user_id?: string;
+  /** The caller while ringing; once answered, the room's other people and agents (members only). */
   participants: CallParticipant[];
   expires_at_ms?: number;
   audio_ticket?: string;
@@ -76,12 +82,14 @@ function parseCallCore(f: Record<string, unknown>): Omit<CallEntry, "audio_ticke
   if (typeof state !== "string" || !STATES.has(state)) return undefined;
   if (typeof direction !== "string" || !DIRECTIONS.has(direction)) return undefined;
   const expires = f.expires_at_ms;
+  const caller = f.caller_user_id;
   return {
     call_id: normalizeId(call_id),
     group_id: normalizeId(group_id),
     state: state as CallState,
     direction: direction as CallDirection,
     media: media === "video" ? "video" : "audio",
+    ...(typeof caller === "string" && looksLikeId(caller) ? { caller_user_id: normalizeId(caller) } : {}),
     participants: parseParticipants(f.participants),
     ...(typeof expires === "number" && Number.isSafeInteger(expires) ? { expires_at_ms: expires } : {}),
   };
@@ -141,11 +149,19 @@ export class CallReplyError extends Error {
 /** The request slice of the client the call surface uses. */
 export type CallRequester = Pick<AdcClient, "request">;
 
-/** `set_call_handling`: this seat takes calls at `rate`. Rejects with `invalid_rate` / `call_helper_unavailable`. */
-export async function setCallHandling(client: CallRequester, rate: number = CALL_AUDIO_RATE): Promise<{ rate: number }> {
-  const res = asRecord(await client.request<unknown>("set_call_handling", { audio: { rate } }));
+/**
+ * `set_call_handling`: this seat takes calls at `rate`; `speakers` asks for speaking frames on the
+ * audio connection (#874 G2). Rejects with `invalid_rate` / `call_helper_unavailable`.
+ */
+export async function setCallHandling(
+  client: CallRequester,
+  rate: number = CALL_AUDIO_RATE,
+  speakers = false,
+): Promise<{ rate: number; speakers: boolean }> {
+  const audio = speakers ? { rate, speakers: true } : { rate };
+  const res = asRecord(await client.request<unknown>("set_call_handling", { audio }));
   if (!res || typeof res.rate !== "number") throw new CallReplyError("set_call_handling");
-  return { rate: res.rate };
+  return { rate: res.rate, speakers: res.speakers === true };
 }
 
 /** `answer_call`: the ticket for the audio connection. Rejects with `unknown_call` / `call_helper_unavailable`. */

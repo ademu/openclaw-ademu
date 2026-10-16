@@ -47,6 +47,8 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `gateway-runtime` | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
 | `meeting-runtime` (calls, AdemuMLS #874; checked against the v2026.8.1 tarball: same transport interface and engine signatures as v2026.9.1) | 1a2d9e5e5c8 (2026-07-17) | **v2026.8.1** |
 | `media-runtime` (QR helpers, recorded exception; outbound media loading, #27) | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
+| `realtime-voice` (group calls, AdemuMLS #874; recorded exception 2, untyped) | a23ab9b906d (2026-04-04) | v2026.4.5 |
+| `realtime-voice-activation` (group calls' name gate, AdemuMLS #874; recorded exception 2, untyped) | c2e7c819f57 (2026-08-08) | **v2026.8.1** |
 | `runtime-store` | 8d7778d1d6c (2026-03-08) | v2026.3.8 |
 | `secret-input` | 07d9f725b61 (2026-03-18) | v2026.3.22 |
 | `setup` | 53ccc78c636 (2026-03-15) | v2026.3.22 |
@@ -130,6 +132,11 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `meeting-runtime` → `createMeetingRealtimeEngineBindings` | value | 939ecb5ef8f (2026-07-22) | **v2026.8.1** |
 | `meeting-runtime` → `startMeetingAgentRealtimeEngine` | value | 1a2d9e5e5c8 (2026-07-17) | **v2026.8.1** |
 | `meeting-runtime` → `startMeetingRealtimeEngine` | value | 1a2d9e5e5c8 (2026-07-17) | **v2026.8.1** |
+| `realtime-voice` → `REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ` | value | d73e2ee7745 (2026-04-27) | v2026.4.26 |
+| `realtime-voice` → `buildRealtimeVoiceSpeakExactMessage` | value | df4e6666c6b (2026-08-12) | **v2026.8.1** |
+| `realtime-voice` → `createRealtimeVoiceSessionHarness` | value | e3618454f24 (2026-07-16) | **v2026.8.1** |
+| `realtime-voice` → `resolveConfiguredRealtimeVoiceProvider` | value | b164bb37175 (2026-04-24) | v2026.4.23 |
+| `realtime-voice-activation` → `matchRealtimeVoiceActivationName` | value | c2e7c819f57 (2026-08-08) | **v2026.8.1** |
 | `runtime-store` → `createPluginRuntimeStore` | value | 8d7778d1d6c (2026-03-08) | v2026.3.8 |
 | `secret-input` → `SecretInputStringResolutionMode` | type | 1769fb2aa1d (2026-04-14) | v2026.4.15 |
 | `secret-input` → `buildOptionalSecretInputSchema` | value | 07d9f725b61 (2026-03-18) | v2026.3.22 |

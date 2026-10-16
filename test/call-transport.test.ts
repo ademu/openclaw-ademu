@@ -16,6 +16,8 @@ import {
   KIND_PCM,
   MAX_MARK,
   MAX_PAYLOAD,
+  KIND_SPEAKING,
+  MAX_SPEAKING,
 } from "../src/calls/frames.js";
 import { AudioConnectError, CallAudioTransport, CallGoneError, INPUT_CHUNK_FRAMES, openAudioSocket, type AudioSocket } from "../src/calls/transport.js";
 
@@ -54,6 +56,21 @@ describe("frame codec", () => {
       expect(caught, reason).toBeInstanceOf(AudioFrameError);
       expect((caught as AudioFrameError).reason).toBe(reason);
     }
+  });
+
+  it("#874 G2: decodes a speaking frame (helper to mind), and refuses a malformed or oversize one", () => {
+    const body = Buffer.from('{"user_id":"0F8FAD5B-D9CB-469F-A165-70867728950E","active":true}');
+    const wire = Buffer.concat([header(KIND_SPEAKING, body.length), body]);
+    expect(new AudioFrameDecoder().push(wire)).toEqual([
+      { kind: "speaking", userId: "0f8fad5b-d9cb-469f-a165-70867728950e", active: true },
+    ]);
+    const bad = Buffer.from('{"user_id":"nope","active":"yes"}');
+    expect(() => new AudioFrameDecoder().push(Buffer.concat([header(KIND_SPEAKING, bad.length), bad]))).toThrow(
+      expect.objectContaining({ reason: "speaking_payload" }),
+    );
+    expect(() => new AudioFrameDecoder().push(header(KIND_SPEAKING, MAX_SPEAKING + 1))).toThrow(
+      expect.objectContaining({ reason: "speaking_too_long" }),
+    );
   });
 
   it("refuses a bad header before its payload arrives", () => {
@@ -129,7 +146,14 @@ describe("openAudioSocket", () => {
   });
 });
 
-function transportWorld(opts: { reopen?: (signal: AbortSignal) => Promise<AudioSocket>; bargeIn?: boolean } = {}) {
+function transportWorld(
+  opts: {
+    reopen?: (signal: AbortSignal) => Promise<AudioSocket>;
+    bargeIn?: boolean;
+    tap?: { onPcm: (pcm: Buffer) => void; onSpeaking: (userId: string, active: boolean) => void };
+    bargeInGate?: () => boolean;
+  } = {},
+) {
   const first = pair();
   const logs: string[] = [];
   let lost = 0;
@@ -140,6 +164,8 @@ function transportWorld(opts: { reopen?: (signal: AbortSignal) => Promise<AudioS
     reopen: opts.reopen ?? (async () => Promise.reject(new CallGoneError())),
     reconnect: { attempts: 3, windowMs: 10_000, delayMs: 1 },
     ...(opts.bargeIn ? { bargeIn: { rmsThreshold: 0.02, holdMs: 30, cooldownMs: 0, onBargeIn: () => bargeIns++ } } : {}),
+    ...(opts.tap ? { tap: opts.tap } : {}),
+    ...(opts.bargeInGate ? { bargeInGate: opts.bargeInGate } : {}),
     onLost: () => lost++,
     log: (e) => logs.push(e),
     sleep: async () => {},
@@ -252,6 +278,34 @@ describe("CallAudioTransport", () => {
     await settle();
     expect(w.bargeIns()).toBe(1);
     expect(w.first.frames().some((f) => f.kind === "clear_output")).toBe(true);
+  });
+
+  it("#874 G2: the tap sees speaker changes and input in wire order, before the engine", async () => {
+    const seen: string[] = [];
+    const w = transportWorld({
+      tap: { onPcm: (p) => seen.push(`pcm${p.length}`), onSpeaking: (u, a) => seen.push(`${u}:${a}`) },
+    });
+    const speaking = (active: boolean) => {
+      const body = Buffer.from(JSON.stringify({ user_id: "0f8fad5b-d9cb-469f-a165-70867728950e", active }));
+      return Buffer.concat([Buffer.from([4]), Buffer.from(new Uint32Array([body.length]).buffer), body]);
+    };
+    w.first.send(Buffer.concat([speaking(true), encodePcmFrame(Buffer.alloc(480)), speaking(false), encodePcmFrame(Buffer.alloc(240))]));
+    await settle();
+    expect(seen).toEqual(["0f8fad5b-d9cb-469f-a165-70867728950e:true", "pcm480", "0f8fad5b-d9cb-469f-a165-70867728950e:false", "pcm240"]);
+  });
+
+  it("#874 group: the barge-in gate holds back speech from anyone the agent is not answering", async () => {
+    let open = false;
+    const w = transportWorld({ bargeIn: true, bargeInGate: () => open });
+    const view = w.transport.view();
+    await view.writeOutput(Buffer.alloc(48_000));
+    for (let i = 0; i < 3; i++) w.first.send(encodePcmFrame(loud()));
+    await settle();
+    expect(w.bargeIns()).toBe(0);
+    open = true;
+    for (let i = 0; i < 3; i++) w.first.send(encodePcmFrame(loud()));
+    await settle();
+    expect(w.bargeIns()).toBe(1);
   });
 
   it("an engine's own barge-in monitor decides instead (the realtime engine)", async () => {

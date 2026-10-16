@@ -187,6 +187,34 @@
                   "additionalProperties": {}
                 }
               },
+              "group": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "named",
+                      "same"
+                    ]
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "transcribeModel": {
+                    "type": "string"
+                  },
+                  "wakeNames": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "instructions": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              },
               "bargeIn": {
                 "type": "object",
                 "properties": {
@@ -525,6 +553,34 @@
                         },
                         "additionalProperties": {}
                       }
+                    },
+                    "group": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "named",
+                            "same"
+                          ]
+                        },
+                        "model": {
+                          "type": "string"
+                        },
+                        "transcribeModel": {
+                          "type": "string"
+                        },
+                        "wakeNames": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "instructions": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
                     },
                     "bargeIn": {
                       "type": "object",

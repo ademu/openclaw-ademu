@@ -3,21 +3,35 @@
 //   kind 1 `pcm`          both ways      PCM16LE mono at the seat's rate; even length
 //   kind 2 `clear_output` mind → helper  empty (barge-in)
 //   kind 3 `mark`         both ways      opaque id ≤ 256 bytes; the helper echoes it at playout
+//   kind 4 `speaking`     helper → mind  JSON {"user_id","active"} ≤ 256 bytes (#874 G2, only when the
+//                                        seat asked for `speakers`), written just before the pcm frame
+//                                        it applies to
 // A frame that breaks these rules closes the connection on the helper's side; the decoder below
 // applies the same rules to what the helper sends, so a broken stream is never half-read.
+
+import { looksLikeId, normalizeId } from "../grammar.js";
 
 export const KIND_PCM = 1;
 export const KIND_CLEAR_OUTPUT = 2;
 export const KIND_MARK = 3;
+export const KIND_SPEAKING = 4;
 
 export const HEADER_BYTES = 5;
 export const MAX_PAYLOAD = 65_536;
 export const MAX_MARK = 256;
+export const MAX_SPEAKING = 256;
 
-export type AudioFrame = { kind: "pcm"; pcm: Buffer } | { kind: "clear_output" } | { kind: "mark"; id: Buffer };
+export type AudioFrame =
+  | { kind: "pcm"; pcm: Buffer }
+  | { kind: "clear_output" }
+  | { kind: "mark"; id: Buffer }
+  /** A remote user started or stopped speaking (#874 G2); `userId` normalized. */
+  | { kind: "speaking"; userId: string; active: boolean };
 
 export class AudioFrameError extends Error {
-  constructor(readonly reason: "unknown_kind" | "oversize" | "odd_pcm" | "clear_payload" | "mark_too_long") {
+  constructor(
+    readonly reason: "unknown_kind" | "oversize" | "odd_pcm" | "clear_payload" | "mark_too_long" | "speaking_too_long" | "speaking_payload",
+  ) {
     super(`audio frame refused: ${reason}`);
     this.name = "AudioFrameError";
   }
@@ -56,6 +70,18 @@ export function encodeMark(id: Buffer): Buffer {
   return frame(KIND_MARK, id);
 }
 
+function parseSpeaking(payload: Buffer): AudioFrame {
+  let v: unknown;
+  try {
+    v = JSON.parse(payload.toString("utf8"));
+  } catch {
+    throw new AudioFrameError("speaking_payload");
+  }
+  const f = v as { user_id?: unknown; active?: unknown } | null;
+  if (!f || typeof f.user_id !== "string" || !looksLikeId(f.user_id) || typeof f.active !== "boolean") throw new AudioFrameError("speaking_payload");
+  return { kind: "speaking", userId: normalizeId(f.user_id), active: f.active };
+}
+
 /**
  * Incremental decoder: feed it whatever the socket delivers, get whole frames back. Throws
  * {@link AudioFrameError} on the first frame that breaks the framing (the caller drops the connection).
@@ -71,16 +97,19 @@ export class AudioFrameDecoder {
       const kind = this.#buf.readUInt8(at);
       const len = this.#buf.readUInt32LE(at + 1);
       // Header checks first: a bad header is refused before its payload arrives.
-      if (kind !== KIND_PCM && kind !== KIND_CLEAR_OUTPUT && kind !== KIND_MARK) throw new AudioFrameError("unknown_kind");
+      if (kind !== KIND_PCM && kind !== KIND_CLEAR_OUTPUT && kind !== KIND_MARK && kind !== KIND_SPEAKING)
+        throw new AudioFrameError("unknown_kind");
       if (len > MAX_PAYLOAD) throw new AudioFrameError("oversize");
       if (kind === KIND_PCM && len % 2 !== 0) throw new AudioFrameError("odd_pcm");
       if (kind === KIND_CLEAR_OUTPUT && len !== 0) throw new AudioFrameError("clear_payload");
       if (kind === KIND_MARK && len > MAX_MARK) throw new AudioFrameError("mark_too_long");
+      if (kind === KIND_SPEAKING && len > MAX_SPEAKING) throw new AudioFrameError("speaking_too_long");
       if (this.#buf.length - at - HEADER_BYTES < len) break;
       // Copied out: the payload outlives the decoder's buffer.
       const payload = Buffer.from(this.#buf.subarray(at + HEADER_BYTES, at + HEADER_BYTES + len));
       at += HEADER_BYTES + len;
-      frames.push(kind === KIND_PCM ? { kind: "pcm", pcm: payload } : kind === KIND_MARK ? { kind: "mark", id: payload } : { kind: "clear_output" });
+      if (kind === KIND_SPEAKING) frames.push(parseSpeaking(payload));
+      else frames.push(kind === KIND_PCM ? { kind: "pcm", pcm: payload } : kind === KIND_MARK ? { kind: "mark", id: payload } : { kind: "clear_output" });
     }
     this.#buf = at === 0 ? this.#buf : Buffer.from(this.#buf.subarray(at));
     return frames;

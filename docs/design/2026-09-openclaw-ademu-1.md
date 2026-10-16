@@ -450,7 +450,7 @@ bait-tree self-test).
 | # | claim | disposition at execution |
 |---|---|---|
 | V1 | devDependency = latest | `2026.9.1` pinned (owner); the import gate dynamically imports every runtime symbol from the installed tarball |
-| V2 | QR helper home | `api.runtime.media` has **no** QR renderers in 2026.9.1 → `media-runtime` (public, docs-deprecated barrel) is the live path; the one import-gate exception |
+| V2 | QR helper home | `api.runtime.media` has **no** QR renderers in 2026.9.1 → `media-runtime` (public, docs-deprecated barrel) is the live path; import-gate exception 1 (exception 2: V29) |
 | V3 | DM allowlist for a runtime owner | `createChannelIngressResolver` with `allowFrom=[owner]`, decision-only resolve then `contextBinding`-bound resolve |
 | V4 | `verified` identity | accepted by the resolver (`authentication: "verified"`, kind `stable-id`) |
 | V5 | plugin-wired `toolsBySender` | refuted; users can set `channels.ademu.groups.<id>.toolsBySender` |
@@ -474,6 +474,7 @@ bait-tree self-test).
 | V25/V26 | admit / dispatch surfaces | admit moot (Option B); `inbound.buildContext` + `inbound.dispatch` + `bindIngressLifecycleToReplyOptions` are not trust-gated |
 | V27 | subpaths | allowlist + forbidden list enforced by `test/gates/sdk-imports.test.ts`; types that live only on `core` (`ChannelMessagingAdapter`) are type-imports |
 | V28 | package facts | `ensureDaemon` env is resolution-only → our own `spawnFn` injects the child env (test-asserted) |
+| V29 | group-call voice bridge (AdemuMLS #874, owner 2026-10-16) | OpenClaw's meeting runtime has no way to run a speech-to-speech model with replies off (its "bidi" engine always replies to audio), and the name-gated group mode needs exactly that. So `realtime-voice` and `realtime-voice-activation` are **import-gate exception 2**. OpenClaw labels them "production-private" seams for its official plugins, and its own Discord voice uses them. They ship untyped, so `src/types/openclaw-realtime-voice.d.ts` declares only the slices this plugin calls, transcribed from OpenClaw's `src/talk/*`. Every symbol exists in v2026.8.1, so the floor is unchanged. Tripwire: the nightly `openclaw@beta` job (the runtime-value check in `test/gates/sdk-imports.test.ts`) turns red the night one moves. The alternative, a plugin-owned OpenAI realtime client, was not chosen. |
 
 ## 10. Deferred / recorded
 

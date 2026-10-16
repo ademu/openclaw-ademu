@@ -7,6 +7,25 @@ plugin bundles no daemon. Releases up to 0.1.0 pinned the exact `@ademu/adc-bin`
 
 ## [Unreleased]
 
+### Added (AdemuMLS #874 group calls; needs the adc built from `slice/874-group-calls`)
+
+- **Name-gated group calls** (`calls.group.mode: "named"`, the default; `"same"` runs groups like a
+  1-1).
+  - The agent hears everything said in a group call but speaks only when a person addresses it by
+    name ("Callie, …", "…, Callie?"; the name alone arms that person's next turn).
+  - Each person's turn is cut from the mixed audio by the daemon's speaking frames and transcribed
+    with the call's names (`calls.group.transcribeModel`, default `gpt-4o-transcribe`, with OpenClaw's
+    OpenAI key).
+  - The reply carries a labelled log of what was said since the agent last spoke.
+  - The voice is an OpenAI realtime model with automatic replies off (`calls.group.model`, default
+    `gpt-realtime-2.1`).
+  - Another agent's speech is context, never a trigger.
+  - Only the person being answered can interrupt.
+  - Tools stay read-only in every group call.
+- The caller is read from `caller_user_id`; once answered, `participants` is the room.
+- Import-gate exception 2 (design V29): `openclaw/plugin-sdk/realtime-voice` and
+  `…/realtime-voice-activation`. The compat floor is unchanged (2026.8.1).
+
 Requires adc ≥ **0.6.0** (the installed device host; the plugin bundles none).
 
 ### Removed

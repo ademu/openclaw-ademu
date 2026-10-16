@@ -40,8 +40,15 @@ export const ALLOWED_SUBPATHS = new Set([
   "command-auth",
   // Calls (AdemuMLS #874): OpenClaw's meeting voice engines over the call's audio connection.
   "meeting-runtime",
-  // The ONE recorded exception: the QR helpers have no focused subpath (design entry, V2).
+  // Recorded exception 1: the QR helpers have no focused subpath (design entry, V2).
   "media-runtime",
+  // Recorded exception 2 (AdemuMLS #874 group calls, owner 2026-10-16): OpenClaw's realtime voice
+  // bridge, the only way to run a speech-to-speech model with replies OFF (the meeting runtime's
+  // "bidi" engine always replies). Untyped "production-private" seams OpenClaw's own Discord voice
+  // uses; typed locally in src/types/openclaw-realtime-voice.d.ts. The nightly openclaw@beta job is
+  // the tripwire: the runtime-value check below turns red the night a symbol moves.
+  "realtime-voice",
+  "realtime-voice-activation",
 ]);
 
 /** Removal-pending, deprecated shims, or private-local — never importable by this plugin. */

@@ -24,6 +24,8 @@ import { classifyConversation, normalizeId, type ConversationKind } from "../gra
 import type { Session } from "../monitor/session.js";
 import type { MessageAccessInput } from "../security.js";
 import type { CallEngineHandle, CallEngineStarter } from "./engine.js";
+import { GroupCallBrain } from "./group-brain.js";
+import type { GroupEngineHandle, GroupEngineStarter } from "./group-engine.js";
 import { decideCall, type CallDecision } from "./policy.js";
 import {
   answerCall,
@@ -37,6 +39,7 @@ import {
   supportsCalls,
   type CallChanged,
   type CallEntry,
+  type CallParticipant,
   type CallState,
 } from "./protocol.js";
 import { CallAudioTransport, CallGoneError, openAudioSocket, type AudioSocket, type CallTransportStats, type ReconnectPolicy } from "./transport.js";
@@ -72,6 +75,11 @@ export type CallControllerParams = {
   resolveAgentRoute: (input: Record<string, unknown>) => { agentId: string; sessionKey: string };
   /** Undefined = no voice engine in this process (the agent then never takes calls). */
   startEngine: CallEngineStarter | undefined;
+  /**
+   * #874 group calls in "named" mode: the name-gated realtime engine and the per-turn transcriber.
+   * Undefined (or `calls.group.mode: "same"`) = group calls run on `startEngine` like a 1-1.
+   */
+  group?: GroupCallDeps | undefined;
   onStatus?: ((status: CallsStatus) => void) | undefined;
   log: (event: string, fields?: Record<string, string | number | boolean>) => void;
   /** Seams for tests. */
@@ -79,6 +87,13 @@ export type CallControllerParams = {
   reconnect?: ReconnectPolicy | undefined;
   now?: (() => number) | undefined;
   sleep?: ((ms: number, signal: AbortSignal) => Promise<void>) | undefined;
+};
+
+/** What a "named" group call needs from the host (`channel.ts`). */
+export type GroupCallDeps = {
+  startGroupEngine: GroupEngineStarter;
+  /** One speaker's turn to text, with the call's names as the vocabulary. Throws on failure. */
+  transcribe: (pcm: Buffer, names: string[]) => Promise<string>;
 };
 
 /** A running engine; `ownStop` = the controller stopped it (anything else stopping it is a failure). */
@@ -106,6 +121,10 @@ type ActiveCall = {
   groupId: string;
   kind: ConversationKind;
   callerUserId: string | undefined;
+  /** The room as the last `call_changed` named it (#874 G1): the caller while ringing. */
+  roster: CallParticipant[];
+  /** A "named" group call's turn-taking (#874): set before its transport starts. */
+  brain?: GroupCallBrain | undefined;
   state: CallState;
   since: number;
   transport?: CallAudioTransport;
@@ -306,7 +325,8 @@ export class CallController {
       return this.#setAvailability("unsupported");
     }
     try {
-      await setCallHandling(this.#p.client, CALL_AUDIO_RATE);
+      // Speaking frames only when group calls are name-gated here (#874 G2).
+      await setCallHandling(this.#p.client, CALL_AUDIO_RATE, this.#namedGroups());
     } catch (err) {
       const code = errorCode(err);
       this.#p.log("call_handling_failed", { code: code ?? "", errorClass: err instanceof Error ? err.name : typeof err });
@@ -393,6 +413,8 @@ export class CallController {
       case "active":
         if (!mine) return this.#p.log("call_ignored", { state: ev.state, direction: ev.direction });
         mine.state = ev.state;
+        mine.roster = ev.participants;
+        mine.brain?.setRoster(ev.participants);
         this.#publish();
         if (ev.state === "active") this.#speakIntro(mine);
         return;
@@ -405,7 +427,7 @@ export class CallController {
     }
   }
 
-  async #onRinging(ring: Pick<CallEntry, "call_id" | "group_id" | "participants" | "state">): Promise<void> {
+  async #onRinging(ring: Pick<CallEntry, "call_id" | "group_id" | "participants" | "state" | "caller_user_id">): Promise<void> {
     let decision: CallDecision;
     try {
       // Call events are read ahead of the message loop, so they also skip its barrier: wait for it here.
@@ -433,7 +455,9 @@ export class CallController {
       callId: ring.call_id,
       groupId: ring.group_id,
       kind: decision.kind,
-      callerUserId: ring.participants[0]?.user_id,
+      // While ringing the caller is also participants[0] (#874 G1).
+      callerUserId: ring.caller_user_id ?? ring.participants[0]?.user_id,
+      roster: ring.participants,
       state: "ringing",
       since: this.#now(),
       introSpoken: false,
@@ -467,7 +491,9 @@ export class CallController {
       callId: entry.call_id,
       groupId: entry.group_id,
       kind: classifyConversation({ members, agentUserId: this.#p.account.agentUserId, ownerUserId: this.#p.account.ownerUserId }).kind,
-      callerUserId: entry.participants[0]?.user_id,
+      // An answered call's participants are its room (#874 G1): the caller is named apart.
+      callerUserId: entry.state === "ringing" ? (entry.caller_user_id ?? entry.participants[0]?.user_id) : entry.caller_user_id,
+      roster: entry.participants,
       state: entry.state,
       since: this.#now(),
       introSpoken: true,
@@ -526,6 +552,30 @@ export class CallController {
       await this.#abandoned(call);
       return;
     }
+    const route = this.#p.resolveAgentRoute({
+      cfg: this.#p.cfg,
+      channel: CHANNEL_ID,
+      accountId: this.#p.accountId,
+      peer: { kind: call.kind, id: normalizeId(call.groupId) },
+    });
+    call.route = { agentId: route.agentId, sessionKey: route.sessionKey };
+    const group = this.#groupDepsFor(call);
+    if (group) {
+      const agentName = this.#agentName(route.agentId);
+      const brain = new GroupCallBrain({
+        agentName,
+        wakeNames: this.#p.calls.group.wakeNames ?? [agentName],
+        ownerUserId: normalizeId(this.#p.account.ownerUserId),
+        rate: CALL_AUDIO_RATE,
+        transcribe: group.transcribe,
+        ask: (text) => (call.engine?.handle as GroupEngineHandle | undefined)?.ask(text),
+        log: this.#p.log,
+        now: this.#now,
+      });
+      brain.setRoster(call.roster);
+      call.brain = brain;
+    }
+    const brain = call.brain;
     const bargeIn = this.#p.calls.bargeIn;
     const transport = new CallAudioTransport({
       first,
@@ -544,19 +594,18 @@ export class CallController {
             },
           }
         : {}),
+      ...(brain
+        ? {
+            tap: { onPcm: (pcm: Buffer) => brain.onPcm(pcm), onSpeaking: (userId: string, active: boolean) => brain.onSpeaking(userId, active) },
+            bargeInGate: () => brain.bargeInGate(),
+          }
+        : {}),
       onLost: () => void this.#enqueue("audio_lost", () => this.#end(call, "audio_lost")),
       log: this.#p.log,
       now: this.#now,
       sleep: this.#p.sleep,
     });
     call.transport = transport;
-    const route = this.#p.resolveAgentRoute({
-      cfg: this.#p.cfg,
-      channel: CHANNEL_ID,
-      accountId: this.#p.accountId,
-      peer: { kind: call.kind, id: normalizeId(call.groupId) },
-    });
-    call.route = { agentId: route.agentId, sessionKey: route.sessionKey };
     this.#publish();
     try {
       await this.#startEngine(call);
@@ -577,14 +626,23 @@ export class CallController {
       this.#p.log("call_engine_stopped", {});
       void this.#enqueue("engine_stopped", () => this.#end(call, "engine_stopped"));
     });
-    const handle = await this.#p.startEngine({
+    const common = {
       transport: view,
       callId: call.callId,
       agentId: call.route.agentId,
       sessionKey: call.route.sessionKey,
       toolPolicy: this.#toolPolicyFor(call),
       onConsultSettled: () => this.#consultSettled(call),
-    });
+    };
+    const group = call.brain ? this.#groupDepsFor(call) : undefined;
+    const handle: CallEngineHandle =
+      group && call.brain
+        ? await group.startGroupEngine({
+            ...common,
+            agentName: this.#agentName(call.route.agentId),
+            onAgentSaid: (text) => call.brain?.onAgentSaid(text),
+          })
+        : await this.#p.startEngine(common);
     slot = { handle, ownStop: false };
     if (call.over || this.#stopped) {
       await this.#stopEngine(slot);
@@ -598,6 +656,22 @@ export class CallController {
    * The owner's tools only in the owner's 1-1 call: a room call is one mixed stream, so anyone in it
    * who speaks drives the agent, whoever placed the call.
    */
+  /** Group calls are name-gated when the host can run that engine and config does not opt out. */
+  #namedGroups(): boolean {
+    return this.#p.calls.group.mode === "named" && this.#p.group !== undefined;
+  }
+
+  #groupDepsFor(call: ActiveCall): GroupCallDeps | undefined {
+    return call.kind === "group" && this.#namedGroups() ? this.#p.group : undefined;
+  }
+
+  /** The agent's name as its config gives it (OpenClaw's own activation-name source), else "OpenClaw". */
+  #agentName(agentId: string): string {
+    const agents = (this.#p.cfg as { agents?: { list?: Array<{ id?: string; name?: string; identity?: { name?: string } }> } }).agents;
+    const agent = agents?.list?.find((a) => a.id === agentId);
+    return agent?.name?.trim() || agent?.identity?.name?.trim() || "OpenClaw";
+  }
+
   #toolPolicyFor(call: ActiveCall): ResolvedCallsConfig["toolPolicy"] {
     const ownerAlone = call.kind === "direct" && call.callerUserId === normalizeId(this.#p.account.ownerUserId);
     return ownerAlone ? this.#p.calls.ownerToolPolicy : this.#p.calls.toolPolicy;
@@ -670,6 +744,7 @@ export class CallController {
   async #teardown(call: ActiveCall, reason: string): Promise<void> {
     if (call.over) return;
     call.over = true;
+    call.brain?.stop();
     if (call.hangUp) clearInterval(call.hangUp.timer);
     if (this.#call === call) this.#call = undefined;
     const engine = call.engine;

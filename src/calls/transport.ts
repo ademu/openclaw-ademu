@@ -175,6 +175,16 @@ export type CallTransportParams = {
   reconnect?: ReconnectPolicy | undefined;
   /** The speech detector; omitted = no barge-in from this side. */
   bargeIn?: BargeInOptions | undefined;
+  /**
+   * #874 group calls: sees each speaker change and each input PCM frame in wire order (a change
+   * applies from the next PCM), before the engine does. Throwing here never breaks the input path.
+   */
+  tap?: { onPcm: (pcm: Buffer) => void; onSpeaking: (userId: string, active: boolean) => void } | undefined;
+  /**
+   * #874 group calls: barge-in only fires while this says yes (the person the agent is answering is
+   * speaking); omitted = anyone's speech may barge in (a 1-1).
+   */
+  bargeInGate?: (() => boolean) | undefined;
   /** Recovery failed: the transport is fatal (the controller ends the call). */
   onLost?: (() => void) | undefined;
   log: (event: string, fields?: Record<string, string | number | boolean>) => void;
@@ -434,6 +444,7 @@ export class CallAudioTransport {
         if (this.#socket !== socket) return;
         if (f.kind === "pcm") this.#input(f.pcm);
         else if (f.kind === "mark") this.#markEchoed(f.id.toString("latin1"));
+        else if (f.kind === "speaking") this.#tap(() => this.#params.tap?.onSpeaking(f.userId, f.active));
         // A clear_output from the helper is not in the protocol; ignored.
       }
     };
@@ -448,10 +459,20 @@ export class CallAudioTransport {
     return true;
   }
 
+  #tap(fn: () => void): void {
+    try {
+      fn();
+    } catch (err) {
+      this.#params.log("call_audio_tap_failed", { errorClass: err instanceof Error ? err.name : typeof err });
+    }
+  }
+
   #input(pcm: Buffer): void {
     this.#stats.framesIn++;
+    if (this.#params.tap) this.#tap(() => this.#params.tap?.onPcm(pcm));
     const detector = this.#params.bargeIn;
-    if (detector && this.#pending.size > 0 && this.#now() >= this.#restUntil) {
+    const gate = this.#params.bargeInGate;
+    if (detector && this.#pending.size > 0 && this.#now() >= this.#restUntil && (!gate || gate())) {
       const frameMs = ((pcm.length >> 1) / this.#params.rate) * 1000;
       this.#loudMs = rmsOf(pcm) >= detector.rmsThreshold ? this.#loudMs + frameMs : 0;
       if (this.#loudMs >= detector.holdMs) {

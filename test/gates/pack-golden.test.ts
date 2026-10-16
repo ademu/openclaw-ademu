@@ -58,7 +58,11 @@ describe("npm pack golden", () => {
       const skill = join("skills", name, "SKILL.md");
       if (existsSync(join(ROOT, skill))) expected.add(skill);
     }
-    for (const rel of ["index.ts", "setup-entry.ts", ...walk(join(ROOT, "src")).map((f) => relative(ROOT, f))]) {
+    // A `.d.ts` source (a local type declaration) compiles to nothing.
+    const sources = walk(join(ROOT, "src"))
+      .map((f) => relative(ROOT, f))
+      .filter((f) => !f.endsWith(".d.ts"));
+    for (const rel of ["index.ts", "setup-entry.ts", ...sources]) {
       const base = rel.replace(/\.ts$/, "");
       expected.add(`dist/${base}.js`);
       expected.add(`dist/${base}.js.map`);

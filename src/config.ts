@@ -73,6 +73,24 @@ export const CallsSchema = z
     model: z.string().optional(),
     instructions: z.string().optional(),
     providers: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+    /**
+     * Group calls (#874): "named" (default) = a realtime voice model that hears everything and replies
+     * only when a person addresses the agent by name (each speaker's turn transcribed with the call's
+     * names; only the person it answers can interrupt it); "same" = the 1-1 engine, which answers all.
+     */
+    group: z
+      .object({
+        mode: z.enum(["named", "same"]).optional(),
+        /** The realtime voice model in "named" mode. Default gpt-realtime-2.1. */
+        model: z.string().optional(),
+        /** The model that transcribes each speaker's turn. Default gpt-4o-transcribe. */
+        transcribeModel: z.string().optional(),
+        /** The names that address the agent. Default: the agent's name. */
+        wakeNames: z.array(z.string()).optional(),
+        instructions: z.string().optional(),
+      })
+      .strict()
+      .optional(),
     /** Barge-in: speech held this long (ms) at this normalised RMS while the agent speaks stops it. */
     bargeIn: z
       .object({
@@ -102,7 +120,11 @@ export type ResolvedCallsConfig = {
   instructions?: string;
   providers: Record<string, Record<string, unknown>>;
   bargeIn: { enabled: boolean; rmsThreshold: number; holdMs: number };
+  group: { mode: "named" | "same"; model: string; transcribeModel: string; wakeNames?: string[]; instructions?: string };
 };
+
+export const DEFAULT_GROUP_MODEL = "gpt-realtime-2.1";
+export const DEFAULT_GROUP_TRANSCRIBE_MODEL = "gpt-4o-transcribe";
 
 export const DEFAULT_BARGE_IN_RMS = 0.02;
 export const DEFAULT_BARGE_IN_HOLD_MS = 200;
@@ -129,6 +151,13 @@ export function resolveCallsConfig(raw: CallsConfig | undefined): ResolvedCallsC
       enabled: raw?.bargeIn?.enabled !== false,
       rmsThreshold: raw?.bargeIn?.rmsThreshold ?? DEFAULT_BARGE_IN_RMS,
       holdMs: raw?.bargeIn?.holdMs ?? DEFAULT_BARGE_IN_HOLD_MS,
+    },
+    group: {
+      mode: raw?.group?.mode ?? "named",
+      model: text(raw?.group?.model) ?? DEFAULT_GROUP_MODEL,
+      transcribeModel: text(raw?.group?.transcribeModel) ?? DEFAULT_GROUP_TRANSCRIBE_MODEL,
+      ...(raw?.group?.wakeNames?.some((n) => n.trim()) ? { wakeNames: raw.group.wakeNames.map((n) => n.trim()).filter(Boolean) } : {}),
+      ...optional("instructions", raw?.group?.instructions),
     },
   };
 }

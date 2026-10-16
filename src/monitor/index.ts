@@ -11,7 +11,7 @@
 // error; once seated, the client's own reconnect loop rides out a daemon restart.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
-import { CallController } from "../calls/controller.js";
+import { type GroupCallDeps, CallController } from "../calls/controller.js";
 import type { CallEngineStarter } from "../calls/engine.js";
 import { CHANNEL_ID, type ResolvedAdemuAccount, type ResolvedCallsConfig } from "../config.js";
 import { classifyConversation, type ConversationKind } from "../grammar.js";
@@ -60,6 +60,8 @@ export type StartAccountDeps = {
   settings: { typingKeepaliveMs: number; mentionAliases: readonly string[] };
   /** The voice engine for an account's calls; undefined = this process cannot run one (calls stay off). */
   callEngine?: ((calls: ResolvedCallsConfig, cfg: OpenClawConfig) => CallEngineStarter | undefined) | undefined;
+  /** #874 group calls' name-gated engine and per-turn transcriber; undefined = groups run like a 1-1. */
+  groupCall?: ((calls: ResolvedCallsConfig, cfg: OpenClawConfig) => GroupCallDeps | undefined) | undefined;
   platform: string;
   now: () => number;
   /** Resolves after `ms`, or early on `signal` (a real one clears its timer). */
@@ -262,6 +264,7 @@ async function runWithLease(
       account: { agentUserId: account.agentUserId!, ownerUserId },
       resolveAgentRoute: deps.runtime.routing.resolveAgentRoute,
       startEngine: account.calls.enabled ? deps.callEngine?.(account.calls, cfg) : undefined,
+      group: account.calls.enabled ? deps.groupCall?.(account.calls, cfg) : undefined,
       // Ids and states only (status.ts).
       onStatus: (status) => setStatus({ calls: status }),
       log,

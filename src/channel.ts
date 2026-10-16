@@ -7,6 +7,9 @@ import type { ChannelPlugin } from "openclaw/plugin-sdk/channel-core";
 import { createChatChannelPlugin } from "openclaw/plugin-sdk/channel-core";
 import { ademuMessageActions } from "./actions.js";
 import { createCallEngineStarter } from "./calls/engine.js";
+import { createGroupEngineStarter } from "./calls/group-engine.js";
+import { CALL_AUDIO_RATE } from "./calls/protocol.js";
+import { transcribeSegment } from "./calls/transcribe.js";
 import type { ControlLike, EnrollmentLeaseDeps } from "./ceremony.js";
 import { CHANNEL_ID, resolveAdemuAccount, type ResolvedAdemuAccount } from "./config.js";
 import { clearAccountCredentials } from "./enroll-config.js";
@@ -38,6 +41,17 @@ export function realStartAccountDeps(): StartAccountDeps {
     settings: getPluginSettings(),
     callEngine: (calls, cfg) =>
       createCallEngineStarter({ calls, cfg, runtime, logger: runtime.logging.getChildLogger({ plugin: CHANNEL_ID, scope: "call" }) }),
+    groupCall: (calls, cfg) => ({
+      startGroupEngine: createGroupEngineStarter({ calls, cfg, runtime, logger: runtime.logging.getChildLogger({ plugin: CHANNEL_ID, scope: "call" }) }),
+      transcribe: async (pcm, names) => {
+        // The key OpenClaw's own OpenAI provider uses (auth profile, config, env), resolved per turn so
+        // a rotated key is picked up.
+        const auth = await runtime.modelAuth.resolveApiKeyForProvider({ provider: "openai", cfg });
+        const apiKey = auth.apiKey ?? process.env.OPENAI_API_KEY;
+        if (!apiKey) throw new Error("no OpenAI API key for call transcription");
+        return transcribeSegment({ pcm, rate: CALL_AUDIO_RATE, apiKey, model: calls.group.transcribeModel, names });
+      },
+    }),
     platform: process.platform,
     now: () => Date.now(),
     sleep: abortableSleep,
