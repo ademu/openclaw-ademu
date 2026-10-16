@@ -24,6 +24,9 @@ import { createConnection } from "node:net";
 import type { Duplex } from "node:stream";
 import { AudioFrameDecoder, AudioFrameError, encodeClearOutput, encodeMark, encodePcm } from "./frames.js";
 
+/** The SDK's transport plus `inputAudioIsolated`, which hosts before v2026.9.9 do not type (and ignore). */
+export type CallTransportView = MeetingRealtimeAudioTransport & { inputAudioIsolated?: boolean };
+
 /** The longest ok line the helper may send; anything longer is not the helper. */
 export const MAX_HANDSHAKE_LINE = 1024;
 export const HANDSHAKE_TIMEOUT_MS = 5_000;
@@ -267,7 +270,7 @@ export class CallAudioTransport {
    * A transport for one engine: everything delegates here; its stop/dispose detach only that engine.
    * `onDetached` runs once, when the engine stops its transport (by itself, or because it was told to).
    */
-  view(onDetached?: () => void): MeetingRealtimeAudioTransport {
+  view(onDetached?: () => void): CallTransportView {
     let detached = false;
     let input: ((audio: Buffer) => void) | undefined;
     let monitor: ((audio: Buffer) => boolean) | undefined;
@@ -289,6 +292,9 @@ export class CallAudioTransport {
       }
     };
     return {
+      // The helper sends the mixed audio of the other participants only, never the agent's own
+      // output, so a live voice provider that hears barge-in from the input (GPT-Live) can run.
+      inputAudioIsolated: true,
       onFatal: (handler) => {
         const h = () => {
           if (!detached) handler();

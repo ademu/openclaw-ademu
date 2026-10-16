@@ -166,6 +166,10 @@ describe("CallAudioTransport", () => {
     expect(w.transport.stats().marksPending).toBe(0);
   });
 
+  it("declares its input isolated: the helper sends only the other participants' audio, never the agent's own", () => {
+    expect(transportWorld().transport.view().inputAudioIsolated).toBe(true);
+  });
+
   it("clearOutput sends kind 2 and resolves at once", async () => {
     const w = transportWorld();
     await w.transport.view().clearOutput();
