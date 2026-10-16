@@ -14,11 +14,18 @@
   "contracts": {
     "tools": [
       "ademu_enroll",
-      "ademu_get_media"
+      "ademu_get_media",
+      "ademu_end_call"
     ]
   },
   "toolMetadata": {
     "ademu_get_media": {
+      "profiles": [
+        "coding",
+        "messaging"
+      ]
+    },
+    "ademu_end_call": {
       "profiles": [
         "coding",
         "messaging"
@@ -112,6 +119,95 @@
               "own",
               "all"
             ]
+          },
+          "calls": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "answer": {
+                "type": "string",
+                "enum": [
+                  "allowed",
+                  "none"
+                ]
+              },
+              "engine": {
+                "type": "string",
+                "enum": [
+                  "agent",
+                  "realtime"
+                ]
+              },
+              "introMessage": {
+                "type": "string"
+              },
+              "toolPolicy": {
+                "type": "string",
+                "enum": [
+                  "safe-read-only",
+                  "owner",
+                  "none"
+                ]
+              },
+              "ownerToolPolicy": {
+                "type": "string",
+                "enum": [
+                  "safe-read-only",
+                  "owner",
+                  "none"
+                ]
+              },
+              "provider": {
+                "type": "string"
+              },
+              "transcriptionProvider": {
+                "type": "string"
+              },
+              "voiceProvider": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "providers": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                }
+              },
+              "bargeIn": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "rmsThreshold": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "holdMs": {
+                    "type": "integer",
+                    "minimum": 20,
+                    "maximum": 2000
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
           },
           "groups": {
             "type": "object",
@@ -362,6 +458,95 @@
                     "own",
                     "all"
                   ]
+                },
+                "calls": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "answer": {
+                      "type": "string",
+                      "enum": [
+                        "allowed",
+                        "none"
+                      ]
+                    },
+                    "engine": {
+                      "type": "string",
+                      "enum": [
+                        "agent",
+                        "realtime"
+                      ]
+                    },
+                    "introMessage": {
+                      "type": "string"
+                    },
+                    "toolPolicy": {
+                      "type": "string",
+                      "enum": [
+                        "safe-read-only",
+                        "owner",
+                        "none"
+                      ]
+                    },
+                    "ownerToolPolicy": {
+                      "type": "string",
+                      "enum": [
+                        "safe-read-only",
+                        "owner",
+                        "none"
+                      ]
+                    },
+                    "provider": {
+                      "type": "string"
+                    },
+                    "transcriptionProvider": {
+                      "type": "string"
+                    },
+                    "voiceProvider": {
+                      "type": "string"
+                    },
+                    "model": {
+                      "type": "string"
+                    },
+                    "instructions": {
+                      "type": "string"
+                    },
+                    "providers": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      }
+                    },
+                    "bargeIn": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "rmsThreshold": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        "holdMs": {
+                          "type": "integer",
+                          "minimum": 20,
+                          "maximum": 2000
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
                 }
               },
               "additionalProperties": false
@@ -426,6 +611,14 @@
         "reactionNotifications": {
           "label": "Reaction notifications",
           "help": "Which reactions the agent hears about, as a line it reads at its next turn in that conversation (never a reply prompt): all (default), own (only on the agent's messages), or off."
+        },
+        "accounts.*.calls": {
+          "label": "Calls",
+          "advanced": true
+        },
+        "calls": {
+          "label": "Calls",
+          "help": "Whether the agent answers Ademú voice calls (calls.enabled, default off: callers get busy). Callers are judged like senders of text; calls.engine picks OpenClaw's agent voice loop (default) or a realtime voice provider."
         },
         "dataDir": {
           "label": "Device host data dir",

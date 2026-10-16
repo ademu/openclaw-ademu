@@ -4,7 +4,7 @@
 import { InvalidTokenError, SessionRejectedError } from "@ademu/adc-client";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ResolvedAdemuAccount } from "../src/config.js";
+import { resolveCallsConfig, type ResolvedAdemuAccount } from "../src/config.js";
 import { DaemonUnreachableError, DaemonUnsupportedError, SessionSocketMovedError, type Attacher, type Attachment, type Unreachable } from "../src/monitor/attach.js";
 import { ABSENT_WAIT_INITIAL_MS, ABSENT_WAIT_MAX_MS, DRAIN_CAP_MS, RELEASE_TAIL_MS, REPROBE_AFTER_ATTEMPTS, STOP_DEADLINE_MS, startAccount, type StartAccountDeps } from "../src/monitor/index.js";
 import type { RuntimeChannelSurface } from "../src/monitor/ingress.js";
@@ -29,6 +29,7 @@ function account(over: Partial<ResolvedAdemuAccount> = {}): ResolvedAdemuAccount
     tokenSource: "config",
     daemon: { dataDir: "/d", controlSocket: "/d/adc.sock", sessionSocket: "/d/adc-session.sock", raw: {}, explicit: {} } as never,
     serverConfigured: false,
+    calls: resolveCallsConfig(undefined),
     ...over,
   };
 }

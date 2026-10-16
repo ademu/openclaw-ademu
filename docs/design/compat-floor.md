@@ -17,7 +17,7 @@ v2026.8.{1,2}, v2026.9.1. The OpenClaw `extended-stable` line is 2026.6.34 (2026
 ## Derived floor: **2026.8.1**
 
 The floor exceeds `extended-stable` (2026.6.34). Extended-stable users can install once that line
-passes 2026.8.1 (the next extended-stable cut of a month ≥ 2026.8 carries it). Twenty-one items pin it
+passes 2026.8.1 (the next extended-stable cut of a month ≥ 2026.8 carries it). Twenty-five items pin it
 (bold below); dropping any one does not lower it.
 
 Not a plugin-sdk import, but pinned against the installed host all the same: `src/bindings.ts` mirrors
@@ -45,6 +45,7 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `channel-setup` | 07d9f725b61 (2026-03-18) | v2026.3.22 |
 | `core` | a4850b1b8f2 (2026-03-04) | v2026.3.7 |
 | `gateway-runtime` | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
+| `meeting-runtime` (calls, AdemuMLS #874; checked against the v2026.8.1 tarball: same transport interface and engine signatures as v2026.9.1) | 1a2d9e5e5c8 (2026-07-17) | **v2026.8.1** |
 | `media-runtime` (QR helpers, recorded exception; outbound media loading, #27) | 9ebe38b6e36 (2026-03-16) | v2026.3.22 |
 | `runtime-store` | 8d7778d1d6c (2026-03-08) | v2026.3.8 |
 | `secret-input` | 07d9f725b61 (2026-03-18) | v2026.3.22 |
@@ -124,6 +125,11 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `media-runtime` → `renderQrPngDataUrl` | value | dde90a345a6 (2026-07-16) | **v2026.8.1** |
 | `media-runtime` → `renderQrTerminal` | value | dde90a345a6 (2026-07-16) | **v2026.8.1** |
 | `media-runtime` → `resolveOutboundAttachmentFromUrl` | value | dde90a345a6 (2026-07-16) | **v2026.8.1** |
+| `meeting-runtime` → `MeetingRealtimeAudioTransport` | type | 1a2d9e5e5c8 (2026-07-17) | **v2026.8.1** |
+| `meeting-runtime` → `MeetingRealtimeEngineConfig` | type | 1a2d9e5e5c8 (2026-07-17) | **v2026.8.1** |
+| `meeting-runtime` → `createMeetingRealtimeEngineBindings` | value | 939ecb5ef8f (2026-07-22) | **v2026.8.1** |
+| `meeting-runtime` → `startMeetingAgentRealtimeEngine` | value | 1a2d9e5e5c8 (2026-07-17) | **v2026.8.1** |
+| `meeting-runtime` → `startMeetingRealtimeEngine` | value | 1a2d9e5e5c8 (2026-07-17) | **v2026.8.1** |
 | `runtime-store` → `createPluginRuntimeStore` | value | 8d7778d1d6c (2026-03-08) | v2026.3.8 |
 | `secret-input` → `SecretInputStringResolutionMode` | type | 1769fb2aa1d (2026-04-14) | v2026.4.15 |
 | `secret-input` → `buildOptionalSecretInputSchema` | value | 07d9f725b61 (2026-03-18) | v2026.3.22 |
@@ -148,10 +154,13 @@ media-send helpers (#27, re-derived 2026-10-09 against `cc3c4f36a9d`) share that
 | `api.runtime.channel.routing.resolveAgentRoute` / `commands.*` | 1507a9701b8 (2026-05-27) | v2026.5.27 |
 | `api.runtime.channel.media.saveMediaBuffer` (`ademu_get_media`) | 5b4651d9ed1 (2026-01-18) | v2026.1.20 |
 | tool context `agentAccountId` | cf0c72a557a (2026-01-11) | v2026.1.11 |
+| tool context `sessionKey` (`ademu_end_call`: a call's consult session) | cf0c72a557a (2026-01-11) | v2026.1.11 |
 | tool context `messageChannel` | 90342a4f3a5 (2026-01-13) | v2026.1.12 |
 | tool context `deliveryContext` | 44defeb71b3 (2026-03-27) | v2026.3.28 |
 | tool context `nativeChannelId` (the scope check's fallback) | fbd330b7aa4 (2026-07-10) | **v2026.8.1** |
 | `api.runtime.system.enqueueSystemEvent` (reactions) | ee6e534ccba (2026-01-18) | v2026.1.20 |
+| `api.runtime.tts.textToSpeechTelephony` (calls: the agent engine's speech) | 83f92e34afe (2026-01-25) | v2026.1.29 |
+| `api.runtime.agent.runEmbeddedAgent` + `session.*` (calls: the meeting consult) | 44ec4d05de4 (2026-04-10) | v2026.4.10 |
 | `api.runtime.config.mutateConfigFile` | 7f3f108521f (2026-04-27) | v2026.4.26 |
 | `api.registerHttpRoute` (`replaceExisting` 7a7eee920a1 2026-03-02) | c96ffa7186a (2026-01-29) | v2026.3.2 |
 | `api.runtime.logging.getChildLogger` | a4850b1b8f2 (2026-03-04) | v2026.3.7 |

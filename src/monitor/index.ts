@@ -9,8 +9,11 @@
 // for IN the task — `recovering` with the reason, re-attaching on a capped backoff — because the
 // gateway's restart loop gives up after 10 attempts and replaces the reason with the raw connect
 // error; once seated, the client's own reconnect loop rides out a daemon restart.
+import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
-import { CHANNEL_ID, type ResolvedAdemuAccount } from "../config.js";
+import { CallController } from "../calls/controller.js";
+import type { CallEngineStarter } from "../calls/engine.js";
+import { CHANNEL_ID, type ResolvedAdemuAccount, type ResolvedCallsConfig } from "../config.js";
 import { classifyConversation, type ConversationKind } from "../grammar.js";
 import { strings } from "../i18n/strings.js";
 import { createReplyMediaSender, registerLiveAccount, sendAdemuText, unregisterLiveAccount, type LiveAccount, type RefusalNotes } from "../outbound.js";
@@ -55,6 +58,8 @@ export type StartAccountDeps = {
   /** The host's system-event queue (reactions). */
   system: RuntimeSystemSurface;
   settings: { typingKeepaliveMs: number; mentionAliases: readonly string[] };
+  /** The voice engine for an account's calls; undefined = this process cannot run one (calls stay off). */
+  callEngine?: ((calls: ResolvedCallsConfig, cfg: OpenClawConfig) => CallEngineStarter | undefined) | undefined;
   platform: string;
   now: () => number;
   /** Resolves after `ms`, or early on `signal` (a real one clears its timer). */
@@ -166,6 +171,7 @@ async function runWithLease(
   const { account, accountId, cfg } = ctx;
   let session: Session | undefined;
   let ingress: IngressHandle | undefined;
+  let calls: CallController | undefined;
   let live: LiveAccount | undefined;
   let outcome: StartOutcome = { kind: "aborted" };
   let deadline = deps.now() + STOP_DEADLINE_MS;
@@ -242,6 +248,27 @@ async function runWithLease(
     };
     registerLiveAccount(accountId, live);
 
+    // --- calls (AdemuMLS #874): beside the loop; set up per seat by the controller itself ---------
+    const resolver = createAdemuIngressResolver({ accountId, cfg });
+    const callController = new CallController({
+      accountId,
+      cfg,
+      calls: account.calls,
+      client: session.client,
+      members,
+      barrier: () => session!.barrier(),
+      sessionSocketPath: lease.info.sessionSocketPath,
+      resolver,
+      account: { agentUserId: account.agentUserId!, ownerUserId },
+      resolveAgentRoute: deps.runtime.routing.resolveAgentRoute,
+      startEngine: account.calls.enabled ? deps.callEngine?.(account.calls, cfg) : undefined,
+      // Ids and states only (status.ts).
+      onStatus: (status) => setStatus({ calls: status }),
+      log,
+    });
+    calls = callController;
+    live.calls = callController;
+
     // --- ingress ---------------------------------------------------------------------------
     const loopAbort = new AbortController();
     ingress = startIngress({
@@ -252,7 +279,7 @@ async function runWithLease(
       reactionNotifications: account.reactionNotifications,
       session,
       store: deps.store,
-      resolver: createAdemuIngressResolver({ accountId, cfg }),
+      resolver,
       account: { deviceId: account.deviceId!, agentUserId: account.agentUserId!, ownerUserId, agentName: account.agentName },
       mentionAliases: deps.settings.mentionAliases,
       typingKeepaliveMs: deps.settings.typingKeepaliveMs,
@@ -266,12 +293,14 @@ async function runWithLease(
       historyLimit: resolveHistoryLimit(cfg, account),
       signal: loopAbort.signal,
       log,
+      onCallChanged: (ev) => callController.handleEvent(ev),
       onSecurityNotice: (groupId) => {
         // Fixed copy only — never a field of the frame.
         setStatus({ lastError: strings.status.securityNotice });
         if (groupId) void sendAdemuText({ client: session!.client, groupId, text: strings.room.securityNotice }).catch(() => {});
       },
     });
+    callController.start();
     setStatus(readyPatch());
     log("account_ready", {});
 
@@ -301,6 +330,8 @@ async function runWithLease(
             if (budget > 0) await Promise.race([ingress.drain(), deps.sleep(budget)]);
           }
         } finally {
+          // The call's engine and audio connection go before the session (the daemon keeps the call 10 s).
+          if (calls) await bounded(deps, "calls_stop", calls.stop(), Math.max(0, deadline - deps.now() - RELEASE_TAIL_MS), log);
           if (live) unregisterLiveAccount(accountId, live);
           if (session) await bounded(deps, "session_close", session.close(), Math.max(0, deadline - deps.now() - RELEASE_TAIL_MS), log);
         }

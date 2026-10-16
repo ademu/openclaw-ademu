@@ -94,7 +94,7 @@ export class FakeAdcClient {
   }
 
   /** Pushes a message_received with the next seq (or an explicit one) and returns it. */
-  message(partial: Omit<Partial<MessageReceivedEvent>, "media"> & { seq?: number; media?: unknown } = {}) {
+  message(partial: Omit<Partial<MessageReceivedEvent>, "media"> & { seq?: number; media?: unknown; call?: unknown } = {}) {
     const seq = partial.seq ?? this.#seq++;
     const ev = {
       known: true as const,
@@ -110,6 +110,8 @@ export class FakeAdcClient {
       created_at_ms: partial.created_at_ms ?? 1_700_000_000_000 + seq,
       // A #440 daemon's media metadata; absent on text frames, as on the wire.
       ...(partial.media !== undefined ? { media: partial.media } : {}),
+      // A #874 daemon's call record block (`ct:"call"`).
+      ...(partial.call !== undefined ? { call: partial.call } : {}),
     };
     this.#queue.push(ev as unknown as DeviceEvent);
     return ev;

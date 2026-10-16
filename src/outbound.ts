@@ -67,6 +67,8 @@ export type LiveAccount = {
   refusalNotes?: RefusalNotes;
   /** The account's structural log (media sends from the agent's own tool calls log through it). */
   log?: MediaSendLog;
+  /** The account's calls (`ademu_end_call` hangs up through it). */
+  calls?: { endAfterReply: (callId: string) => boolean };
 };
 
 /**
@@ -93,6 +95,11 @@ export function getLiveAccount(accountId: string): LiveAccount {
   const entry = live.get(accountId);
   if (!entry) throw new AccountNotRunningError(accountId);
   return entry;
+}
+
+/** Every running account (the call tool finds its call by id, whichever account holds it). */
+export function liveAccounts(): Iterable<LiveAccount> {
+  return live.values();
 }
 
 export function resetLiveAccountsForTests(): void {

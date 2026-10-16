@@ -1,6 +1,6 @@
 // Full runtime entry of the Ademú channel plugin (plan T10). `registerFull` reads the plugin's
-// manifest config and adds the owner-gated `ademu_enroll` tool (T13) and the `ademu_get_media` tool
-// (openclaw-ademu #22).
+// manifest config and adds the owner-gated `ademu_enroll` tool (T13), the `ademu_get_media` tool
+// (openclaw-ademu #22) and the in-call `ademu_end_call` tool (openclaw-ademu#30).
 import { connect as connectSessionReal } from "@ademu/adc-client";
 import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
 import { ademuPlugin, hostLog, realEnrollmentLeaseDeps } from "./src/channel.js";
@@ -10,6 +10,7 @@ import { strings } from "./src/i18n/strings.js";
 import { createQr } from "./src/qr.js";
 import { applyPluginSettings, getPluginSettings, setAdemuRuntime } from "./src/runtime.js";
 import { cancelByHuman, confirmByHuman, type EnrollToolDeps, registerEnrollTool } from "./src/tools/enroll.js";
+import { registerEndCallTool } from "./src/tools/calls.js";
 import { registerMediaTool } from "./src/tools/media.js";
 
 export default defineChannelPluginEntry({
@@ -49,6 +50,8 @@ export default defineChannelPluginEntry({
       maxOpenBytes: () => getPluginSettings().mediaMaxOpenMb * 1024 * 1024,
       log: hostLog,
     });
+    // Calls (openclaw-ademu#30): the agent hangs up the call it is in; offered only inside a call.
+    registerEndCallTool(api, { log: hostLog });
     // The browser enrollment page (QR → words → Yes / No) shares the tool's registry and decision paths.
     registerEnrollmentPage(api, {
       registry,

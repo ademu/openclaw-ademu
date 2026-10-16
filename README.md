@@ -209,6 +209,26 @@ A device host older than adc 0.6.0 — or one without the enrollment socket — 
   per account) picks which: `all` (default), `own` (only reactions on the agent's messages), or `off`.
   The lines are held in the gateway's memory: a restart before the agent's next turn drops them, and a
   reaction that arrives while the account is not running is never seen.
+- **Calls (voice):** off by default — a caller gets "busy" at once. With
+  `channels.ademu.calls.enabled: true` (or per account) the agent answers Ademú calls, 1-1 and in
+  rooms, by the same rules as text: the owner always; in a room, others only where the room needs no
+  mention (`groups.<id>.requireMention: false`); anyone else is declined. The agent talks through
+  OpenClaw's meeting voice loop: `calls.engine: "agent"` (default) transcribes the caller, asks the
+  agent (the same agent and memory as the chat, forked from that conversation's session) and speaks
+  the answer with the host's `tts` config;
+  `"realtime"` uses a speech-to-speech provider that consults the agent as a tool. Speech-to-text and
+  voice providers (`calls.provider`, `calls.transcriptionProvider`, `calls.voiceProvider`,
+  `calls.providers.<id>`) are OpenClaw's own, configured as for a meeting plugin; set them up before
+  enabling calls — the plugin cannot check them in advance, so without them a call is answered and
+  then ends at once (logged as `call_engine_failed`). Speaking over the
+  agent stops it (`calls.bargeIn`). The agent's tools in a call follow OpenClaw's meeting consult
+  policy: in the owner's own 1-1 calls its normal tools (`calls.ownerToolPolicy`, default `owner`);
+  in every other call, rooms included, only OpenClaw's read tools (`calls.toolPolicy`, default
+  `safe-read-only`). With its normal tools the agent can hang up with `ademu_end_call` (the call ends
+  once its goodbye has been spoken); elsewhere only the caller hangs up. A finished call becomes one line in the conversation's session
+  (`Ademú call from Marios: answered, 3 min 12 s (call <id>)`), never a turn. Needs an adc with call
+  support and its `adc-call` helper beside it (AdemuMLS #874); without it the status shows calls as
+  unavailable and callers get busy.
 - **Sending proactively:** the `message` tool with `channel: "ademu"` and a conversation id
   (`ademu:<uuid>` or the bare UUID). Reactions: `action: "react"`.
 - **Files people send** (photos, videos, voice notes, files): the agent sees one line per file and
@@ -249,7 +269,9 @@ A device host older than adc 0.6.0 — or one without the enrollment socket — 
         "iris": {
           "agentName": "Iris",
           "deviceId": "…", "agentUserId": "…", "ownerUserId": "…",
-          "token": "adc1_…"            // or a SecretRef: { "source": "env", "provider": "default", "id": "ADEMU_TOKEN" }
+          "token": "adc1_…",           // or a SecretRef: { "source": "env", "provider": "default", "id": "ADEMU_TOKEN" }
+          // optional: answer voice calls (off by default)
+          // "calls": { "enabled": true, "engine": "agent", "introMessage": "Hi, Iris here." }
         }
       }
     }

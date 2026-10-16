@@ -1,7 +1,8 @@
 // The ingress loop (design entry §2 R2b, plan T7) — THE correctness pin of this plugin.
 //
 // One sequential loop per account owns the AdcClient event iterator and produces the session's
-// `lifetime`. Per `message_received`: validate → watermark replay check → self-sent → decision-only
+// `lifetime`. A `ct:"call"` record is history, never a turn (`call-records.ts`); a `call_changed` live
+// event goes to the call controller beside the loop. Per `message_received`: validate → watermark replay check → self-sent → decision-only
 // access → mention decision → route → context-bound access → buildContext → dispatch with an
 // AdoptionTracker (whose `onAdopted` commits the watermark) → await the tracker → ack. A non-text
 // `ct` takes the same path with a described body (`content.ts`); nothing here waits for a file.
@@ -34,6 +35,8 @@ import { IngressHaltedError, IngressProtocolError } from "../status.js";
 import { peekRefusalNote, type RefusalNotes } from "../outbound.js";
 import type { AdemuStore } from "../store.js";
 import { AdoptionFailedError, AdoptionTracker, type TurnResultLike } from "./adoption.js";
+import { parseCallChanged, type CallChanged } from "../calls/protocol.js";
+import { deliverCallRecord } from "./call-records.js";
 import { bodyForAgent, describeContent, escapeRuntimeContextDelimiters } from "./content.js";
 import { forgetRoomHistory, peekRoomHistory, recordSkipped, type RoomHistory } from "./history.js";
 import { gateSender } from "./sender-gate.js";
@@ -83,6 +86,8 @@ export type IngressParams = {
   historyLimit?: number | undefined;
   /** Shutdown signal for the loop (NOT propagated to adopted turns). */
   signal: AbortSignal;
+  /** Where `call_changed` events go (the account's call controller); missing = they are dropped. */
+  onCallChanged?: ((ev: CallChanged) => void) | undefined;
   /** A future `security_notice` live event: the caller sets a fixed status and posts a fixed room note. */
   onSecurityNotice?: ((groupId: string | undefined) => void) | undefined;
   log: (event: string, fields?: Record<string, string | number | boolean>) => void;
@@ -119,6 +124,59 @@ function validMessage(ev: DeviceEvent): ev is MessageReceivedEvent & { known: tr
 
 function validSeq(seq: unknown): seq is number {
   return typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 0;
+}
+
+/**
+ * The client's event stream with every `call_changed` taken out as it ARRIVES and handed to
+ * `onCall`; everything else is yielded in order. The source is read continuously (it buffers without
+ * bound already; this only moves the buffer), so the consumer's pace never delays a call event.
+ * The source's end or error reaches the consumer after the events before it.
+ */
+export function readAheadCalls(source: AsyncIterator<DeviceEvent>, onCall: (ev: DeviceEvent) => void, stopped: () => boolean): AsyncIterable<DeviceEvent> {
+  const items: DeviceEvent[] = [];
+  let end: { error?: unknown } | undefined;
+  let wake: (() => void) | undefined;
+  const notify = () => {
+    const w = wake;
+    wake = undefined;
+    w?.();
+  };
+  void (async () => {
+    try {
+      for (;;) {
+        const r = await source.next();
+        if (r.done) break;
+        if (String(r.value.event) === "call_changed") {
+          if (!stopped()) onCall(r.value);
+          continue;
+        }
+        items.push(r.value);
+        notify();
+        if (stopped()) break;
+      }
+      end = {};
+    } catch (err) {
+      end = { error: err };
+    }
+    notify();
+  })();
+  return {
+    [Symbol.asyncIterator]: () => ({
+      next: async (): Promise<IteratorResult<DeviceEvent>> => {
+        for (;;) {
+          const item = items.shift();
+          if (item) return { value: item, done: false };
+          if (end) {
+            if ("error" in end) throw end.error;
+            return { value: undefined, done: true };
+          }
+          await new Promise<void>((r) => {
+            wake = r;
+          });
+        }
+      },
+    }),
+  };
 }
 
 export function startIngress(params: IngressParams): IngressHandle {
@@ -187,6 +245,27 @@ export function startIngress(params: IngressParams): IngressHandle {
       ack(seq);
       return;
     }
+    // A call record (AdemuMLS #874) is history, never a turn — the agent's own calls included, so it
+    // is decided before the self-sent rule: one queued line, then the ack.
+    const content = describeContent(ev);
+    if (content.kind === "call") {
+      await deliverCallRecord(
+        {
+          accountId,
+          cfg,
+          session,
+          resolver: params.resolver,
+          account: { agentUserId: params.account.agentUserId, ownerUserId: params.account.ownerUserId },
+          resolveAgentRoute: runtime.routing.resolveAgentRoute,
+          system: params.system,
+          log,
+        },
+        ev,
+        content.record,
+      );
+      ack(seq);
+      return;
+    }
     // 2. Self-sent (our own outgoing echoes back through the durable stream).
     if (normalizeId(ev.sender_user_id) === normalizeId(params.account.agentUserId)) {
       ack(seq);
@@ -194,7 +273,6 @@ export function startIngress(params: IngressParams): IngressHandle {
     }
     // A non-text message (a file, or a kind this plugin does not handle) is never a command; its
     // caption still counts for the mention decision below.
-    const content = describeContent(ev);
     // Sender-controlled text never reaches the host with OpenClaw's runtime-context delimiters (content.ts).
     const body = escapeRuntimeContextDelimiters(ev.body);
     const commandRequested = content.kind === "text" && runtime.commands.shouldComputeCommandAuthorized(body, cfg);
@@ -242,7 +320,8 @@ export function startIngress(params: IngressParams): IngressHandle {
     });
     // A daemon that serves files (`get_blob`, AdemuMLS #440) lets the agent open them in its own turn.
     const described =
-      content.kind === "text" ? undefined : bodyForAgent(body, content, client.capabilities.has("get_blob") ? { messageId: ev.message_id } : {});
+      content.kind === "text"
+        ? undefined : bodyForAgent(body, content, client.capabilities.has("get_blob") ? { messageId: ev.message_id } : {});
     const senderName = sender ? escapeRuntimeContextDelimiters(displayNameOf(sender)) : undefined;
     if (mention.shouldSkip) {
       // Not for the agent, but part of the room: its next turn here gets it as history.
@@ -416,9 +495,23 @@ export function startIngress(params: IngressParams): IngressHandle {
     }
   };
 
+  // Calls: live-only, never acked, never a halt. Read AHEAD of the loop (which waits on adoption and
+  // on in-flight turns), so a ring is decided within its 45 s window however busy the agent is. A
+  // client that does not know the event yet surfaces it as unknown, with the frame in `raw`.
+  const routeCall = (ev: DeviceEvent) => {
+    const call = parseCallChanged(ev);
+    if (!call) return log("call_event_malformed", { seq: ev.seq });
+    log("call_event", { seq: ev.seq, state: call.state });
+    try {
+      params.onCallChanged?.(call);
+    } catch (err) {
+      log("call_event_failed", { seq: ev.seq, errorClass: err instanceof Error ? err.name : typeof err });
+    }
+  };
+
   void (async () => {
     try {
-      for await (const ev of client.events()) {
+      for await (const ev of readAheadCalls(client.events(), routeCall, () => stopped)) {
         if (stopped) break;
         await session.barrier();
         if (stopped) break;

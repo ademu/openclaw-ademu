@@ -38,6 +38,8 @@ export const ALLOWED_SUBPATHS = new Set([
   "config-contracts",
   "state-paths",
   "command-auth",
+  // Calls (AdemuMLS #874): OpenClaw's meeting voice engines over the call's audio connection.
+  "meeting-runtime",
   // The ONE recorded exception: the QR helpers have no focused subpath (design entry, V2).
   "media-runtime",
 ]);

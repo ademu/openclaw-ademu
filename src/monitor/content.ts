@@ -1,9 +1,12 @@
 // What an inbound message carries, by `ct` (AdemuMLS PROTOCOL.md "a mind dispatches on `ct`"; #440).
 // `text` keeps the ingress path as it was. A daemon that serves media (#440) sends `ct:"media"` with
 // `body` = the caption (often "") and `media[]` metadata; the bytes stay in the daemon. Any other
-// `ct` is content this plugin does not handle. Both still become a turn — acked at adoption like
+// `ct` is content this plugin does not handle. A `ct:"call"` record (AdemuMLS #874) is a finished call:
+// it is NEVER a turn — ingress queues it as one history line (`call-records.ts`). Media and unknown
+// kinds still become a turn — acked at adoption like
 // text, never held — whose text tells the agent what arrived: OpenClaw drops media facts that carry
 // no path or url, so the text is the only way the agent learns of a file.
+import { parseCallRecord, type CallRecord } from "../calls/protocol.js";
 import { strings } from "../i18n/strings.js";
 
 // OpenClaw before 2026.9.3 lifts any `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>` … `<<<END_…>>>` block it
@@ -25,11 +28,17 @@ export function escapeRuntimeContextDelimiters(text: string): string {
 /** `position` undefined = the frame did not give one, so the file cannot be named to `ademu_get_media`. */
 export type FileFacts = { position: number | undefined; type: string; filename: string; mime: string; size: number };
 
-export type InboundContent = { kind: "text" } | { kind: "media"; files: FileFacts[] } | { kind: "unknown" };
+export type InboundContent =
+  | { kind: "text" }
+  | { kind: "media"; files: FileFacts[] }
+  /** `record` undefined = the frame's `call` block is missing or malformed. */
+  | { kind: "call"; record: CallRecord | undefined }
+  | { kind: "unknown" };
 
-/** A frame without `ct` predates the field and is text; only `"media"` is media. */
-export function describeContent(ev: { ct?: unknown; media?: unknown }): InboundContent {
+/** A frame without `ct` predates the field and is text; only `"media"` is media, only `"call"` a call record. */
+export function describeContent(ev: { ct?: unknown; media?: unknown; call?: unknown }): InboundContent {
   if (ev.ct === undefined || ev.ct === "text") return { kind: "text" };
+  if (ev.ct === "call") return { kind: "call", record: parseCallRecord(ev.call) };
   if (ev.ct !== "media") return { kind: "unknown" };
   const files: FileFacts[] = [];
   if (Array.isArray(ev.media)) {
@@ -99,7 +108,7 @@ function fileLine(file: FileFacts, index: number, count: number, opts: DescribeO
  * With `messageId` (a daemon that serves files) each line names the `ademu_get_media` call that opens it,
  * followed by one note for an agent the tool is hidden from.
  */
-export function bodyForAgent(caption: string, content: Exclude<InboundContent, { kind: "text" }>, opts: DescribeOptions = {}): string {
+export function bodyForAgent(caption: string, content: Exclude<InboundContent, { kind: "text" } | { kind: "call" }>, opts: DescribeOptions = {}): string {
   const lines =
     content.kind === "unknown"
       ? [strings.media.unknownKind]

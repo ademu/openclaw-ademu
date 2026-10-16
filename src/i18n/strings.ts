@@ -132,6 +132,49 @@ export const strings = {
       `${r.emoji === undefined ? `Ademú reaction removed by ${r.reactor}` : `Ademú reaction added: ${r.emoji} by ${r.reactor}`} on ${r.target} ${r.messageId}${r.quote ? ` "${r.quote}"` : ""}`,
   },
 
+  // ----- calls (AdemuMLS #874): a finished call is one queued history line, never a turn -----
+  calls: {
+    outcomes: {
+      answered: "answered",
+      missed: "missed",
+      declined: "declined",
+      cancelled: "cancelled by the caller",
+      no_answer: "not answered",
+      busy: "busy (you were not taking calls)",
+      failed: "failed",
+    },
+    ended: "ended",
+    someone: "someone",
+    duration: (seconds: number) => {
+      const m = Math.floor(seconds / 60);
+      const s = seconds % 60;
+      return m > 0 ? `${m} min ${s} s` : `${s} s`;
+    },
+    line: (c: { outgoing: boolean; who: string; outcome: string; video: boolean; duration: string | undefined; callId: string }) =>
+      `Ademú ${c.video ? "video " : ""}call ${c.outgoing ? "you placed" : `from ${c.who}`}: ${c.outcome}${c.duration ? `, ${c.duration}` : ""} (call ${c.callId})`,
+    unreadable: (callId: string) => `Ademú call record ${callId} (details unreadable)`,
+    // The agent consult of a live call (OpenClaw's meeting consult surface).
+    consult: {
+      surface: "an Ademú voice call",
+      userLabel: "Caller",
+      assistantLabel: "Agent",
+      questionSourceLabel: "caller",
+      workingResponseLabel: "Checking",
+      extraSystemPrompt:
+        "You are the configured OpenClaw agent, answering a live Ademú voice call in one of your conversations. Your reply is spoken aloud: answer briefly and naturally, without markdown, lists, links or emoji. Use your tools when the caller needs them. When the caller says goodbye or the conversation is over, say goodbye and call ademu_end_call if you have it.",
+    },
+    // The ademu_end_call tool: offered only inside a live call's consult.
+    endTool: {
+      label: "Ademú hang up",
+      description:
+        "Hang up the Ademú voice call you are in. Call it when the caller says goodbye or asks you to hang up, or the conversation is clearly over; say your goodbye in this reply — the call ends after it has been spoken.",
+      ending: "The call will end after your reply has been spoken. Say goodbye in this reply.",
+      noCall: "There is no live Ademú call to end from here (it may have ended already).",
+    },
+    realtimeInstructions:
+      "You are answering an Ademú voice call as the user's OpenClaw agent. Be brief, warm and natural. For anything that needs the agent's memory, files, tools or up-to-date knowledge, call openclaw_agent_consult and speak its answer.",
+  },
+
   // ----- enrollment (wizard + ademu_enroll tool) -----
   enroll: {
     wizardIntro: "Ademú — enroll an agent",

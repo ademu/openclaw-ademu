@@ -6,6 +6,7 @@ import { connectEnroll as connectEnrollReal } from "@ademu/adc-control";
 import type { ChannelPlugin } from "openclaw/plugin-sdk/channel-core";
 import { createChatChannelPlugin } from "openclaw/plugin-sdk/channel-core";
 import { ademuMessageActions } from "./actions.js";
+import { createCallEngineStarter } from "./calls/engine.js";
 import type { ControlLike, EnrollmentLeaseDeps } from "./ceremony.js";
 import { CHANNEL_ID, resolveAdemuAccount, type ResolvedAdemuAccount } from "./config.js";
 import { clearAccountCredentials } from "./enroll-config.js";
@@ -35,6 +36,8 @@ export function realStartAccountDeps(): StartAccountDeps {
     runtime: runtime.channel as unknown as RuntimeChannelSurface,
     system: { enqueueSystemEvent: (text, options) => runtime.system.enqueueSystemEvent(text, options) },
     settings: getPluginSettings(),
+    callEngine: (calls, cfg) =>
+      createCallEngineStarter({ calls, cfg, runtime, logger: runtime.logging.getChildLogger({ plugin: CHANNEL_ID, scope: "call" }) }),
     platform: process.platform,
     now: () => Date.now(),
     sleep: abortableSleep,

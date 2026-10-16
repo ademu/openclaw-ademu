@@ -48,6 +48,91 @@ const ServerSchema = z
   })
   .strict();
 
+/**
+ * Calls (AdemuMLS #874): whether and how the agent answers Ademú calls. Off unless enabled: an agent
+ * that does not take calls never tells its device host it does, and callers get "busy" at once.
+ */
+export const CallsSchema = z
+  .object({
+    /** Take calls (`set_call_handling` at every attach). Default false. */
+    enabled: z.boolean().optional(),
+    /** "allowed" = callers the agent would answer in text; "none" = decline every ring. */
+    answer: z.enum(["allowed", "none"]).optional(),
+    /** "agent" = speech-to-text → the agent → text-to-speech; "realtime" = a speech-to-speech provider. */
+    engine: z.enum(["agent", "realtime"]).optional(),
+    /** Spoken once the call connects (none by default). */
+    introMessage: z.string().optional(),
+    /** The agent's tools in every call but the owner's 1-1 (OpenClaw's meeting consult policy). Default safe-read-only. */
+    toolPolicy: z.enum(["safe-read-only", "owner", "none"]).optional(),
+    /** The agent's tools in the owner's 1-1 calls. Default owner: its normal tools, as in the owner's chats (ademu_end_call included). */
+    ownerToolPolicy: z.enum(["safe-read-only", "owner", "none"]).optional(),
+    /** OpenClaw's meeting realtime settings: provider ids, model, instructions, per-provider config. */
+    provider: z.string().optional(),
+    transcriptionProvider: z.string().optional(),
+    voiceProvider: z.string().optional(),
+    model: z.string().optional(),
+    instructions: z.string().optional(),
+    providers: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+    /** Barge-in: speech held this long (ms) at this normalised RMS while the agent speaks stops it. */
+    bargeIn: z
+      .object({
+        enabled: z.boolean().optional(),
+        rmsThreshold: z.number().min(0).max(1).optional(),
+        holdMs: z.number().int().min(20).max(2000).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+export type CallsConfig = z.infer<typeof CallsSchema>;
+
+/** The `calls` block with defaults applied (`resolveCallsConfig`). */
+export type ResolvedCallsConfig = {
+  enabled: boolean;
+  answer: "allowed" | "none";
+  engine: "agent" | "realtime";
+  introMessage?: string;
+  toolPolicy: "safe-read-only" | "owner" | "none";
+  ownerToolPolicy: "safe-read-only" | "owner" | "none";
+  provider?: string;
+  transcriptionProvider?: string;
+  voiceProvider?: string;
+  model?: string;
+  instructions?: string;
+  providers: Record<string, Record<string, unknown>>;
+  bargeIn: { enabled: boolean; rmsThreshold: number; holdMs: number };
+};
+
+export const DEFAULT_BARGE_IN_RMS = 0.02;
+export const DEFAULT_BARGE_IN_HOLD_MS = 200;
+
+export function resolveCallsConfig(raw: CallsConfig | undefined): ResolvedCallsConfig {
+  const text = (v: string | undefined) => (v?.trim() ? v.trim() : undefined);
+  const optional = <K extends string>(key: K, v: string | undefined) => (text(v) !== undefined ? ({ [key]: text(v) } as Record<K, string>) : {});
+  const providers: Record<string, Record<string, unknown>> = {};
+  for (const [id, conf] of Object.entries(raw?.providers ?? {})) providers[id.trim().toLowerCase()] = conf;
+  return {
+    enabled: raw?.enabled === true,
+    answer: raw?.answer ?? "allowed",
+    engine: raw?.engine ?? "agent",
+    ...optional("introMessage", raw?.introMessage),
+    toolPolicy: raw?.toolPolicy ?? "safe-read-only",
+    ownerToolPolicy: raw?.ownerToolPolicy ?? "owner",
+    ...optional("provider", raw?.provider),
+    ...optional("transcriptionProvider", raw?.transcriptionProvider),
+    ...optional("voiceProvider", raw?.voiceProvider),
+    ...optional("model", raw?.model),
+    ...optional("instructions", raw?.instructions),
+    providers,
+    bargeIn: {
+      enabled: raw?.bargeIn?.enabled !== false,
+      rmsThreshold: raw?.bargeIn?.rmsThreshold ?? DEFAULT_BARGE_IN_RMS,
+      holdMs: raw?.bargeIn?.holdMs ?? DEFAULT_BARGE_IN_HOLD_MS,
+    },
+  };
+}
+
 /** One enrolled device. `token` is a plain string or a SecretRef (`buildOptionalSecretInputSchema`). */
 export const AdemuAccountSchema = z
   .object({
@@ -65,6 +150,7 @@ export const AdemuAccountSchema = z
     daemonScope: z.enum(["user", "system"]).optional(),
     historyLimit: z.number().int().min(0).optional(),
     reactionNotifications: z.enum(["off", "own", "all"]).optional(),
+    calls: CallsSchema.optional(),
   })
   .strict();
 
@@ -80,6 +166,8 @@ const AdemuBaseSchema = z
     historyLimit: z.number().int().min(0).optional(),
     /** Which reactions reach the agent, as lines it reads at its next turn (default all). */
     reactionNotifications: z.enum(["off", "own", "all"]).optional(),
+    /** Whether and how agents answer Ademú calls (default: they do not take calls). */
+    calls: CallsSchema.optional(),
     groups: z.record(z.string(), buildGroupEntrySchema()).optional(),
   })
   .strict();
@@ -122,6 +210,11 @@ export const ADEMU_UI_HINTS = {
   reactionNotifications: {
     label: "Reaction notifications",
     help: "Which reactions the agent hears about, as a line it reads at its next turn in that conversation (never a reply prompt): all (default), own (only on the agent's messages), or off.",
+  },
+  "accounts.*.calls": { label: "Calls", advanced: true },
+  calls: {
+    label: "Calls",
+    help: "Whether the agent answers Ademú voice calls (calls.enabled, default off: callers get busy). Callers are judged like senders of text; calls.engine picks OpenClaw's agent voice loop (default) or a realtime voice provider.",
   },
   dataDir: { label: "Device host data dir", advanced: true },
   socketPath: { label: "Device host control socket", advanced: true },
@@ -327,6 +420,8 @@ export type ResolvedAdemuAccount = {
   historyLimit?: number;
   /** Which reactions are queued for the agent (account, else channel); unset = all. */
   reactionNotifications?: "off" | "own" | "all";
+  /** Calls (account block, else channel block; a block replaces the other whole). */
+  calls: ResolvedCallsConfig;
   /** `channels.ademu.server` is set: accepted and IGNORED (deprecated, AdemuMLS #712) — logged once. */
   serverConfigured: boolean;
   /** Set when this account's daemon identity collides with another account's (R1). */
@@ -410,6 +505,7 @@ function readAccount(
     ...(merged.reactionNotifications === "off" || merged.reactionNotifications === "own" || merged.reactionNotifications === "all"
       ? { reactionNotifications: merged.reactionNotifications }
       : {}),
+    calls: resolveCallsConfig(merged.calls),
     serverConfigured: serverConfigured(channel),
   };
 }

@@ -1,0 +1,19 @@
+{"type":"event","seq":40,"event":"message_received","group_id":"g1","message_id":"7B1E6A90-3C4D-4E5F-8A9B-0C1D2E3F4A5B","sender_user_id":"u1","sender_username":"alice","ct":"call","body":"","created_at_ms":3000,"call":{"call_id":"7b1e6a90-3c4d-4e5f-8a9b-0c1d2e3f4a5b","direction":"incoming","outcome":"missed","media":"video"}}
+{"id":"25","ok":true,"result":{"message_id":"7B1E6A90-3C4D-4E5F-8A9B-0C1D2E3F4A5B","group_id":"g1","sender_user_id":"u1","sender_username":"alice","is_outgoing":false,"ct":"call","body":"","created_at_ms":3000,"reactions":[],"call":{"call_id":"7b1e6a90-3c4d-4e5f-8a9b-0c1d2e3f4a5b","direction":"incoming","outcome":"missed","media":"audio"}}}
+{"type":"event","seq":41,"event":"call_changed","call_id":"7b1e6a90-3c4d-4e5f-8a9b-0c1d2e3f4a5b","group_id":"g1","state":"ringing","direction":"incoming","media":"video","participants":[{"user_id":"u1","username":"alice","kind":"human"}],"expires_at_ms":48000}
+{"type":"event","seq":42,"event":"call_changed","call_id":"7b1e6a90-3c4d-4e5f-8a9b-0c1d2e3f4a5b","group_id":"g1","state":"ended","direction":"incoming","media":"video","participants":[{"user_id":"u1","username":"alice","kind":"human"}],"outcome":"missed"}
+{"id":"26","op":"set_call_handling","audio":{"rate":24000}}
+{"id":"26","ok":true,"result":{"rate":24000}}
+{"id":"27","ok":false,"error":{"code":"call_helper_unavailable","message":"no usable call helper on this host"}}
+{"id":"28","op":"answer_call","call_id":"7b1e6a90-3c4d-4e5f-8a9b-0c1d2e3f4a5b"}
+{"id":"28","ok":true,"result":{"audio_ticket":"adca1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}
+{"id":"29","op":"decline_call","call_id":"7b1e6a90-3c4d-4e5f-8a9b-0c1d2e3f4a5b"}
+{"id":"29","ok":true,"result":{"state":"ended"}}
+{"id":"30","op":"end_call","call_id":"7b1e6a90-3c4d-4e5f-8a9b-0c1d2e3f4a5b"}
+{"id":"30","ok":false,"error":{"code":"unknown_call","message":"no such call on this device"}}
+{"id":"31","op":"get_call"}
+{"id":"31","ok":true,"result":{"calls":[{"call_id":"7b1e6a90-3c4d-4e5f-8a9b-0c1d2e3f4a5b","group_id":"g1","state":"active","direction":"incoming","media":"audio","participants":[{"user_id":"u1","username":"alice","kind":"human"}],"audio_ticket":"adca1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}}
+{"type":"event","seq":43,"event":"call_changed","call_id":"7b1e6a90-3c4d-4e5f-8a9b-0c1d2e3f4a5b","group_id":"g1","state":"connecting","direction":"incoming","media":"audio","participants":[{"user_id":"u1","username":"alice","kind":"human"}]}
+{"type":"event","seq":44,"event":"call_changed","call_id":"7b1e6a90-3c4d-4e5f-8a9b-0c1d2e3f4a5b","group_id":"g1","state":"active","direction":"incoming","media":"audio","participants":[{"user_id":"u1","username":"alice","kind":"human"}]}
+{"v":1,"audio_ticket":"adca1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+{"ok":true,"rate":24000}

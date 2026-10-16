@@ -25,6 +25,17 @@ Requires adc ≥ **0.6.0** (the installed device host; the plugin bundles none).
 
 ### Added
 
+- **The agent answers Ademú calls** (openclaw-ademu#30, AdemuMLS #874), off by default
+  (`calls.enabled` at `channels.ademu` or per account). Each seat tells the device host it takes calls
+  (`set_call_handling`, again after every reattach); a ring is answered or declined by the text
+  access rules; the call runs OpenClaw's meeting voice engine (`calls.engine`: `agent`, default, or
+  `realtime`) over the device host's audio connection, which survives a reattach and a dropped
+  connection on a fresh ticket. Speaking over the agent stops it. The agent hangs up with
+  `ademu_end_call` (offered only inside a call; the call ends after its goodbye is spoken), which it
+  has in the owner's 1-1 calls (`calls.ownerToolPolicy`, default `owner`); every other call, rooms
+  included, runs with OpenClaw's read-only consult tools (`calls.toolPolicy`). A finished call (`ct:"call"`) is one
+  queued history line, never a turn — before, a call record could wake the agent. Needs adc with call
+  support and `adc-call` beside it; the calls state is in the account status (`calls`).
 - **Reactions reach the agent without starting a turn.** A reaction someone adds or removes becomes
   one line in that conversation's session, queued with OpenClaw's system-event queue; the agent reads
   it at its next turn there and is never asked to answer. `reactionNotifications` (`all` by default,
