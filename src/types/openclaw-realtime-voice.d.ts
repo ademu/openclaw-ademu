@@ -1,25 +1,8 @@
-// OpenClaw ships `openclaw/plugin-sdk/realtime-voice` and `…/realtime-voice-activation` without type
+// OpenClaw ships `openclaw/plugin-sdk/realtime-voice` without type
 // declarations (a "runtime seam" its own voice plugins use; present since at least 2026.9.1). These are
 // the slices this plugin calls, transcribed from OpenClaw's `src/talk/*` (session-runtime.ts,
-// realtime-session-harness.ts, provider-resolver.ts, activation-name.ts, exact-speech-protocol.ts).
+// realtime-session-harness.ts, provider-resolver.ts, exact-speech-protocol.ts).
 // Kept narrow on purpose: anything not used here stays out.
-
-declare module "openclaw/plugin-sdk/realtime-voice-activation" {
-  export type RealtimeVoiceActivationNameMatch = {
-    allowed: true;
-    /** The transcript with the name stripped. */
-    text: string;
-    activationName: string;
-    heardName: string;
-    match: "exact" | "fuzzy";
-    edge: "leading" | "trailing";
-  };
-  export function matchRealtimeVoiceActivationName(
-    text: string,
-    activationNames: string[],
-    maxWords?: number,
-  ): RealtimeVoiceActivationNameMatch | undefined;
-}
 
 declare module "openclaw/plugin-sdk/realtime-voice" {
   import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";

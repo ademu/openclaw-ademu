@@ -136,7 +136,6 @@ the private `applyAgentBindings` (routing bindings written by the chat door);
 | `realtime-voice` → `buildRealtimeVoiceSpeakExactMessage` | value | df4e6666c6b (2026-08-12) | **v2026.8.1** |
 | `realtime-voice` → `createRealtimeVoiceSessionHarness` | value | e3618454f24 (2026-07-16) | **v2026.8.1** |
 | `realtime-voice` → `resolveConfiguredRealtimeVoiceProvider` | value | b164bb37175 (2026-04-24) | v2026.4.23 |
-| `realtime-voice-activation` → `matchRealtimeVoiceActivationName` | value | c2e7c819f57 (2026-08-08) | **v2026.8.1** |
 | `runtime-store` → `createPluginRuntimeStore` | value | 8d7778d1d6c (2026-03-08) | v2026.3.8 |
 | `secret-input` → `SecretInputStringResolutionMode` | type | 1769fb2aa1d (2026-04-14) | v2026.4.15 |
 | `secret-input` → `buildOptionalSecretInputSchema` | value | 07d9f725b61 (2026-03-18) | v2026.3.22 |

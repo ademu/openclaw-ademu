@@ -48,7 +48,6 @@ export const ALLOWED_SUBPATHS = new Set([
   // uses; typed locally in src/types/openclaw-realtime-voice.d.ts. The nightly openclaw@beta job is
   // the tripwire: the runtime-value check below turns red the night a symbol moves.
   "realtime-voice",
-  "realtime-voice-activation",
 ]);
 
 /** Removal-pending, deprecated shims, or private-local — never importable by this plugin. */

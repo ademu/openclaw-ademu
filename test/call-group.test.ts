@@ -2,7 +2,7 @@
 // who said what from the daemon's speaking frames, when the agent is addressed, and what it is told.
 import { describe, expect, it } from "vitest";
 import { CallLog } from "../src/calls/call-log.js";
-import { NameGate } from "../src/calls/name-gate.js";
+import { NameGate, matchVocative } from "../src/calls/name-gate.js";
 import { SpeechSegmenter, type Segment } from "../src/calls/segments.js";
 
 const RATE = 24_000;
@@ -66,32 +66,89 @@ describe("SpeechSegmenter", () => {
 describe("NameGate", () => {
   const gate = () => new NameGate(["Callie"], { now: () => clock });
   let clock = 0;
+  const human = (text: string, userId = "u1") => ({ userId, kind: "human", text });
 
   it("passes a human who addresses the agent by name, first or last", () => {
     const g = gate();
-    expect(g.decide({ userId: "u1", kind: "human", text: "Callie, what time is dinner?" })).toMatchObject({ pass: true });
-    expect(g.decide({ userId: "u1", kind: "human", text: "What do you think about the plan, Callie?" })).toMatchObject({ pass: true });
-    expect(g.decide({ userId: "u1", kind: "human", text: "Cali, who is leaving early?" })).toMatchObject({ pass: true });
+    expect(g.decide(human("Callie, what time is dinner?"))).toMatchObject({ pass: true });
+    expect(g.decide(human("What do you think about the plan, Callie?"))).toMatchObject({ pass: true });
+    expect(g.decide(human("Thanks Callie."))).toMatchObject({ pass: true });
+    expect(g.decide(human("Hey Callie, what's the weather?"))).toMatchObject({ pass: true });
   });
 
-  it("blocks side talk, a mention, and any agent", () => {
+  it("passes the name anywhere in the turn, after a filler or in the middle of a sentence", () => {
     const g = gate();
-    expect(g.decide({ userId: "u1", kind: "human", text: "Hey Bob, did you book it?" }).pass).toBe(false);
-    expect(g.decide({ userId: "u1", kind: "human", text: "Callie was really helpful last week, wasn't she?" }).pass).toBe(false);
+    expect(g.decide(human("So Callie, what do you think?")).pass).toBe(true);
+    expect(g.decide(human("Um, Callie, what time is it?")).pass).toBe(true);
+    expect(g.decide(human("Yes. Callie, what time is it?")).pass).toBe(true);
+    expect(g.decide(human("Can you tell me, Callie, what time it is?")).pass).toBe(true);
+    expect(g.decide(human("What time is it Callie, please?")).pass).toBe(true);
+    expect(g.decide(human("I don't know. Callie? Do you know?")).pass).toBe(true);
+  });
+
+  it("hears the name through the transcriber's respellings, at any position", () => {
+    const g = gate();
+    expect(g.decide(human("Cali, who is leaving early?"))).toMatchObject({ pass: true });
+    expect(g.decide(human("Who is leaving early, Cali?"))).toMatchObject({ pass: true });
+    expect(g.decide(human("Who is leaving early, Kali?"))).toMatchObject({ pass: true });
+    expect(g.decide(human("Tell me, Cally, who is leaving early?"))).toMatchObject({ pass: true });
+    expect(g.decide(human("Tell me, Kallie, who is leaving early?"))).toMatchObject({ pass: true });
+  });
+
+  it("blocks side talk, a mention, another name, and any agent", () => {
+    const g = gate();
+    expect(g.decide(human("Hey Bob, did you book it?")).pass).toBe(false);
+    expect(g.decide(human("Callie was really helpful last week, wasn't she?")).pass).toBe(false);
+    expect(g.decide(human("I think Callie should answer this one.")).pass).toBe(false);
+    expect(g.decide(human("Let's ask Callie later.")).pass).toBe(false);
+    expect(g.decide(human("Call me when you land.")).pass).toBe(false);
+    expect(g.decide(human("Hey Kelly, what time is it?")).pass).toBe(false);
+    expect(g.decide(human("Charlie, what time is it?")).pass).toBe(false);
     expect(g.decide({ userId: "u3", kind: "agent", text: "Callie, can you confirm the booking?" }).pass).toBe(false);
   });
 
   it("the name alone arms that speaker's next turn, for a short while", () => {
     clock = 0;
     const g = gate();
-    expect(g.decide({ userId: "u1", kind: "human", text: "Callie?" })).toMatchObject({ pass: false, armed: true });
-    expect(g.decide({ userId: "u2", kind: "human", text: "What's the time?" }).pass).toBe(false);
+    expect(g.decide(human("Callie?"))).toMatchObject({ pass: false, armed: true });
+    expect(g.decide(human("What's the time?", "u2")).pass).toBe(false);
     clock = 3_000;
-    expect(g.decide({ userId: "u1", kind: "human", text: "What's the time?" }).pass).toBe(true);
-    expect(g.decide({ userId: "u1", kind: "human", text: "And tomorrow?" }).pass).toBe(false);
-    g.decide({ userId: "u1", kind: "human", text: "Callie?" });
+    expect(g.decide(human("What's the time?")).pass).toBe(true);
+    expect(g.decide(human("And tomorrow?")).pass).toBe(false);
+    g.decide(human("Callie?"));
     clock = 3_000 + 20_000;
-    expect(g.decide({ userId: "u1", kind: "human", text: "What's the time?" }).pass).toBe(false);
+    expect(g.decide(human("What's the time?")).pass).toBe(false);
+    expect(g.decide(human("Callie, no."))).toMatchObject({ pass: true });
+  });
+
+  it("a greeting right before the name is an address whatever follows, and a greeting alone is answered", () => {
+    const g = gate();
+    expect(g.decide(human("Hello Callie."))).toEqual({ pass: true });
+    expect(g.decide(human("Hey, Callie!"))).toEqual({ pass: true });
+    expect(g.decide(human("Hello Callie how are you doing"))).toEqual({ pass: true });
+    expect(g.decide(human("Hi Cali what time is it?"))).toEqual({ pass: true });
+    expect(g.decide(human("I said hello to Callie yesterday.")).pass).toBe(false);
+    expect(g.decide(human("Hey Kelly how are you?")).pass).toBe(false);
+  });
+
+  it("matches a two-word name said as two words or one, and prefers the longer name", () => {
+    const g = new NameGate(["Gianni Bot", "Gianni"], { now: () => 0 });
+    expect(matchVocative("Gianni Bot, are you there?", ["Gianni Bot", "Gianni"])).toMatchObject({ name: "Gianni Bot", match: "exact" });
+    expect(matchVocative("GianniBot, are you there?", ["Gianni Bot"])).toMatchObject({ name: "Gianni Bot", match: "exact" });
+    expect(matchVocative("Gianni, are you there?", ["Gianni Bot", "Gianni"])).toMatchObject({ name: "Gianni", match: "exact" });
+    expect(g.decide(human("Gianni Bot, are you there?")).pass).toBe(true);
+  });
+
+  it("reports what was heard and what is left of the turn", () => {
+    expect(matchVocative("So Callie, what do you think?", ["Callie"])).toEqual({
+      name: "Callie",
+      heard: "Callie",
+      match: "exact",
+      rest: "what do you think",
+      greeted: false,
+    });
+    expect(matchVocative("Hey Cali!", ["Callie"])).toMatchObject({ heard: "Cali", match: "fuzzy", rest: "", greeted: true });
+    expect(matchVocative("Callie was helpful.", ["Callie"])).toBeUndefined();
   });
 });
 
