@@ -331,7 +331,7 @@ describe("startAccount: restart outcomes (throw)", () => {
     const w = world();
     const run = startAccount(w.ctx, w.deps);
     await settle();
-    w.client.live({ event: "message_received", seq: -1 });
+    w.client.live({ event: "received", seq: -1 });
     await run;
     expect(w.statuses.at(-1)).toMatchObject({ lifecycle: "blocked" });
     expect(w.dm.lease()!.released).toBe(1);

@@ -98,7 +98,7 @@ async function world(
     account: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER, agentName: opts.agentName ?? "Iris" },
     mentionAliases: [],
     typingKeepaliveMs: 2000,
-    sendText: async (group_id, body) => client.sendText({ group_id, body }),
+    sendText: async (group_id, text) => client.send({ group_id, protocol: "ademu.chat", body: { type: "text", text } }),
     // The sender startAccount wires, with the test's loader behind the host resolver's seam.
     sendMedia: createReplyMediaSender({
       client: session.client,
@@ -352,7 +352,7 @@ describe("projection, commands, typing and shutdown", () => {
     expect(pipeline.typingCallbacks).toBeDefined();
   });
 
-  it("the reply pipeline's typing.start pulses the daemon once per call, never active:false (AdemuMLS#621)", async () => {
+  it("the reply pipeline's typing.start pulses the daemon once per call as a live activity (AdemuMLS#621, #978)", async () => {
     const w = await world();
     w.client.message({ body: "hi" });
     const d = await w.rt.nextDispatch();
@@ -361,16 +361,17 @@ describe("projection, commands, typing and shutdown", () => {
     };
     await pipeline.typingCallbacks.onReplyStart();
     await w.settle();
-    expect(w.client.typing).toEqual([{ group_id: ROOM_DM, active: true }]);
+    expect(w.client.typing).toEqual([{ group_id: ROOM_DM, kind: "typing" }]);
     await pipeline.typingCallbacks.onReplyStart();
     await w.settle();
     expect(w.client.typing).toEqual([
-      { group_id: ROOM_DM, active: true },
-      { group_id: ROOM_DM, active: true },
+      { group_id: ROOM_DM, kind: "typing" },
+      { group_id: ROOM_DM, kind: "typing" },
     ]);
     await pipeline.typingCallbacks.onIdle();
     await w.settle();
-    expect(w.client.typing.every((t) => t.active)).toBe(true);
+    expect(w.client.typing.every((t) => t.kind === "typing")).toBe(true);
+    expect(w.client.sends.filter((p) => (p.body as { type?: string }).type === "activity").every((p) => p.lane === "live")).toBe(true);
   });
 
   it("a guest's slash command is projected as unauthorized", async () => {
@@ -530,11 +531,12 @@ describe("non-text content (AdemuMLS #440): described, acked at adoption, never 
     expect((ctxOf(d).message as { bodyForAgent: string }).bodyForAgent).toBe("[a file — this channel can't open files yet]");
   });
 
-  it("an unknown ct is described, not passed through as text", async () => {
+  it("an unknown chat body type is described; nothing of it passes through as text", async () => {
     const w = await world();
     w.client.message({ ct: "sticker", body: "raw payload" });
     const d = await w.rt.nextDispatch();
-    expect((ctxOf(d).message as { bodyForAgent: string }).bodyForAgent).toBe("[a message of a kind this channel can't show]\nraw payload");
+    expect((ctxOf(d).message as { bodyForAgent: string }).bodyForAgent).toBe("[a message of a kind this channel can't show]");
+    expect(JSON.stringify(ctxOf(d))).not.toContain("raw payload");
   });
 
   it("a caption that looks like a slash command is not a command", async () => {
@@ -573,7 +575,7 @@ describe("a daemon that serves files (get_blob, AdemuMLS #440)", () => {
 
   it("the file line names the ademu_get_media call; without get_blob it says the channel can't open files", async () => {
     const w = await world();
-    w.client.capabilities.add("get_blob");
+    w.client.services.add("get_blob");
     w.client.message({ message_id: "m-photo", ct: "media", body: "", media: [{ position: 0, type: "photo", mime: "image/jpeg", size: 2048, filename: "a.jpg" }] });
     const d = await w.rt.nextDispatch();
     expect((ctxOf(d).message as { bodyForAgent: string }).bodyForAgent).toBe(

@@ -7,7 +7,7 @@ import { AGENT, DEVICE, FakeAdcClient, fakeConnect, GUEST, member, OWNER, ROOM_D
 const log = () => {};
 
 describe("identity binding (fail closed)", () => {
-  const hello = { v: 1, type: "hello" as const, device_id: DEVICE, agent_user_id: AGENT, proto: 1, last_acked_seq: -1, capabilities: [] };
+  const hello = { v: 2, type: "hello" as const, device_id: DEVICE, agent_user_id: AGENT, proto: 2, last_acked_seq: -1, services: [], protocols: {} };
   const self = { user_id: AGENT, device_id: DEVICE, username: "iris", display_name: "Iris", owner_user_id: OWNER };
 
   it("accepts a matching account (case-insensitively) and owner", () => {

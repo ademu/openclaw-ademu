@@ -82,10 +82,10 @@ describe("outbound: text send", () => {
   it("a failure on chunk k>1 throws a partial-delivery error carrying the accepted receipts", async () => {
     const client = new FakeAdcClient();
     let calls = 0;
-    client.sendText = async (params) => {
+    client.send = async (params) => {
       calls++;
       if (calls === 2) throw new Error("daemon says no");
-      client.sent.push(params);
+      client.sent.push({ group_id: params.group_id, body: String((params.body as { text: string }).text) });
       return { message_id: `out-${calls}`, status: "queued" };
     };
     const text = "a".repeat(TEXT_CHUNK_LIMIT) + " " + "b".repeat(10);
@@ -98,7 +98,7 @@ describe("outbound: text send", () => {
 
   it("a failure on the first chunk rethrows the original error (nothing was delivered)", async () => {
     const client = new FakeAdcClient();
-    client.sendText = async () => {
+    client.send = async () => {
       throw new Error("boom");
     };
     await expect(sendAdemuText({ client, groupId: ROOM_DM, text: "hi" })).rejects.toThrow("boom");

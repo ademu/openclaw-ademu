@@ -37,35 +37,35 @@ describe("actions: react", () => {
   it("adds a reaction through the live client (prefixed target accepted)", async () => {
     const client = new FakeAdcClient();
     const calls: unknown[] = [];
-    client.sendReaction = async (p?: unknown) => {
+    client.send = async (p: unknown) => {
       calls.push(p);
-      return { status: "queued" };
+      return { message_id: "r-1", status: "queued" };
     };
     registerLiveAccount("main", { client });
     const result = await react({ to: `ademu:${ROOM_DM}`, messageId: "m-7", emoji: "👍" });
-    expect(calls).toEqual([{ group_id: ROOM_DM, target_message_id: "m-7", emoji: "👍" }]);
+    expect(calls).toEqual([{ group_id: ROOM_DM, protocol: "ademu.chat", body: { type: "reaction", target_message_id: "m-7", emoji: "👍" } }]);
     expect(result.details).toEqual({ ok: true, added: "👍", status: "queued" });
   });
 
   it("remove:true sends the empty-emoji wire form", async () => {
     const client = new FakeAdcClient();
     const calls: unknown[] = [];
-    client.sendReaction = async (p?: unknown) => {
+    client.send = async (p: unknown) => {
       calls.push(p);
-      return { status: "queued" };
+      return { message_id: "r-1", status: "queued" };
     };
     registerLiveAccount("main", { client });
     const result = await react({ to: ROOM_DM, messageId: "m-7", emoji: "👍", remove: true });
-    expect(calls).toEqual([{ group_id: ROOM_DM, target_message_id: "m-7", emoji: "" }]);
+    expect(calls).toEqual([{ group_id: ROOM_DM, protocol: "ademu.chat", body: { type: "reaction", target_message_id: "m-7", emoji: "" } }]);
     expect(result.details).toEqual({ ok: true, removed: "👍", status: "queued" });
   });
 
   it("falls back to the current message id from the tool context", async () => {
     const client = new FakeAdcClient();
     const calls: Array<{ target_message_id: string }> = [];
-    client.sendReaction = async (p?: unknown) => {
-      calls.push(p as { target_message_id: string });
-      return { status: "queued" };
+    client.send = async (p: unknown) => {
+      calls.push((p as { body: { target_message_id: string } }).body);
+      return { message_id: "r-1", status: "queued" };
     };
     registerLiveAccount("main", { client });
     await react({ to: ROOM_DM, emoji: "❤️" }, { toolContext: { currentMessageId: "m-ctx" } });

@@ -165,10 +165,10 @@ describe("sendAdemuMedia", () => {
     const notes: RefusalNotes = new Map();
     const logs: string[] = [];
     let calls = 0;
-    const sendText = client.sendText.bind(client);
-    client.sendText = async (p) => {
+    const send = client.send.bind(client);
+    client.send = async (p) => {
       if (calls++ === 0) throw new Error("caption resend failed");
-      return sendText(p);
+      return send(p);
     };
     await sendAdemuMedia({ client, groupId: ROOM_DM, text: "the report", urls: ["https://files.test/a.pdf"], load: fakeLoader({ "a.pdf": pdf }), notes, log: (e) => logs.push(e) });
     await flush();
@@ -194,8 +194,8 @@ describe("sendAdemuMedia", () => {
   it("a failed album whose caption resend fails still returns the refusals (H4)", async () => {
     const client = new FakeAdcClient();
     client.mediaOutcome = { status: "failed", code: "store_failed" };
-    client.sendText = async () => {
-      throw new Error("send_text failed");
+    client.send = async () => {
+      throw new Error("send failed");
     };
     const logs: string[] = [];
     const result = await sendAdemuMedia({ client, groupId: ROOM_DM, text: "caption", urls: ["https://files.test/a.pdf"], load: fakeLoader({ "a.pdf": pdf }), log: (e) => logs.push(e) });

@@ -11,7 +11,7 @@
 // Cost: a file is read whole into the gateway, so files above `mediaMaxOpenMb` are refused unread, and a
 // file opened again reuses the copy already saved instead of reading and saving it a second time.
 import { stat } from "node:fs/promises";
-import { BlobReadError, RequestError, type MediaItem } from "@ademu/adc-client";
+import { BlobReadError, chatBodyOf, RequestError, type MediaItem } from "@ademu/adc-client";
 import { imageResultFromFile, readStringParam } from "openclaw/plugin-sdk/channel-actions";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { Type } from "typebox";
@@ -139,7 +139,7 @@ export function createMediaTool(ctx: OpenClawPluginToolContext, deps: MediaToolD
       const conversation = turnConversation(ctx);
       if (!conversation) throw new MediaToolError(strings.media.tool.noTurn);
       const { accountId, client } = mediaClientFor(ctx);
-      if (!client.capabilities.has("get_blob")) throw new MediaToolError(strings.media.tool.noGetBlob);
+      if (!client.services.has("get_blob")) throw new MediaToolError(strings.media.tool.noGetBlob);
 
       let message;
       try {
@@ -153,7 +153,7 @@ export function createMediaTool(ctx: OpenClawPluginToolContext, deps: MediaToolD
         deps.log("media_tool_refused", { reason: "other_conversation" });
         throw new MediaToolError(strings.media.tool.notThisConversation);
       }
-      const item = message.deleted || message.ct !== "media" ? undefined : message.media?.find((m) => m.position === position);
+      const item = message.deleted || chatBodyOf(message)?.type !== "media" ? undefined : message.media?.find((m) => m.position === position);
       if (!item) throw new MediaToolError(strings.media.tool.noSuchFile);
 
       const state = item.fetch_state ?? "none";

@@ -1,9 +1,11 @@
-// What an inbound message carries, by `ct` (AdemuMLS PROTOCOL.md "a mind dispatches on `ct`"; #440).
-// `text` keeps the ingress path as it was. A daemon that serves media (#440) sends `ct:"media"` with
-// `body` = the caption (often "") and `media[]` metadata; the bytes stay in the daemon. Any other
-// `ct` is content this plugin does not handle. Both still become a turn — acked at adoption like
-// text, never held — whose text tells the agent what arrived: OpenClaw drops media facts that carry
-// no path or url, so the text is the only way the agent learns of a file.
+// What an inbound frame carries (AdemuMLS PROTOCOL.md §`received`, envelope v2 — #978). The frame's
+// `body` is the protocol's: for `ademu.chat` a `text`, a `media` (render fields per blob, the caption;
+// the bytes stay in the daemon and each file's state rides `context.media`) or a `view_once`
+// placeholder; anything else is content this plugin does not turn into a turn. Media and a view-once
+// still become a turn — acked at adoption like text, never held — whose text tells the agent what
+// arrived: OpenClaw drops media facts that carry no path or url, so the text is the only way the
+// agent learns of a file.
+import { chatBodyOf, type ReceivedContext } from "@ademu/adc-client";
 import { strings } from "../i18n/strings.js";
 
 // OpenClaw before 2026.9.3 lifts any `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>` … `<<<END_…>>>` block it
@@ -22,31 +24,54 @@ export function escapeRuntimeContextDelimiters(text: string): string {
   return out;
 }
 
-/** `position` undefined = the frame did not give one, so the file cannot be named to `ademu_get_media`. */
+/** `position` undefined = the daemon's context did not give one, so the file cannot be named to `ademu_get_media`. */
 export type FileFacts = { position: number | undefined; type: string; filename: string; mime: string; size: number };
 
-export type InboundContent = { kind: "text" } | { kind: "media"; files: FileFacts[] } | { kind: "unknown" };
+export type InboundContent =
+  | { kind: "text"; text: string }
+  | { kind: "media"; files: FileFacts[]; caption?: string }
+  | { kind: "view_once"; type: string }
+  | { kind: "unknown" };
 
-/** A frame without `ct` predates the field and is text; only `"media"` is media. */
-export function describeContent(ev: { ct?: unknown; media?: unknown }): InboundContent {
-  if (ev.ct === undefined || ev.ct === "text") return { kind: "text" };
-  if (ev.ct !== "media") return { kind: "unknown" };
-  const files: FileFacts[] = [];
-  if (Array.isArray(ev.media)) {
-    for (const item of ev.media as unknown[]) {
-      if (typeof item !== "object" || item === null) continue;
-      const m = item as Record<string, unknown>;
-      if (typeof m.type !== "string" || m.type.length === 0) continue;
-      files.push({
-        position: typeof m.position === "number" && Number.isSafeInteger(m.position) && m.position >= 0 ? m.position : undefined,
-        type: m.type,
-        filename: typeof m.filename === "string" ? m.filename : "",
-        mime: typeof m.mime === "string" ? m.mime : "",
-        size: typeof m.size === "number" && Number.isFinite(m.size) && m.size > 0 ? m.size : 0,
+/** The frame fields the description reads: the envelope and the daemon's context. */
+export type InboundFrame = { protocol: string; body: unknown; context?: ReceivedContext | undefined };
+
+/**
+ * The `ademu.chat` body, read structurally: a `text` is text; a `media` is its blobs (in position
+ * order) with each file's position taken from the daemon's `context.media` — never from its order —
+ * and its caption; a `view_once` is its kind. Any other protocol or body type is unknown.
+ */
+export function describeContent(ev: InboundFrame): InboundContent {
+  const body = chatBodyOf(ev);
+  if (!body) return { kind: "unknown" };
+  switch (body.type) {
+    case "text":
+      return { kind: "text", text: typeof body.text === "string" ? body.text : "" };
+    case "media": {
+      const files: FileFacts[] = [];
+      const blobs: unknown[] = Array.isArray(body.blobs) ? body.blobs : [];
+      const states: unknown[] = Array.isArray(ev.context?.media) ? ev.context.media : [];
+      blobs.forEach((item, index) => {
+        if (typeof item !== "object" || item === null) return;
+        const m = item as Record<string, unknown>;
+        if (typeof m.type !== "string" || m.type.length === 0) return;
+        const state = states[index];
+        const position = typeof state === "object" && state !== null ? (state as Record<string, unknown>).position : undefined;
+        files.push({
+          position: typeof position === "number" && Number.isSafeInteger(position) && position >= 0 ? position : undefined,
+          type: m.type,
+          filename: typeof m.filename === "string" ? m.filename : "",
+          mime: typeof m.mime === "string" ? m.mime : "",
+          size: typeof m.size === "number" && Number.isFinite(m.size) && m.size > 0 ? m.size : 0,
+        });
       });
+      return { kind: "media", files, caption: typeof body.caption === "string" ? body.caption : "" };
     }
+    case "view_once":
+      return { kind: "view_once", type: typeof body.blob?.type === "string" ? body.blob.type : "" };
+    default:
+      return { kind: "unknown" };
   }
-  return { kind: "media", files };
 }
 
 const MAX_FILENAME = 80;
@@ -103,9 +128,11 @@ export function bodyForAgent(caption: string, content: Exclude<InboundContent, {
   const lines =
     content.kind === "unknown"
       ? [strings.media.unknownKind]
-      : content.files.length === 0
-        ? [strings.media.anyFile]
-        : content.files.map((f, i) => fileLine(f, i, content.files.length, opts));
+      : content.kind === "view_once"
+        ? [strings.media.viewOnce(strings.media.kinds[content.type as keyof typeof strings.media.kinds] ?? strings.media.kinds.file)]
+        : content.files.length === 0
+          ? [strings.media.anyFile]
+          : content.files.map((f, i) => fileLine(f, i, content.files.length, opts));
   // The lines name a tool the host's tool policy may not give this agent: say what to do then, so the
   // agent does not retry a call it cannot make.
   if (content.kind === "media" && content.files.some((f) => openable(f, opts))) lines.push(strings.media.openNote);

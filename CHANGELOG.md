@@ -7,7 +7,31 @@ plugin bundles no daemon. Releases up to 0.1.0 pinned the exact `@ademu/adc-bin`
 
 ## [Unreleased]
 
-Requires adc ≥ **0.6.0** (the installed device host; the plugin bundles none).
+Requires adc ≥ **1.0.0** (the installed device host; the plugin bundles none) and
+`@ademu/adc-client` / `@ademu/adc-control` 1.0 — the device session speaks **envelope v2**
+(AdemuMLS #978). A 1.0 daemon refuses older plugins and this plugin refuses an older daemon: upgrade
+both together (the flag day).
+
+### Changed (envelope v2, AdemuMLS #978)
+
+- **Messages are envelopes.** The plugin reads the daemon's one `received` event — `{protocol, body,
+  alt?, lane, sender, context?}` — and turns an `ademu.chat` `text`, `media` or `view_once` body into
+  a turn as before (a media body carries each file's render fields; the files' positions and
+  download states come from the frame's `context.media`; a view-once reads as a placeholder only a
+  phone opens). An `edit`, a call record (`ademu.call`), a surface (`ademu.surface`) and any foreign
+  protocol frame are acked and not a turn; a live frame (a typing `activity`) and the live-only
+  `reaction` / `delete` frames are never acked, so an in-flight turn is never claimed as read.
+- **Replies, reactions and typing are one `send`.** Text goes out as `send({protocol: "ademu.chat",
+  body: {type: "text", text}})` (chunked under the daemon's 65 532-byte envelope budget; 4000 chars
+  stays the plugin's conservative chunk), a reaction as a `reaction` body, the typing pulse as a live
+  `activity` body, and a file album as a `media` body through the client's composed `sendMedia`. The
+  daemon completes what a mind may not set; a refusal names its code (`invalid_body`,
+  `frame_too_large`, `not_a_member`, …).
+- `ademu_get_media` gates on `hello.services` (`get_blob`) and reads the v2 message object
+  (`body.type === "media"`, `media[]` states).
+- The daemon's `services` and `protocols` replace `capabilities` everywhere the plugin looked.
+
+Requires adc ≥ **0.6.0** for everything below (the installed device host; the plugin bundles none).
 
 ### Removed
 
