@@ -1,4 +1,5 @@
-// Reactions: a `reaction_changed` live event becomes ONE line in the conversation's session, queued on
+// Reactions: a reaction (an `ademu.chat` `reaction` body in a durable `received` frame, applied by the
+// daemon and never acked — `reactionOf`) becomes ONE line in the conversation's session, queued on
 // the host's system-event queue (`api.runtime.system.enqueueSystemEvent`). Nothing starts a turn and
 // nothing asks the agent to answer: core drains the queue into the agent's NEXT turn there as
 // `System: [ts] <line>` (the Telegram/Slack/Matrix pattern). The event is live-only, so it is never
@@ -7,7 +8,7 @@
 // behind the reconnect barrier); only the target lookup and the line run on a sequential queue beside
 // it, so a daemon slow to answer `get_message` delays later reactions, never messages. Neither the daemon's event nor the host's queue is durable: a reaction that
 // arrives while detached, or before a gateway restart drains it, is lost.
-import type { MemberEntry, ReactionChangedEvent } from "@ademu/adc-client";
+import { chatBodyOf, type MemberEntry, type MessageObject, type ReceivedEvent } from "@ademu/adc-client";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { CHANNEL_ID } from "../config.js";
 import { displayNameOf, normalizeId } from "../grammar.js";
@@ -16,6 +17,34 @@ import type { MessageAccessInput } from "../security.js";
 import { escapeRuntimeContextDelimiters } from "./content.js";
 import { gateSender } from "./sender-gate.js";
 import type { Session } from "./session.js";
+
+/** A reaction as the loop sees it: the v2 `received` frame's reaction body, flattened. */
+export type ReactionEvent = {
+  seq: number;
+  group_id: string;
+  /** The reacted-to message (the frame's own `message_id` is the reaction's). */
+  message_id: string;
+  reactor_user_id: string;
+  /** `""` is a removal. */
+  emoji: string;
+};
+
+/** The reaction in an `ademu.chat` `received` frame, or undefined for any other frame (or a malformed reaction body). */
+export function reactionOf(ev: ReceivedEvent & { seq: number }): ReactionEvent | undefined {
+  const body = chatBodyOf(ev);
+  if (!body || body.type !== "reaction") return undefined;
+  if (typeof body.target_message_id !== "string" || typeof body.emoji !== "string") return undefined;
+  return { seq: ev.seq, group_id: ev.group_id, message_id: body.target_message_id, reactor_user_id: ev.sender.user_id, emoji: body.emoji };
+}
+
+/** The text a reaction line quotes: a text body's text, a media or view-once caption; nothing for the rest. */
+function textOf(target: MessageObject): string {
+  const body = chatBodyOf(target);
+  if (!body) return "";
+  if (body.type === "text") return body.text;
+  if (body.type === "media" || body.type === "view_once") return body.caption;
+  return "";
+}
 
 export type ReactionNotificationMode = "off" | "own" | "all";
 export const DEFAULT_REACTION_NOTIFICATIONS: ReactionNotificationMode = "all";
@@ -62,7 +91,7 @@ function quoteOf(body: string): string | undefined {
 
 /** What the loop decided about a reaction; the rest (the target lookup, the line) runs beside it. */
 type AdmittedReaction = {
-  ev: ReactionChangedEvent & { seq: number };
+  ev: ReactionEvent;
   /** Members as the loop saw them when it admitted the reaction (names for the line). */
   members: readonly MemberEntry[];
   sessionKey: string;
@@ -74,7 +103,7 @@ export type ReactionQueue = {
    * and the sender gate, and the route. A slow members refresh holds the loop exactly as a message's
    * would. The admitted reaction then waits its turn beside the loop for the target lookup and the line.
    */
-  admit: (ev: ReactionChangedEvent & { seq: number }) => Promise<void>;
+  admit: (ev: ReactionEvent) => Promise<void>;
   /** Nothing more is queued, and no line is queued after this (the account is stopping). */
   stop: () => void;
 };
@@ -92,12 +121,13 @@ export function createReactionQueue(params: ReactionParams): ReactionQueue {
     }
   };
   const skip = (seq: number, reason: SkipReason) => logSafe("reaction_skipped", { seq, reason });
+  const isOwn = (t: MessageObject) => normalizeId(t.sender.user_id) === normalizeId(params.account.agentUserId);
   const failed = (seq: number, err: unknown) => logSafe("reaction_failed", { seq, errorClass: err instanceof Error ? err.name : typeof err });
 
   const deliver = async ({ ev, members, sessionKey }: AdmittedReaction): Promise<void> => {
     const { seq } = ev;
     try {
-      let target: Awaited<ReturnType<Session["client"]["getMessage"]>> | undefined;
+      let target: MessageObject | undefined;
       try {
         target = await params.session.client.getMessage({ message_id: ev.message_id });
       } catch {
@@ -106,7 +136,7 @@ export function createReactionQueue(params: ReactionParams): ReactionQueue {
       // The lookup can outlive the account: a closed session rejects it, which must not read as "no target".
       if (stopped) return skip(seq, "stopped");
       if (params.mode === "own" && !target) return skip(seq, "lookup_failed");
-      if (params.mode === "own" && !target!.is_outgoing) return skip(seq, "not_own");
+      if (params.mode === "own" && !isOwn(target!)) return skip(seq, "not_own");
 
       const nameOf = (userId: string, fallback: string) => {
         const m = members.find((x) => normalizeId(x.user_id) === normalizeId(userId));
@@ -115,16 +145,16 @@ export function createReactionQueue(params: ReactionParams): ReactionQueue {
       const reactor = nameOf(ev.reactor_user_id, strings.reactions.someone) || strings.reactions.someone;
       const targetLabel = !target
         ? strings.reactions.aMessage
-        : target.is_outgoing
+        : isOwn(target)
           ? strings.reactions.yourMessage
-          : strings.reactions.someonesMessage(nameOf(target.sender_user_id, target.sender_username || strings.reactions.someone) || strings.reactions.someone);
+          : strings.reactions.someonesMessage(nameOf(target.sender.user_id, target.sender.username || strings.reactions.someone) || strings.reactions.someone);
       const removed = ev.emoji === "";
       const text = strings.reactions.line({
         emoji: removed ? undefined : oneLine(ev.emoji),
         reactor,
         target: targetLabel,
         messageId: oneLine(ev.message_id),
-        quote: target && !target.deleted ? quoteOf(target.body) : undefined,
+        quote: target && !target.deleted ? quoteOf(textOf(target)) : undefined,
       });
       const queued = params.system.enqueueSystemEvent(text, {
         sessionKey,
@@ -144,7 +174,7 @@ export function createReactionQueue(params: ReactionParams): ReactionQueue {
       try {
         if (stopped) return;
         if (params.mode === "off") return skip(seq, "off");
-        // The agent's own send_reaction comes back as reaction_changed too.
+        // The agent's own reaction send comes back as a received reaction too.
         if (normalizeId(ev.reactor_user_id) === normalizeId(params.account.agentUserId)) return skip(seq, "self");
         // The same sender gate as a message (sender-gate.ts). No mention gate: a reaction has no text.
         const { members, shape, access } = await gateSender({

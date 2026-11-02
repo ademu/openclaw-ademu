@@ -42,7 +42,7 @@ export const CONTROL_CONNECT_MS = 1_000;
  * The first adc whose user service pins all three sockets under its data dir (AdemuMLS #712) and binds
  * the enrollment socket (Phase B). An older daemon is refused as "too old: re-run the installer".
  */
-export const MIN_ADC_VERSION = "0.6.0";
+export const MIN_ADC_VERSION = "1.0.0";
 
 /** `"0.2.4 (abc123)"` → `"0.2.4"`; unparsable → undefined. */
 export function parseAdcVersion(version: string | undefined): string | undefined {

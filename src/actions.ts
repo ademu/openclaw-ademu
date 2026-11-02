@@ -1,9 +1,10 @@
-// Message actions (plan T9 / V8): the shared `message` tool's `react` action → `send_reaction` on
-// the account's live session. `send` stays with the outbound adapter (core routes it there). An
-// empty emoji is Ademú's wire form for removal (`SendReactionParams.emoji: ""`).
+// Message actions (plan T9 / V8): the shared `message` tool's `react` action → a `send` of an
+// `ademu.chat` reaction on the account's live session. `send` stays with the outbound adapter (core
+// routes it there). An empty emoji is Ademú's wire form for removal (`SendReactionBody.emoji: ""`).
 import type { ChannelMessageActionAdapter, ChannelMessageActionName } from "openclaw/plugin-sdk/channel-contract";
 import { jsonResult, readReactionParams, readStringParam, resolveReactionMessageId } from "openclaw/plugin-sdk/channel-actions";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
+import { PROTOCOL_CHAT } from "@ademu/adc-client";
 import { CHANNEL_ID, inspectAdemuAccount, listAdemuAccountIds } from "./config.js";
 import { getLiveAccount, resolveConversationTarget, resolveOutboundAccountId } from "./outbound.js";
 
@@ -33,10 +34,10 @@ export const ademuMessageActions: ChannelMessageActionAdapter = {
     const reaction = readReactionParams(params, { removeErrorMessage: "Removing a reaction requires the emoji to remove." });
     if (!reaction.remove && reaction.isEmpty) throw new Error("emoji required");
     const { client } = getLiveAccount(resolveOutboundAccountId(accountId));
-    const result = await client.sendReaction({
+    const result = await client.send({
       group_id: groupId,
-      target_message_id: String(messageIdRaw),
-      emoji: reaction.remove ? "" : reaction.emoji,
+      protocol: PROTOCOL_CHAT,
+      body: { type: "reaction", target_message_id: String(messageIdRaw), emoji: reaction.remove ? "" : reaction.emoji },
     });
     return jsonResult(reaction.remove ? { ok: true, removed: reaction.emoji, status: result.status } : { ok: true, added: reaction.emoji, status: result.status });
   },

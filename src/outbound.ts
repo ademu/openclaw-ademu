@@ -1,25 +1,27 @@
 // Outbound (plan T8): the `message` adapter (durable-final text, ack policy `after_agent_dispatch`)
 // and the `messaging` block (target grammar). Replies go through the account's LIVE session client
 // — the one `startAccount` opened — via a small registry keyed by accountId; there is no second
-// connection for outbound (a device has one seat). Long texts are split at TEXT_CHUNK_LIMIT (V7: no
-// daemon body cap exists; 1 MiB line ceiling; 4000 chars is the conservative default), every chunk
-// is one `send_text` reported through `onDeliveryResult`, and a failure after the first accepted
-// chunk throws `createChannelPartialDeliveryError` so core never re-sends delivered chunks.
+// connection for outbound (a device has one seat). Long texts are split at TEXT_CHUNK_LIMIT (the
+// daemon's body budget is 65 532 bytes per envelope — AdemuMLS #978; 4000 chars stays the
+// conservative default), every chunk is one `send` of an `ademu.chat` text reported through
+// `onDeliveryResult`, and a failure after the first accepted chunk throws
+// `createChannelPartialDeliveryError` so core never re-sends delivered chunks.
 //
-// Media (#27): a reply's files go out as ONE `send_media` album through the client's composed send,
-// which declares, pushes the bytes and waits for the daemon's outcome (`awaitOutcome`, clients 0.7.0).
+// Media (#27): a reply's files go out as ONE media album through the client's composed send,
+// which declares, pushes the bytes and waits for the daemon's outcome (`awaitOutcome`, clients 1.0).
 // What the client leaves to us is small: URL → local file (the host's loader), photo vs file, the
 // hello's `media_send` advert, and turning a refusal into a short line the chat and the agent see.
 import { basename } from "node:path";
 import {
   BlobWriteError,
   DetachedError,
+  PROTOCOL_CHAT,
   RequestError,
   RequestTimeoutError,
   type AdcClient,
   type MediaItemInput,
   type MediaSendSettled,
-  type SendTextResult,
+  type SendResult,
 } from "@ademu/adc-client";
 import { MediaDecodeError, MediaTooLargeError, UnsupportedMediaError, prepareFile, preparePhoto } from "@ademu/adc-client/media";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
@@ -41,7 +43,7 @@ import { looksLikeId, normalizeTarget, type ConversationKind } from "./grammar.j
 import { strings } from "./i18n/strings.js";
 import { sanitizeFilename } from "./monitor/content.js";
 
-/** Conservative per-message ceiling (V7). Not a config knob in v1. */
+/** Conservative per-message ceiling in characters (well under the daemon's 65 532-byte envelope budget). Not a config knob. */
 export const TEXT_CHUNK_LIMIT = 4000;
 
 export class AccountNotRunningError extends Error {
@@ -52,10 +54,10 @@ export class AccountNotRunningError extends Error {
 }
 
 /** The subset of the session client outbound needs (the fake in tests implements it too). */
-export type OutboundClient = Pick<AdcClient, "sendText" | "sendReaction" | "sendTyping" | "sendMedia" | "waitForMediaSend" | "hello">;
+export type OutboundClient = Pick<AdcClient, "send" | "sendMedia" | "waitForMediaSend" | "hello">;
 
 /** The read side the `ademu_get_media` tool needs (AdemuMLS #440); the session client is the full AdcClient. */
-export type MediaClient = Pick<AdcClient, "getMessage" | "getBlob" | "fetchMedia" | "capabilities">;
+export type MediaClient = Pick<AdcClient, "getMessage" | "getBlob" | "fetchMedia" | "services">;
 
 export type LiveAccount = {
   client: OutboundClient;
@@ -106,7 +108,7 @@ export function resolveOutboundAccountId(accountId: string | null | undefined): 
   throw new AccountNotRunningError(accountId ?? "default");
 }
 
-export type SentChunk = { group_id: string; result: SendTextResult };
+export type SentChunk = { group_id: string; result: SendResult };
 
 export function createAdemuReceipt(chunks: readonly SentChunk[], sentAt: number = Date.now(), kind: "text" | "media" = "text"): MessageReceipt {
   return createMessageReceiptFromOutboundResults({
@@ -132,8 +134,8 @@ function sendResultFor(chunks: readonly SentChunk[], kind: "text" | "media" = "t
 }
 
 /**
- * Sends `text` into `groupId` as one or more `send_text` calls. A failure after ≥1 accepted chunk
- * is surfaced as a partial-delivery error carrying the accepted receipts (SMS precedent).
+ * Sends `text` into `groupId` as one or more `ademu.chat` text sends. A failure after ≥1 accepted
+ * chunk is surfaced as a partial-delivery error carrying the accepted receipts (SMS precedent).
  */
 export async function sendAdemuText(params: {
   client: OutboundClient;
@@ -148,7 +150,7 @@ export async function sendAdemuText(params: {
   try {
     for (const body of pieces) {
       params.signal?.throwIfAborted();
-      const result = await params.client.sendText({ group_id: params.groupId, body });
+      const result = await params.client.send({ group_id: params.groupId, protocol: PROTOCOL_CHAT, body: { type: "text", text: body } });
       const chunk = { group_id: params.groupId, result };
       sent.push(chunk);
       await params.onDeliveryResult?.(sendResultFor([chunk]));

@@ -956,8 +956,10 @@ mention-gated channels (LINE, Signal, Slack); core leaves the buffering to each 
 
 ## 18. Reactions as system events (2026-10-14)
 
-The device host emits `reaction_changed` (`{group_id, message_id, reactor_user_id, emoji}`, `emoji:""` =
-removal) when a reaction is applied. Until now the loop dropped it, so the agent never learned that
+The device host delivers an applied reaction as a durable `received` frame with an `ademu.chat` `reaction`
+body (`{target_message_id, emoji, created_at_ms}`, `emoji: ""` = removal; the reactor is the frame's `sender`);
+`reactionOf` in `reactions.ts` flattens it to `{seq, group_id, message_id, reactor_user_id, emoji}` (on the 0.7
+client this was the `reaction_changed` event — envelope v2, AdemuMLS #978). Until now the loop dropped it, so the agent never learned that
 anyone reacted (the slice-1 plan's "→ cache" was never built either). The owner's decisions: every
 reaction reaches the agent's session as context, without a turn and without telling the agent to
 answer; all reactions by default, removals included; no wake.
@@ -980,7 +982,7 @@ answer; all reactions by default, removals included; no wake.
   lost the second add of add → remove → add (Codex pass 1). The daemon emits only applied changes and
   never replays them, so nothing needs deduplicating.
 - Filters, in order: `reactionNotifications` (`off` | `own` | `all`, default `all`; account, then
-  `channels.ademu`); the agent's own reaction (the daemon echoes `send_reaction` as `reaction_changed`);
+  `channels.ademu`); the agent's own reaction (the daemon echoes the agent's reaction send as a received reaction too);
   the same decision-only sender gate as a message, one function both call (`src/monitor/sender-gate.ts`:
   a stranger's two-person room is a DM the allowlist drops; in a room, membership is the gate); under `own`, a target that is not the agent's or cannot be
   read. There is no mention gate: a reaction has no text.

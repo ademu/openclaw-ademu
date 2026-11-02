@@ -1,28 +1,39 @@
 import { describe, expect, it } from "vitest";
 import { bodyForAgent, describeContent, escapeRuntimeContextDelimiters, formatSize, sanitizeFilename } from "../src/monitor/content.js";
 
+const chat = (body: unknown, context?: unknown) => ({ protocol: "ademu.chat", body, ...(context !== undefined ? { context } : {}) }) as Parameters<typeof describeContent>[0];
+
 describe("describeContent", () => {
-  it("text, a frame without ct, media, and any other ct", () => {
-    expect(describeContent({ ct: "text" })).toEqual({ kind: "text" });
-    expect(describeContent({})).toEqual({ kind: "text" });
-    expect(describeContent({ ct: "media", media: [{ position: 0, type: "voice", filename: "v.m4a", mime: "audio/mp4", size: 10 }] })).toEqual({
+  it("text, media, a view-once, any other chat body, and another protocol", () => {
+    expect(describeContent(chat({ type: "text", text: "hi" }))).toEqual({ kind: "text", text: "hi" });
+    expect(
+      describeContent(chat({ type: "media", blobs: [{ type: "voice", filename: "v.m4a", mime: "audio/mp4", size: 10 }], caption: "listen" }, { media: [{ position: 0, fetch_state: "none" }] })),
+    ).toEqual({
       kind: "media",
       files: [{ position: 0, type: "voice", filename: "v.m4a", mime: "audio/mp4", size: 10 }],
+      caption: "listen",
     });
-    expect(describeContent({ ct: "media" })).toEqual({ kind: "media", files: [] });
-    expect(describeContent({ ct: "poll" })).toEqual({ kind: "unknown" });
-    expect(describeContent({ ct: 3 })).toEqual({ kind: "unknown" });
+    expect(describeContent(chat({ type: "media", blobs: [], caption: "" }))).toEqual({ kind: "media", files: [], caption: "" });
+    expect(describeContent(chat({ type: "view_once", blob: { type: "photo" }, caption: "" }))).toEqual({ kind: "view_once", type: "photo" });
+    expect(describeContent(chat({ type: "reaction", target_message_id: "m1", emoji: "x", created_at_ms: 1 }))).toEqual({ kind: "unknown" });
+    expect(describeContent(chat({ type: "poll" }))).toEqual({ kind: "unknown" });
+    expect(describeContent(chat(3))).toEqual({ kind: "unknown" });
+    expect(describeContent({ protocol: "example.cursor", body: { x: 1 } })).toEqual({ kind: "unknown" });
+    expect(describeContent({ protocol: "ademu.call", body: { type: "record", call_id: "c" } })).toEqual({ kind: "unknown" });
   });
 
   it("keeps a file with an unknown type and fills bad fields with blanks", () => {
-    expect(describeContent({ ct: "media", media: [{ position: 0, type: "hologram", filename: 1, mime: null, size: -5 }] })).toEqual({
+    expect(describeContent(chat({ type: "media", blobs: [{ type: "hologram", filename: 1, mime: null, size: -5 }], caption: 7 }, { media: [{ position: 0, fetch_state: "none" }] }))).toEqual({
       kind: "media",
       files: [{ position: 0, type: "hologram", filename: "", mime: "", size: 0 }],
+      caption: "",
     });
   });
 
-  it("takes each file's position from the daemon only, never from its order", () => {
-    const c = describeContent({ ct: "media", media: [{ type: "photo", position: 4 }, { type: "photo", position: -1 }, { type: "photo" }] });
+  it("takes each file's position from the daemon's context only, never from its order", () => {
+    const c = describeContent(
+      chat({ type: "media", blobs: [{ type: "photo" }, { type: "photo" }, { type: "photo" }], caption: "" }, { media: [{ position: 4, fetch_state: "none" }, { position: -1, fetch_state: "none" }] }),
+    );
     expect(c.kind === "media" && c.files.map((f) => f.position)).toEqual([4, undefined, undefined]);
   });
 });
@@ -39,6 +50,11 @@ describe("rendering", () => {
     const out = sanitizeFilename("x".repeat(200));
     expect([...out]).toHaveLength(80);
     expect(out.endsWith("…")).toBe(true);
+  });
+
+  it("a view-once reads as a placeholder that only a phone opens", () => {
+    expect(bodyForAgent("", { kind: "view_once", type: "photo" }, { messageId: "m-9" })).toBe("[a view-once photo — it can only be opened on a phone]");
+    expect(bodyForAgent("", { kind: "view_once", type: "hologram" })).toBe("[a view-once file — it can only be opened on a phone]");
   });
 
   it("an unknown file type reads as a file; a voice note by its name", () => {

@@ -75,6 +75,8 @@ export const strings = {
     // After the file lines when they name the tool: a host tool policy can still hide it from this agent.
     openNote: "[if ademu_get_media is not among your tools, say you can't open files here; don't call it]",
     unknownKind: "[a message of a kind this channel can't show]",
+    // A view-once (AdemuMLS #825): the daemon never holds it; only a person's phone can open it.
+    viewOnce: (kind: string) => `[a view-once ${kind} — it can only be opened on a phone]`,
     // ----- sending files (#27) -----
     send: {
       why: {

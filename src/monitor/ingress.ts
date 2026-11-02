@@ -1,17 +1,19 @@
 // The ingress loop (design entry §2 R2b, plan T7) — THE correctness pin of this plugin.
 //
 // One sequential loop per account owns the AdcClient event iterator and produces the session's
-// `lifetime`. Per `message_received`: validate → watermark replay check → self-sent → decision-only
-// access → mention decision → route → context-bound access → buildContext → dispatch with an
-// AdoptionTracker (whose `onAdopted` commits the watermark) → await the tracker → ack. A non-text
-// `ct` takes the same path with a described body (`content.ts`); nothing here waits for a file.
+// `lifetime`. Per durable `received` chat message: validate → watermark replay check → self-sent →
+// decision-only access → mention decision → route → context-bound access → buildContext → dispatch
+// with an AdoptionTracker (whose `onAdopted` commits the watermark) → await the tracker → ack. A
+// media or view-once body takes the same path with a described text (`content.ts`); nothing here
+// waits for a file. An edit, a call record, a surface or a foreign frame is acked and not a turn; a
+// live frame (an activity) and the live-only `received` kinds (a reaction, a delete) are never acked.
 //
 // Acks are CUMULATIVE and carry read-receipt weight, so: N+1 is never dispatched before N settled;
 // gated/malformed/self-sent/replayed messages ack immediately after the decision; any pre-adoption
 // failure HALTS the loop (no ack for N or anything after), the caller republishes `recovering` +
 // `ingressUnavailable`, and the gateway restart replays from the daemon's cursor. Model runs proceed
 // concurrently after adoption, bounded by MAX_INFLIGHT dispatches.
-import { LineTooLongError, ProtocolViolationError, SessionRejectedError, type DeviceEvent, type MessageReceivedEvent } from "@ademu/adc-client";
+import { chatBodyOf, LineTooLongError, PROTOCOL_CHAT, ProtocolViolationError, SessionRejectedError, type DeviceEvent, type ReceivedEvent } from "@ademu/adc-client";
 
 function isTerminalClientError(err: unknown): boolean {
   return err instanceof SessionRejectedError || err instanceof ProtocolViolationError || err instanceof LineTooLongError;
@@ -37,7 +39,7 @@ import { AdoptionFailedError, AdoptionTracker, type TurnResultLike } from "./ado
 import { bodyForAgent, describeContent, escapeRuntimeContextDelimiters } from "./content.js";
 import { forgetRoomHistory, peekRoomHistory, recordSkipped, type RoomHistory } from "./history.js";
 import { gateSender } from "./sender-gate.js";
-import { createReactionQueue, DEFAULT_REACTION_NOTIFICATIONS, type ReactionNotificationMode, type RuntimeSystemSurface } from "./reactions.js";
+import { createReactionQueue, DEFAULT_REACTION_NOTIFICATIONS, reactionOf, type ReactionNotificationMode, type RuntimeSystemSurface } from "./reactions.js";
 import type { Session } from "./session.js";
 
 export const MAX_INFLIGHT = 4;
@@ -103,19 +105,27 @@ export type IngressHandle = {
   drain: () => Promise<void>;
 };
 
-function validMessage(ev: DeviceEvent): ev is MessageReceivedEvent & { known: true; type: "event"; seq: number } {
-  if (!ev.known || ev.event !== "message_received") return false;
-  const m = ev as unknown as MessageReceivedEvent;
+type ReceivedFrame = ReceivedEvent & { known: true; type: "event"; seq: number };
+
+function validMessage(ev: DeviceEvent): ev is ReceivedFrame {
+  if (!ev.known || ev.event !== "received") return false;
+  const m = ev as unknown as ReceivedEvent;
   return (
     typeof m.message_id === "string" &&
     m.message_id.length > 0 &&
     typeof m.group_id === "string" &&
     looksLikeId(m.group_id) &&
-    typeof m.sender_user_id === "string" &&
-    looksLikeId(m.sender_user_id) &&
-    typeof m.body === "string"
+    typeof m.protocol === "string" &&
+    typeof m.sender === "object" &&
+    m.sender !== null &&
+    typeof m.sender.user_id === "string" &&
+    looksLikeId(m.sender.user_id) &&
+    (m.lane === "durable" || m.lane === "live")
   );
 }
+
+/** The chat body types that are not a turn: applied by the daemon (live-only, never acked here) or an edit (acked). */
+const APPLIED_BODY_TYPES = new Set(["reaction", "delete", "activity"]);
 
 function validSeq(seq: unknown): seq is number {
   return typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 0;
@@ -176,9 +186,10 @@ export function startIngress(params: IngressParams): IngressHandle {
     aliases: params.mentionAliases,
   });
 
-  const handleMessage = async (ev: MessageReceivedEvent & { seq: number }): Promise<void> => {
+  const handleMessage = async (ev: ReceivedFrame): Promise<void> => {
     const seq = ev.seq;
     const deviceId = params.account.deviceId;
+    const senderUserId = ev.sender.user_id;
 
     // 1. Watermark replay check (§2 R2b rider R2).
     const wm = store.getWatermark(accountId);
@@ -188,7 +199,7 @@ export function startIngress(params: IngressParams): IngressHandle {
       return;
     }
     // 2. Self-sent (our own outgoing echoes back through the durable stream).
-    if (normalizeId(ev.sender_user_id) === normalizeId(params.account.agentUserId)) {
+    if (normalizeId(senderUserId) === normalizeId(params.account.agentUserId)) {
       ack(seq);
       return;
     }
@@ -196,7 +207,7 @@ export function startIngress(params: IngressParams): IngressHandle {
     // caption still counts for the mention decision below.
     const content = describeContent(ev);
     // Sender-controlled text never reaches the host with OpenClaw's runtime-context delimiters (content.ts).
-    const body = escapeRuntimeContextDelimiters(ev.body);
+    const body = escapeRuntimeContextDelimiters(content.kind === "text" ? content.text : content.kind === "media" ? (content.caption ?? "") : "");
     const commandRequested = content.kind === "text" && runtime.commands.shouldComputeCommandAuthorized(body, cfg);
     const isTextCommand = content.kind === "text" && runtime.commands.isControlCommandMessage(body, cfg);
 
@@ -207,12 +218,12 @@ export function startIngress(params: IngressParams): IngressHandle {
       resolver: params.resolver,
       account: params.account,
       groupId: ev.group_id,
-      senderUserId: ev.sender_user_id,
+      senderUserId,
       commandRequested,
     });
     const isGroup = shape.kind === "group";
-    const senderRole = resolveSenderRole(ev.sender_user_id, params.account.ownerUserId);
-    const sender = members.find((m) => normalizeId(m.user_id) === normalizeId(ev.sender_user_id));
+    const senderRole = resolveSenderRole(senderUserId, params.account.ownerUserId);
+    const sender = members.find((m) => normalizeId(m.user_id) === normalizeId(senderUserId));
     if (!pre.senderAccess.allowed) {
       log("ingress_sender_dropped", { seq, kind: shape.kind });
       ack(seq);
@@ -242,7 +253,7 @@ export function startIngress(params: IngressParams): IngressHandle {
     });
     // A daemon that serves files (`get_blob`, AdemuMLS #440) lets the agent open them in its own turn.
     const described =
-      content.kind === "text" ? undefined : bodyForAgent(body, content, client.capabilities.has("get_blob") ? { messageId: ev.message_id } : {});
+      content.kind === "text" ? undefined : bodyForAgent(body, content, client.services.has("get_blob") ? { messageId: ev.message_id } : {});
     const senderName = sender ? escapeRuntimeContextDelimiters(displayNameOf(sender)) : undefined;
     if (mention.shouldSkip) {
       // Not for the agent, but part of the room: its next turn here gets it as history.
@@ -250,7 +261,7 @@ export function startIngress(params: IngressParams): IngressHandle {
         params.roomHistory,
         ev.group_id,
         {
-          sender: senderName || escapeRuntimeContextDelimiters(ev.sender_username?.trim() || normalizeId(ev.sender_user_id)),
+          sender: senderName || escapeRuntimeContextDelimiters(ev.sender.username?.trim() || normalizeId(senderUserId)),
           body: described ?? body,
           timestamp: ev.created_at_ms,
           messageId: ev.message_id,
@@ -264,7 +275,7 @@ export function startIngress(params: IngressParams): IngressHandle {
     // 6. The context-bound access resolve (the result that enters buildContext).
     const access = await resolveMessageAccess({
       resolver: params.resolver,
-      senderUserId: ev.sender_user_id,
+      senderUserId,
       ownerUserId: params.account.ownerUserId,
       conversation: { kind: shape.kind, id: ev.group_id },
       commandRequested,
@@ -289,9 +300,9 @@ export function startIngress(params: IngressParams): IngressHandle {
       accountId,
       messageId: ev.message_id,
       timestamp: ev.created_at_ms,
-      from: `${CHANNEL_ID}:${normalizeId(ev.sender_user_id)}`,
+      from: `${CHANNEL_ID}:${normalizeId(senderUserId)}`,
       sender: {
-        id: normalizeId(ev.sender_user_id),
+        id: normalizeId(senderUserId),
         ...(senderName ? { name: senderName } : {}),
         ...(sender?.username ? { username: escapeRuntimeContextDelimiters(sender.username) } : {}),
         roles: [senderRole],
@@ -359,7 +370,8 @@ export function startIngress(params: IngressParams): IngressHandle {
           accountId,
           typing: {
             start: async () => {
-              await client.sendTyping({ group_id: groupId, active: true });
+              // One typing pulse (AdemuMLS #621 → #978: a live `activity` frame; no stop frame).
+              await client.send({ group_id: groupId, protocol: PROTOCOL_CHAT, body: { type: "activity", kind: "typing" }, lane: "live" });
             },
             onStartError: (err: unknown) => log("typing_failed", { errorClass: err instanceof Error ? err.name : typeof err }),
             keepaliveIntervalMs: params.typingKeepaliveMs,
@@ -436,14 +448,46 @@ export function startIngress(params: IngressParams): IngressHandle {
           continue;
         }
         switch (ev.event) {
-          case "message_received": {
+          case "received": {
             const seq: unknown = ev.seq;
-            if (!validSeq(seq)) throw new IngressProtocolError("the Ademú device host sent a message_received frame with an invalid seq");
+            if (!validSeq(seq)) throw new IngressProtocolError("the Ademú device host sent a received frame with an invalid seq");
             if (!validMessage(ev)) {
               log("message_malformed", { seq });
               ack(seq);
               break;
             }
+            // A live frame (an activity, a foreign heartbeat) is never stored or acked: nothing to do.
+            if (ev.lane === "live") {
+              log("ingress_live_skipped", { seq });
+              break;
+            }
+            if (ev.protocol !== PROTOCOL_CHAT) {
+              // A call record, a surface, a foreign frame: durable, not a turn for this plugin.
+              log("ingress_other_protocol_acked", { seq });
+              ack(seq);
+              break;
+            }
+            const kind = chatBodyOf(ev)?.type ?? (ev.body as { type?: unknown } | null)?.type;
+            const reaction = reactionOf(ev);
+            if (reaction) {
+              // A reaction is live-only (applied by the daemon, never acked): decided here like a message and
+              // queued for the agent's next turn beside the loop (reactions.ts).
+              await reactions.admit(reaction);
+              break;
+            }
+            if (typeof kind === "string" && APPLIED_BODY_TYPES.has(kind)) {
+              // A reaction or a delete is live-only (already applied by the daemon; never acked
+              // here, so an in-flight turn is never claimed as read); an activity is live.
+              log("ingress_chat_frame_skipped", { seq, kind });
+              break;
+            }
+            if (kind === "edit") {
+              // Durable and replayed, so acked; the plugin does not model edits as turns.
+              log("ingress_chat_frame_skipped", { seq, kind });
+              ack(seq);
+              break;
+            }
+            // text, media, view_once — and a body type this plugin does not know, described as such.
             try {
               await handleMessage(ev);
             } catch (err) {
@@ -465,16 +509,15 @@ export function startIngress(params: IngressParams): IngressHandle {
             forgetRoomHistory(params.roomHistory, ev.group_id);
             log("removed_from_group", { seq: ev.seq });
             break;
-          case "reaction_changed":
-            // Live-only: queued for the agent's next turn there, never acked, never a halt. Decided here
-            // like a message; the target lookup runs beside the loop, so it never holds up a message.
-            await reactions.admit(ev);
-            break;
           case "message_status_changed":
+          // A member device did not understand one of our sends; a member device announced its protocols.
+          case "unsupported":
+          case "peer_protocols_changed":
           // A file's download progress (live-only, never acked): the media tool reads the state when asked.
           case "media_fetch_changed":
           // An own media send's outcome (live-only, never acked): the client's waitForMediaSend consumes it.
           case "media_send_changed":
+          case "call_changed":
             break;
         }
       }

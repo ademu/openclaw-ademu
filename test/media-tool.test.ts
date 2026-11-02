@@ -1,5 +1,5 @@
 // The `ademu_get_media` tool (openclaw-ademu #22): scope, every fetch state, read failures, saving.
-import { BlobReadError, RequestError, type MediaItem, type MessageSummary } from "@ademu/adc-client";
+import { BlobReadError, RequestError, type MediaItem, type MessageObject } from "@ademu/adc-client";
 import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { registerLiveAccount, resetLiveAccountsForTests } from "../src/outbound.js";
@@ -19,23 +19,22 @@ const photo = (over: Loose<MediaItem> = {}): MediaItem => ({
   ...over,
 }) as MediaItem;
 
-const summary = (over: Loose<MessageSummary> = {}): MessageSummary => ({
+/** A received media object (v2): the projected body plus the daemon's `media[]` states. */
+const summary = (over: Loose<MessageObject> = {}): MessageObject => ({
   message_id: "m-1",
   group_id: ROOM_DM,
-  sender_user_id: "u",
-  sender_username: "marios",
-  is_outgoing: false,
-  ct: "media",
-  body: "",
+  protocol: "ademu.chat",
+  body: { type: "media", blobs: [{ type: "photo", mime: "image/jpeg", size: 2048, filename: "IMG_0042.jpg" }], caption: "" },
+  sender: { user_id: "u", username: "marios", device_id: "d-u", kind: "human" },
   created_at_ms: 0,
   reactions: [],
   media: [photo()],
   ...over,
-}) as MessageSummary;
+}) as MessageObject;
 
 class FakeMedia {
-  capabilities = new Set(["get_blob", "fetch_media"]);
-  messages = new Map<string, MessageSummary>([["m-1", summary()]]);
+  services = new Set(["get_blob", "fetch_media"]);
+  messages = new Map<string, MessageObject>([["m-1", summary()]]);
   bytes = Buffer.from("plaintext-bytes");
   blobError: unknown;
   fetchError: unknown;
@@ -197,7 +196,7 @@ describe("ademu_get_media: size limit and saved copies", () => {
     const w = setup();
     await w.call({ message_id: "m-1", position: 0 });
     w.disk.set("/state/media/inbound/IMG_0042---uuid.jpg", w.media.bytes.length);
-    w.media.messages.set("m-1", summary({ deleted: true, media: undefined }));
+    w.media.messages.set("m-1", summary({ deleted: true, body: null, media: undefined }));
     await expect(w.call({ message_id: "m-1", position: 0 })).rejects.toThrow(/no such file/);
   });
 });
@@ -268,8 +267,8 @@ describe("ademu_get_media: scope and refusals", () => {
 
   it("an unknown or deleted message, a text message, and a missing position are all 'no such file'", async () => {
     const w = setup();
-    w.media.messages.set("m-del", summary({ message_id: "m-del", deleted: true, media: undefined }));
-    w.media.messages.set("m-txt", summary({ message_id: "m-txt", ct: "text", media: undefined }));
+    w.media.messages.set("m-del", summary({ message_id: "m-del", deleted: true, body: null, media: undefined }));
+    w.media.messages.set("m-txt", summary({ message_id: "m-txt", body: { type: "text", text: "hi" }, media: undefined }));
     for (const args of [{ message_id: "m-nope", position: 0 }, { message_id: "m-del", position: 0 }, { message_id: "m-txt", position: 0 }, { message_id: "m-1", position: 3 }]) {
       await expect(w.call(args)).rejects.toThrow(MediaToolError);
     }
@@ -289,7 +288,7 @@ describe("ademu_get_media: scope and refusals", () => {
     const a = setup({ register: false });
     await expect(a.call({ message_id: "m-1", position: 0 })).rejects.toThrow(/not running/);
     const b = setup();
-    b.media.capabilities.delete("get_blob");
+    b.media.services.delete("get_blob");
     await expect(b.call({ message_id: "m-1", position: 0 })).rejects.toThrow(/too old to serve files/);
   });
 });

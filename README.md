@@ -28,7 +28,7 @@ Linux):
 curl -fsSL https://raw.githubusercontent.com/ademu/AdemuMLS/main/install.sh | sh
 ```
 
-The plugin needs **adc ≥ 0.6.0** (see [CHANGELOG](./CHANGELOG.md)). On a headless Linux host the
+The plugin needs **adc ≥ 1.0.0** (envelope v2 — see [CHANGELOG](./CHANGELOG.md)). On a headless Linux host the
 user service needs lingering (`loginctl enable-linger $USER` — the same setting a headless OpenClaw
 gateway already needs). On a hardened host an operator installs the system-wide adc instead (see
 *Hardened hosts*).
@@ -175,7 +175,7 @@ device and closes the connection after it: a mint whose reply was lost (or whose
 the mint leaves that token orphaned — revoke it by label (`adc [--system] token revoke <device_id>
 --label <label>`).
 
-A device host older than adc 0.6.0 — or one without the enrollment socket — is refused as too old
+A device host older than adc 1.0.0 — or one without the enrollment socket — is refused as too old
 (`blocked`): re-run the adc installer, which upgrades adc and restarts its service.
 
 ## Upgrading
