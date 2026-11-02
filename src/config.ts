@@ -64,6 +64,7 @@ export const AdemuAccountSchema = z
     /** The device host scope this account was enrolled at; written by both enrollment doors, never inherited. */
     daemonScope: z.enum(["user", "system"]).optional(),
     historyLimit: z.number().int().min(0).optional(),
+    reactionNotifications: z.enum(["off", "own", "all"]).optional(),
   })
   .strict();
 
@@ -77,6 +78,8 @@ const AdemuBaseSchema = z
     server: ServerSchema.optional(),
     /** Room messages kept for the agent's next turn when they do not address it (0 = none). */
     historyLimit: z.number().int().min(0).optional(),
+    /** Which reactions reach the agent, as lines it reads at its next turn (default all). */
+    reactionNotifications: z.enum(["off", "own", "all"]).optional(),
     groups: z.record(z.string(), buildGroupEntrySchema()).optional(),
   })
   .strict();
@@ -114,6 +117,11 @@ export const ADEMU_UI_HINTS = {
   historyLimit: {
     label: "Room history (messages)",
     help: "Room messages that did not address the agent, kept for its next turn there (default 50; 0 = none).",
+  },
+  "accounts.*.reactionNotifications": { label: "Reaction notifications", advanced: true },
+  reactionNotifications: {
+    label: "Reaction notifications",
+    help: "Which reactions the agent hears about, as a line it reads at its next turn in that conversation (never a reply prompt): all (default), own (only on the agent's messages), or off.",
   },
   dataDir: { label: "Device host data dir", advanced: true },
   socketPath: { label: "Device host control socket", advanced: true },
@@ -317,6 +325,8 @@ export type ResolvedAdemuAccount = {
   daemon: DaemonIdentity;
   /** Room messages kept for the next turn (account, else channel); unset = the global default. */
   historyLimit?: number;
+  /** Which reactions are queued for the agent (account, else channel); unset = all. */
+  reactionNotifications?: "off" | "own" | "all";
   /** `channels.ademu.server` is set: accepted and IGNORED (deprecated, AdemuMLS #712) — logged once. */
   serverConfigured: boolean;
   /** Set when this account's daemon identity collides with another account's (R1). */
@@ -397,6 +407,9 @@ function readAccount(
     tokenSource,
     daemon,
     ...(typeof merged.historyLimit === "number" ? { historyLimit: merged.historyLimit } : {}),
+    ...(merged.reactionNotifications === "off" || merged.reactionNotifications === "own" || merged.reactionNotifications === "all"
+      ? { reactionNotifications: merged.reactionNotifications }
+      : {}),
     serverConfigured: serverConfigured(channel),
   };
 }

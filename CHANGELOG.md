@@ -47,6 +47,14 @@ Requires adc ≥ **0.6.0** for everything below (the installed device host; the 
 - `channels.ademu.server` is accepted and ignored (logged once): the installed device host's own
   config (`~/.config/adc/config.toml`) names the Ademú servers. It will be removed in a later release.
 
+### Added
+
+- **Reactions reach the agent without starting a turn.** A reaction someone adds or removes becomes
+  one line in that conversation's session, queued with OpenClaw's system-event queue; the agent reads
+  it at its next turn there and is never asked to answer. `reactionNotifications` (`all` by default,
+  `own`, `off`) at `channels.ademu` or per account. The lines live in the gateway's memory. On the 1.0
+  client the reaction is the daemon's `received` frame with a `reaction` body (never acked).
+
 ### Changed
 
 - **The plugin attaches to the installed adc service** (AdemuMLS #712). By default it uses the

@@ -9,6 +9,7 @@ import type {
   MediaItemInput,
   MediaSendSettled,
   MemberEntry,
+  MessageObject,
   RetryInfo,
   SelfInfo,
   SendParams,
@@ -100,6 +101,11 @@ export class FakeAdcClient {
   members = new Map<string, MemberEntry[]>();
   conversations: ConversationSummary[] = [];
   getMembersCalls = 0;
+  /** What `getMessage` answers, by message id; a missing id is the daemon's `not_found`. */
+  messages = new Map<string, MessageObject>();
+  getMessageFails = false;
+  /** While set, `getMessage` waits on it (a daemon that does not answer). */
+  stallGetMessage: Promise<void> | undefined;
   seated = true;
   closed = false;
   self: SelfInfo;
@@ -294,9 +300,42 @@ export class FakeAdcClient {
   async getMessages() {
     return { messages: [] };
   }
-  async getMessage() {
-    throw new Error("not used");
+  async getMessage(params: { message_id: string }) {
+    if (this.stallGetMessage) await this.stallGetMessage;
+    if (this.getMessageFails) throw new Error("get_message failed");
+    const found = this.messages.get(params.message_id);
+    if (!found) throw new Error("not_found");
+    return found;
   }
+
+  /** A stored message `getMessage` returns (defaults: a text from the owner in the DM; `is_outgoing` makes it the agent's). */
+  stored(input: { message_id: string; group_id?: string; sender_user_id?: string; sender_username?: string; is_outgoing?: boolean; body?: string; deleted?: boolean }): MessageObject {
+    const senderUserId = input.sender_user_id ?? (input.is_outgoing ? this.self.user_id : OWNER);
+    const agent = senderUserId === this.self.user_id;
+    const m: MessageObject = {
+      message_id: input.message_id,
+      group_id: input.group_id ?? ROOM_DM,
+      protocol: "ademu.chat",
+      body: input.deleted ? null : { type: "text", text: input.body ?? "" },
+      sender: { user_id: senderUserId, username: input.sender_username ?? (agent ? "iris" : "marios"), device_id: `d-${senderUserId.slice(0, 8)}`, kind: agent ? "agent" : "human" },
+      created_at_ms: 1_700_000_000_000,
+      reactions: [],
+      ...(input.deleted ? { deleted: true } : {}),
+    };
+    this.messages.set(m.message_id, m);
+    return m;
+  }
+
+  /** Pushes a durable `received` frame carrying a reaction body (never acked; `emoji: ""` is a removal). */
+  reaction(r: { group_id?: string; message_id: string; reactor_user_id: string; emoji: string }) {
+    this.message({
+      group_id: r.group_id ?? ROOM_DM,
+      sender_user_id: r.reactor_user_id,
+      sender_kind: r.reactor_user_id === this.self.user_id ? "agent" : "human",
+      rawBody: { type: "reaction", target_message_id: r.message_id, emoji: r.emoji, created_at_ms: 1_700_000_000_000 },
+    });
+  }
+
   async getMessageStatus() {
     throw new Error("not used");
   }

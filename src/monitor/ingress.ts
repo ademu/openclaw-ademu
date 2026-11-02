@@ -21,7 +21,7 @@ function isTerminalClientError(err: unknown): boolean {
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { bindIngressLifecycleToReplyOptions, createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-outbound";
 import { CHANNEL_ID } from "../config.js";
-import { classifyConversation, describeConversation, displayNameOf, looksLikeId, normalizeId } from "../grammar.js";
+import { describeConversation, displayNameOf, looksLikeId, normalizeId } from "../grammar.js";
 import { resolveSenderRole } from "../roles.js";
 import {
   agentNames,
@@ -38,6 +38,8 @@ import type { AdemuStore } from "../store.js";
 import { AdoptionFailedError, AdoptionTracker, type TurnResultLike } from "./adoption.js";
 import { bodyForAgent, describeContent, escapeRuntimeContextDelimiters } from "./content.js";
 import { forgetRoomHistory, peekRoomHistory, recordSkipped, type RoomHistory } from "./history.js";
+import { gateSender } from "./sender-gate.js";
+import { createReactionQueue, DEFAULT_REACTION_NOTIFICATIONS, reactionOf, type ReactionNotificationMode, type RuntimeSystemSurface } from "./reactions.js";
 import type { Session } from "./session.js";
 
 export const MAX_INFLIGHT = 4;
@@ -61,6 +63,10 @@ export type IngressParams = {
   accountId: string;
   cfg: OpenClawConfig;
   runtime: RuntimeChannelSurface;
+  /** The host's system-event queue: reactions become lines the agent reads at its next turn (reactions.ts). */
+  system: RuntimeSystemSurface;
+  /** Which reactions are queued (missing = the default, all). */
+  reactionNotifications?: ReactionNotificationMode | undefined;
   session: Session;
   store: AdemuStore;
   resolver: MessageAccessInput["resolver"];
@@ -137,6 +143,20 @@ export function startIngress(params: IngressParams): IngressHandle {
   });
   lifetime.catch(() => {});
 
+  // Reactions: decided in the loop like a message, delivered beside it (reactions.ts). Declared before
+  // halt/stop, which close it.
+  const reactions = createReactionQueue({
+    accountId,
+    cfg,
+    mode: params.reactionNotifications ?? DEFAULT_REACTION_NOTIFICATIONS,
+    session,
+    resolver: params.resolver,
+    account: { agentUserId: params.account.agentUserId, ownerUserId: params.account.ownerUserId },
+    resolveAgentRoute: runtime.routing.resolveAgentRoute,
+    system: params.system,
+    log,
+  });
+
   // Halt: close every tracker generation and end the lifetime. Adoption/ack integrity failures are
   // IngressHaltedError (recovering → restart replays); a TERMINAL client error surfacing from the
   // iterator (revoked token, displaced, protocol violation …) is passed through unwrapped so the
@@ -145,6 +165,7 @@ export function startIngress(params: IngressParams): IngressHandle {
     if (stopped) return;
     stopped = true;
     for (const t of trackers) t.close();
+    reactions.stop();
     rejectLifetime(cause instanceof Error ? cause : new IngressHaltedError(cause));
   };
 
@@ -182,12 +203,6 @@ export function startIngress(params: IngressParams): IngressHandle {
       ack(seq);
       return;
     }
-    // 3. Conversation shape from membership (unknown sender → one refresh).
-    const members = await session.members.getWithSender(ev.group_id, senderUserId);
-    const shape = classifyConversation({ members, agentUserId: params.account.agentUserId, ownerUserId: params.account.ownerUserId });
-    const isGroup = shape.kind === "group";
-    const senderRole = resolveSenderRole(senderUserId, params.account.ownerUserId);
-    const sender = members.find((m) => normalizeId(m.user_id) === normalizeId(senderUserId));
     // A non-text message (a file, or a kind this plugin does not handle) is never a command; its
     // caption still counts for the mention decision below.
     const content = describeContent(ev);
@@ -196,14 +211,19 @@ export function startIngress(params: IngressParams): IngressHandle {
     const commandRequested = content.kind === "text" && runtime.commands.shouldComputeCommandAuthorized(body, cfg);
     const isTextCommand = content.kind === "text" && runtime.commands.isControlCommandMessage(body, cfg);
 
-    // 4. Decision-only access (cheap drop of strangers in DMs).
-    const pre = await resolveMessageAccess({
+    // 3–4. Conversation shape from membership (unknown sender → one refresh), then the decision-only
+    // access (cheap drop of strangers in DMs) — the sender gate reactions share (sender-gate.ts).
+    const { members, shape, access: pre } = await gateSender({
+      members: session.members,
       resolver: params.resolver,
+      account: params.account,
+      groupId: ev.group_id,
       senderUserId,
-      ownerUserId: params.account.ownerUserId,
-      conversation: { kind: shape.kind, id: ev.group_id },
       commandRequested,
     });
+    const isGroup = shape.kind === "group";
+    const senderRole = resolveSenderRole(senderUserId, params.account.ownerUserId);
+    const sender = members.find((m) => normalizeId(m.user_id) === normalizeId(senderUserId));
     if (!pre.senderAccess.allowed) {
       log("ingress_sender_dropped", { seq, kind: shape.kind });
       ack(seq);
@@ -448,6 +468,13 @@ export function startIngress(params: IngressParams): IngressHandle {
               break;
             }
             const kind = chatBodyOf(ev)?.type ?? (ev.body as { type?: unknown } | null)?.type;
+            const reaction = reactionOf(ev);
+            if (reaction) {
+              // A reaction is live-only (applied by the daemon, never acked): decided here like a message and
+              // queued for the agent's next turn beside the loop (reactions.ts).
+              await reactions.admit(reaction);
+              break;
+            }
             if (typeof kind === "string" && APPLIED_BODY_TYPES.has(kind)) {
               // A reaction or a delete is live-only (already applied by the daemon; never acked
               // here, so an in-flight turn is never claimed as read); an activity is live.
@@ -506,6 +533,7 @@ export function startIngress(params: IngressParams): IngressHandle {
     inflight,
     stop: () => {
       stopped = true;
+      reactions.stop();
       for (const t of trackers) {
         t.abort();
         t.close();

@@ -123,6 +123,15 @@ describe("accounts and inheritance", () => {
     expect(resolveAdemuAccount(cfg({ accounts: { a: { deviceId: "d", token: "t" } } }), "a", ENV, () => false).serverConfigured).toBe(false);
   });
 
+  it("reactionNotifications: off | own | all at the root or on an account; the account inherits the root's", () => {
+    expect(AdemuChannelSchema.safeParse({ reactionNotifications: "own", accounts: { a: { reactionNotifications: "off" } } }).success).toBe(true);
+    expect(AdemuChannelSchema.safeParse({ reactionNotifications: "some" }).success).toBe(false);
+    expect(AdemuChannelSchema.safeParse({ accounts: { a: { reactionNotifications: true } } }).success).toBe(false);
+    expect(resolveAdemuAccount(cfg({ reactionNotifications: "own", accounts: { a: { deviceId: "d", token: "t" } } }), "a", ENV, () => false).reactionNotifications).toBe("own");
+    expect(resolveAdemuAccount(cfg({ reactionNotifications: "own", accounts: { a: { deviceId: "d", token: "t", reactionNotifications: "off" } } }), "a", ENV, () => false).reactionNotifications).toBe("off");
+    expect(resolveAdemuAccount(cfg({ accounts: { a: { deviceId: "d", token: "t" } } }), "a", ENV, () => false).reactionNotifications).toBeUndefined();
+  });
+
   it("historyLimit: a whole number ≥ 0 at the root or on an account; the account inherits the root's", () => {
     expect(AdemuChannelSchema.safeParse({ historyLimit: 20, accounts: { a: { historyLimit: 0 } } }).success).toBe(true);
     expect(AdemuChannelSchema.safeParse({ historyLimit: -1 }).success).toBe(false);

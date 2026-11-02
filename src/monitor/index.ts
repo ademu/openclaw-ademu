@@ -19,6 +19,7 @@ import { blockedPatch, classifyError, patchFor, readyPatch, recoveringPatch, unr
 import type { AdemuStore } from "../store.js";
 import { DaemonAbortedError, SessionSocketMovedError, type Attacher, type Attachment } from "./attach.js";
 import { resolveHistoryLimit } from "./history.js";
+import type { RuntimeSystemSurface } from "./reactions.js";
 import { startIngress, type IngressHandle, type RuntimeChannelSurface } from "./ingress.js";
 import { openSession, type Session, type SessionDeps } from "./session.js";
 
@@ -51,6 +52,8 @@ export type StartAccountDeps = {
   attacher: Attacher;
   session: SessionDeps;
   runtime: RuntimeChannelSurface;
+  /** The host's system-event queue (reactions). */
+  system: RuntimeSystemSurface;
   settings: { typingKeepaliveMs: number; mentionAliases: readonly string[] };
   platform: string;
   now: () => number;
@@ -245,6 +248,8 @@ async function runWithLease(
       accountId,
       cfg,
       runtime: deps.runtime,
+      system: deps.system,
+      reactionNotifications: account.reactionNotifications,
       session,
       store: deps.store,
       resolver: createAdemuIngressResolver({ accountId, cfg }),

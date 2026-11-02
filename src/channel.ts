@@ -33,6 +33,7 @@ export function realStartAccountDeps(): StartAccountDeps {
     attacher: getDaemonAttacher(hostLog),
     session: realSessionDeps(hostLog),
     runtime: runtime.channel as unknown as RuntimeChannelSurface,
+    system: { enqueueSystemEvent: (text, options) => runtime.system.enqueueSystemEvent(text, options) },
     settings: getPluginSettings(),
     platform: process.platform,
     now: () => Date.now(),
