@@ -5,7 +5,7 @@
 // content this plugin does not turn into a turn. Media, a view-once and a location still become a
 // turn — acked at adoption like text, never held — whose text tells the agent what arrived: OpenClaw
 // drops media facts that carry no path or url, so the text is the only way the agent learns of a file.
-import { chatBodyOf, PROTOCOL_CHAT, type ReceivedContext } from "@ademu/adc-client";
+import { chatBodyOf, type ChatLocationBody, type ReceivedContext } from "@ademu/adc-client";
 import { strings } from "../i18n/strings.js";
 
 // OpenClaw before 2026.9.3 lifts any `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>` … `<<<END_…>>>` block it
@@ -46,8 +46,6 @@ export type InboundFrame = { protocol: string; body: unknown; context?: Received
  * and its caption; a `view_once` is its kind. Any other protocol or body type is unknown.
  */
 export function describeContent(ev: InboundFrame): InboundContent {
-  const location = locationOf(ev);
-  if (location) return location;
   const body = chatBodyOf(ev);
   if (!body) return { kind: "unknown" };
   switch (body.type) {
@@ -75,6 +73,8 @@ export function describeContent(ev: InboundFrame): InboundContent {
     }
     case "view_once":
       return { kind: "view_once", type: typeof body.blob?.type === "string" ? body.blob.type : "" };
+    case "location":
+      return locationOf(body);
     default:
       return { kind: "unknown" };
   }
@@ -83,16 +83,13 @@ export function describeContent(ev: InboundFrame): InboundContent {
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
 /**
- * An `ademu.chat` `location` body, read raw (the 1.0 client's `chatBodyOf` does not know the type):
- * `{lat, lon, is_current, accuracy_m?, live?: {until_ms, comment?}}`. Coordinates out of range read as
- * an unknown kind; a `live` without a valid `until_ms` reads as a pin.
+ * An `ademu.chat` `location` body (`ChatLocationBody`, AdemuMLS #941): `{lat, lon, is_current, accuracy_m?, live?:
+ * {until_ms, comment?}}`. The daemon decoded it; the fields are still checked, as for media. Coordinates out of range
+ * read as an unknown kind; a `live` without a valid `until_ms` reads as a pin.
  */
-function locationOf(ev: InboundFrame): InboundContent | undefined {
-  if (ev.protocol !== PROTOCOL_CHAT || typeof ev.body !== "object" || ev.body === null) return undefined;
-  const b = ev.body as Record<string, unknown>;
-  if (b.type !== "location") return undefined;
+function locationOf(b: ChatLocationBody): InboundContent {
   if (!finite(b.lat) || !finite(b.lon) || Math.abs(b.lat) > 90 || Math.abs(b.lon) > 180) return { kind: "unknown" };
-  const live = typeof b.live === "object" && b.live !== null ? (b.live as Record<string, unknown>) : undefined;
+  const live: { until_ms?: unknown; comment?: unknown } | undefined = typeof b.live === "object" && b.live !== null ? b.live : undefined;
   const untilMs = live && finite(live.until_ms) && live.until_ms >= 0 && live.until_ms <= MAX_DATE_MS ? live.until_ms : undefined;
   return {
     kind: "location",
