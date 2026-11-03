@@ -141,16 +141,16 @@ export function createWatchTool(ctx: OpenClawPluginToolContext) {
     label: "Ademú location watch",
     name: WATCH_TOOL,
     description:
-      'Watch a live location the person asked about (share_id from ademu_live_locations). set with kind: "near" (place name, or lat/lon, + radius_m — fires when the person comes that close), "still" (minutes — fires when no new position arrives for that long: stopped, or no signal), "ended" (fires when the share ends) — each fires ONCE, as a new turn in which you tell the person who asked; or "report" (minutes ≥ 1, optional until_minutes) — the plugin itself posts where they are every N minutes, pauses when they stop, and ends with the share. list, cancel (id). Set only what the person asked for.',
+      'Watch a live location the person asked about (share_id from ademu_live_locations). set with kind: "near" (place name, or lat/lon, + radius_m — fires when the person comes that close), "eta" (place or lat/lon + minutes — fires when they are about that many minutes away at their recent pace, or arrive), "still" (minutes — fires when no new position arrives for that long: stopped, or no signal), "ended" (fires when the share ends) — each fires ONCE, as a new turn in which you tell the person who asked; or "report" (minutes ≥ 1, optional until_minutes) — the plugin itself posts where they are every N minutes, pauses when they stop, and ends with the share. list, cancel (id). Set only what the person asked for.',
     parameters: Type.Object({
       action: Type.Union([Type.Literal("set"), Type.Literal("list"), Type.Literal("cancel")]),
       share_id: Type.Optional(Type.String()),
-      kind: Type.Optional(Type.Union([Type.Literal("near"), Type.Literal("still"), Type.Literal("ended"), Type.Literal("report")])),
-      place: Type.Optional(Type.String({ description: "near: a place saved with ademu_place." })),
+      kind: Type.Optional(Type.Union([Type.Literal("near"), Type.Literal("eta"), Type.Literal("still"), Type.Literal("ended"), Type.Literal("report")])),
+      place: Type.Optional(Type.String({ description: "near / eta: a place saved with ademu_place." })),
       lat: Type.Optional(Type.Number()),
       lon: Type.Optional(Type.Number()),
       radius_m: Type.Optional(Type.Number({ description: `near: metres (default ${DEFAULT_RADIUS_M}).` })),
-      minutes: Type.Optional(Type.Number({ description: `still: minutes without a new position (default ${DEFAULT_STILL_MIN}); report: every how many minutes (≥ 1).` })),
+      minutes: Type.Optional(Type.Number({ description: `still: minutes without a new position (default ${DEFAULT_STILL_MIN}); eta: how many minutes away; report: every how many minutes (≥ 1).` })),
       until_minutes: Type.Optional(Type.Number({ description: "report: stop after this many minutes." })),
       id: Type.Optional(Type.String({ description: "cancel: the id from set or list." })),
     }),
@@ -186,9 +186,10 @@ export function createWatchTool(ctx: OpenClawPluginToolContext) {
         const m = minutes ?? DEFAULT_STILL_MIN;
         if (m < 1 || m > MAX_MINUTES) throw new LocationToolError(strings.liveLocation.badArgs);
         spec = { kind: "still", minutes: m };
-      } else if (kind === "near") {
+      } else if (kind === "near" || kind === "eta") {
         const radiusM = num(args.radius_m) ?? DEFAULT_RADIUS_M;
-        if (radiusM <= 0 || radiusM > MAX_RADIUS_M) throw new LocationToolError(strings.liveLocation.badArgs);
+        if (kind === "near" && (radiusM <= 0 || radiusM > MAX_RADIUS_M)) throw new LocationToolError(strings.liveLocation.badArgs);
+        if (kind === "eta" && (minutes === undefined || minutes < 1 || minutes > MAX_MINUTES)) throw new LocationToolError(strings.liveLocation.badArgs);
         const placeArg = readStringParam(args, "place")?.trim();
         let target: { lat: number; lon: number } | undefined;
         let label: string;
@@ -202,7 +203,10 @@ export function createWatchTool(ctx: OpenClawPluginToolContext) {
           label = "the point you were given";
         }
         if (!target) throw new LocationToolError(strings.liveLocation.badArgs);
-        spec = { kind: "near", point: { lat: target.lat, lon: target.lon }, label, radiusM };
+        spec =
+          kind === "near"
+            ? { kind: "near", point: { lat: target.lat, lon: target.lon }, label, radiusM }
+            : { kind: "eta", point: { lat: target.lat, lon: target.lon }, label, minutes: minutes! };
       } else throw new LocationToolError(strings.liveLocation.badArgs);
       const r = h.watches.addWatch(owner, spec);
       if ("already" in r) return text("That is already true now — nothing was set. Tell the person.");

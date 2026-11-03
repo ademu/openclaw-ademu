@@ -15,7 +15,7 @@ const frame = (body: unknown, lane = "durable", over: Record<string, unknown> = 
 let pseq = 1;
 const at = (lat: number, lon: number) => ({ type: "live_location", target_message_id: "l1", seq: pseq++, lat, lon, accuracy_m: 5, fix_at_ms: 0, until_ms: 10_000_000 });
 
-function world(opts: { visible?: () => boolean } = {}) {
+function world(opts: { visible?: () => boolean; wait?: () => Promise<void> } = {}) {
   let clock = 1_000_000;
   const timers: Array<{ fn: () => void; at: number; id: number }> = [];
   let tid = 0;
@@ -35,13 +35,16 @@ function world(opts: { visible?: () => boolean } = {}) {
       const i = timers.findIndex((t) => t.id === h);
       if (i >= 0) timers.splice(i, 1);
     },
-    canSee: async () => (opts.visible ? opts.visible() : true),
+    canSee: async () => {
+      await opts.wait?.();
+      return opts.visible ? opts.visible() : true;
+    },
     nameOf: (s: Share) => (s.sharerUserId === MARIA ? "Maria" : "?"),
     places: (c) => (c === DM ? [HOME] : []),
     send: async (c, text) => {
       sent.push([c, text]);
     },
-    fireTurn: async (o, text) => {
+    fireTurn: async (o, _share, text) => {
       turns.push([o.conversationId, o.setterUserId, text]);
     },
     log: (e) => logs.push(e),
@@ -112,6 +115,34 @@ describe("watches", () => {
     expect(x.turns[0]![2]).toContain("no new position for 10 min");
   });
 
+  it("eta: fires when the distance at the recent pace is within N minutes, or on arrival; never while standing", async () => {
+    const x = world();
+    x.w.addWatch(x.owner, { kind: "eta", point: HOME, label: "home", minutes: 5 });
+    // standing far away: no speed
+    await x.move(37.9, 23.73);
+    expect(x.turns).toEqual([]);
+    // ~10 m/s towards home: 2 km in ~3.3 min once within reach
+    const step = (lat: number, t: number) => x.loc.received(frame({ ...at(lat, 23.73), fix_at_ms: t }, "live"));
+    step(37.90, 0);
+    step(37.91, 111_000);
+    await x.flush();
+    expect(x.turns).toEqual([]); // 7.8 km at 10 m/s ≈ 13 min
+    step(37.96, 666_000);
+    await x.flush();
+    expect(x.turns).toHaveLength(1);
+    expect(x.turns[0]![2]).toContain("is about to reach home");
+  });
+
+  it("an ended watch is checked against the ended share: no turn where it cannot be seen", async () => {
+    let visible = true;
+    const x = world({ visible: () => visible });
+    x.w.addWatch(x.owner, { kind: "ended" });
+    visible = false;
+    x.loc.ended({ seq: seq++, group_id: G, message_id: "l1", reason: "stopped" });
+    await x.flush();
+    expect(x.turns).toEqual([]);
+  });
+
   it("a watch whose conversation no longer passes the visibility rule starts no turn", async () => {
     let visible = true;
     const x = world({ visible: () => visible });
@@ -127,6 +158,7 @@ describe("reports", () => {
   it("every N minutes the plugin sends the line itself: distance to the conversation's places, age, time left, map", async () => {
     const x = world();
     x.w.addReport(x.owner, 5 * 60_000);
+    await x.move(37.9, 23.7); // moving (live frames): a START alone followed by silence would read as still
     await x.advance(5 * 60_000);
     expect(x.sent).toHaveLength(1);
     expect(x.sent[0]![0]).toBe(DM);
@@ -142,7 +174,7 @@ describe("reports", () => {
     x.loc.ended({ seq: seq++, group_id: G, message_id: "l1", reason: "stopped" });
     x.loc.received(frame({ type: "delete", target_message_id: "l1" }));
     await x.advance(5 * 60_000);
-    expect(x.sent.map((s) => s[1])).toEqual(["⏹ Maria stopped sharing their location. Reports end here."]);
+    expect(x.sent.map((s) => s[1])).toEqual(["⏹ Maria stopped sharing their location. Reports end here.\nLast position: https://maps.apple.com/?ll=37.900000,23.700000"]);
   });
 
   it("still: a checkpoint then 3 min of silence pauses the reports; a checkpoint at the same place is not movement; moving away resumes", async () => {
@@ -179,6 +211,54 @@ describe("reports", () => {
     visible = false;
     await x.advance(5 * 60_000);
     expect(x.sent.map((s) => s[1])).toEqual(["⏹ Maria's location can no longer be shown here (this conversation's members changed). Reports end here."]);
+  });
+
+  it("a report asked for after the phone went still pauses from that checkpoint", async () => {
+    const x = world();
+    await x.move(37.91, 23.7, "durable");
+    await x.advance(60_000);
+    x.w.addReport(x.owner, 60_000);
+    await x.advance(STILL_AFTER_MS);
+    expect(x.sent.filter((s) => s[1].startsWith("⏸"))).toHaveLength(1);
+    const n = x.sent.length;
+    await x.advance(10 * 60_000);
+    expect(x.sent.length).toBe(n);
+  });
+
+  it("a reconnect snapshot re-evaluates: a stale checkpoint timer is dropped, a paused report sees the new position", async () => {
+    const x = world();
+    x.w.addReport(x.owner, 60 * 60_000);
+    await x.move(37.91, 23.7, "durable");
+    await x.advance(STILL_AFTER_MS);
+    expect(x.sent.at(-1)![1]).toMatch(/^⏸/);
+    x.loc.seed({ shares: [{ message_id: "l1", group_id: G, sender_user_id: MARIA, until_ms: 10_000_000, share_seq: 99, lat: 37.95, lon: 23.7, fix_at_ms: 0 }], as_of: seq++ });
+    await x.flush();
+    expect(x.sent.at(-1)![1]).toBe("▶️ Maria is moving again.");
+    const n = x.sent.length;
+    await x.advance(STILL_AFTER_MS * 2); // no checkpoint since the snapshot: no new pause
+    expect(x.sent.length).toBe(n);
+  });
+
+  it("until fires on its own time, not at the next report", async () => {
+    const x = world();
+    x.w.addReport(x.owner, 60 * 60_000, 1_000_000 + 5 * 60_000);
+    await x.move(37.9, 23.7);
+    await x.advance(6 * 60_000);
+    expect(x.sent.map((s) => s[1])).toEqual(["⏹ Reports on Maria end here, as asked."]);
+  });
+
+  it("nothing is sent after stop, not even a send that was waiting on the visibility check", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const x = world({ wait: () => gate });
+    x.w.addReport(x.owner, 60_000);
+    await x.move(37.9, 23.7);
+    await x.advance(60_000); // the first report now waits on the check
+    x.loc.ended({ seq: seq++, group_id: G, message_id: "l1", reason: "stopped" }); // and its last message queues behind it
+    x.w.stop();
+    release();
+    await x.advance(5 * 60_000);
+    expect(x.sent).toEqual([]);
   });
 
   it("until and cancel end it; stop silences everything", async () => {

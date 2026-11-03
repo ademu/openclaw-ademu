@@ -269,13 +269,13 @@ async function runWithLease(
       send: async (groupId, text) => {
         await sendAdemuText({ client: session!.client, groupId, text });
       },
-      fireTurn: async (owner, text) => {
-        const share = locations.get(owner.shareId);
+      fireTurn: async (owner, share, text) => {
         await noteTurn?.({
           groupId: owner.conversationId,
           senderUserId: owner.setterUserId,
           text,
-          mayDeliver: async () => (share ? canSee(owner.conversationId, share) : true),
+          // The share as it was when the watch fired, ended or not: never "allowed" because it is gone.
+          mayDeliver: () => canSee(owner.conversationId, share),
         });
       },
       log,

@@ -30,6 +30,8 @@ export type Share = Point & {
   lastLane: "live" | "durable" | "seeded";
   /** This gateway's clock when the latest position arrived. */
   lastAtMs: number;
+  /** Recent ground speed in m/s (smoothed over the positions' own fix times); undefined until two fixes. */
+  speedMps: number | undefined;
 };
 
 /** The `get_live_locations` answer (AdemuMLS PROTOCOL.md `get_live_locations`). */
@@ -69,6 +71,10 @@ const validPoint = (lat: unknown, lon: unknown): boolean => finite(lat) && finit
 const validSeq = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 
 const EARTH_RADIUS_M = 6_371_008.8;
+/** Two fixes closer in time than this give no speed (GPS jitter would dominate). */
+const SPEED_MIN_INTERVAL_S = 5;
+/** Weight of the newest speed sample (an exponential average: minutes-away follows the recent pace). */
+const SPEED_SMOOTHING = 0.5;
 
 /** Great-circle distance in metres (haversine). */
 export function distanceMeters(a: Point, b: Point): number {
@@ -79,7 +85,8 @@ export function distanceMeters(a: Point, b: Point): number {
   return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-export type ShareChange = { kind: "moved" | "ended"; share: Share; reason?: string };
+/** `moved`: a new position; `seeded`: a share that survived a reconnect, at the snapshot's position; `ended`. */
+export type ShareChange = { kind: "moved" | "seeded" | "ended"; share: Share; reason?: string };
 
 export class LiveLocations {
   readonly #now: () => number;
@@ -150,10 +157,13 @@ export class LiveLocations {
         fixAtMs: finite(s.fix_at_ms) ? s.fix_at_ms : now,
         lastLane: "seeded",
         lastAtMs: now,
+        speedMps: undefined,
       });
     }
     this.#asOf = validSeq(snapshot.as_of) ? snapshot.as_of : -1;
     for (const [id, old] of before) if (!this.#shares.has(id)) this.#emit({ kind: "ended", share: { ...old }, reason: goneReason });
+    // A share that survived the outage may be somewhere else now: its watches and reports re-evaluate.
+    for (const [id, s] of this.#shares) if (before.has(id)) this.#emit({ kind: "seeded", share: { ...s } });
     this.#expire();
   }
 
@@ -194,6 +204,7 @@ export class LiveLocations {
       fixAtMs: ev.created_at_ms,
       lastLane: "durable",
       lastAtMs: this.#now(),
+      speedMps: undefined,
     });
     this.#expire();
   }
@@ -202,11 +213,17 @@ export class LiveLocations {
     if (typeof b.target_message_id !== "string" || !validSeq(b.seq) || !validPoint(b.lat, b.lon)) return;
     const share = this.#shares.get(normalizeId(b.target_message_id));
     if (!share || share.groupId !== normalizeId(ev.group_id) || share.sharerUserId !== normalizeId(ev.sender.user_id) || b.seq <= share.seq) return;
+    const fixAtMs = finite(b.fix_at_ms) ? b.fix_at_ms : this.#now();
+    const dtS = (fixAtMs - share.fixAtMs) / 1000;
+    if (dtS >= SPEED_MIN_INTERVAL_S) {
+      const inst = distanceMeters(share, { lat: b.lat as number, lon: b.lon as number }) / dtS;
+      share.speedMps = share.speedMps === undefined ? inst : SPEED_SMOOTHING * inst + (1 - SPEED_SMOOTHING) * share.speedMps;
+    }
     share.seq = b.seq;
     share.lat = b.lat as number;
     share.lon = b.lon as number;
     share.accuracyM = finite(b.accuracy_m) ? b.accuracy_m : undefined;
-    share.fixAtMs = finite(b.fix_at_ms) ? b.fix_at_ms : this.#now();
+    share.fixAtMs = fixAtMs;
     if (finite(b.until_ms)) share.untilMs = b.until_ms;
     share.lastLane = ev.lane === "live" ? "live" : "durable";
     share.lastAtMs = this.#now();

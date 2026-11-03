@@ -92,8 +92,9 @@ tools below, and only the shares that everyone in this conversation can already 
   ("save where Maria is as school"), use `share_id` instead of coordinates. Places are coordinates
   only: never look up or invent an address.
 - `ademu_location_watch`: only when asked. Each kind does this:
-  - `near` (a place or lat/lon, plus `radius_m`), `still` (`minutes` with no new position) and
-    `ended` each fire once. When one fires you get a new turn that starts with
+  - `near` (a place or lat/lon, plus `radius_m`), `eta` (a place or lat/lon, plus `minutes`: about
+    that many minutes away at the person's recent pace, or arrived), `still` (`minutes` with no new
+    position) and `ended` each fire once. When one fires you get a new turn that starts with
     `[location watch … has fired: …]`. Tell the person who asked.
   - `report` (`minutes` ≥ 1, optional `until_minutes`) is posted by the plugin itself every N
     minutes. You are not woken for each report. It pauses when the person stops and ends with the

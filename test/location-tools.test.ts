@@ -82,8 +82,9 @@ describe("ademu_location_watch", () => {
     const tool = () => createWatchTool(x.ctx(DM));
     expect(await x.run(tool(), { action: "set", share_id: "l1", kind: "near", place: "home", radius_m: 500 })).toMatch(/^Watch w\d+ set \(near\)/);
     expect(await x.run(tool(), { action: "set", share_id: "l1", kind: "still" })).toMatch(/^Watch w\d+ set \(still\)/);
+    expect(await x.run(tool(), { action: "set", share_id: "l1", kind: "eta", place: "Home", minutes: 5 })).toMatch(/^Watch w\d+ set \(eta\)/);
     expect(await x.run(tool(), { action: "set", share_id: "l1", kind: "report", minutes: 5 })).toMatch(/^Report r\d+ set: every 5 min/);
-    expect((await x.run(tool(), { action: "list" })).split("\n")).toHaveLength(3);
+    expect((await x.run(tool(), { action: "list" })).split("\n")).toHaveLength(4);
     expect(await x.run(createWatchTool(x.ctx(WORK)), { action: "list" })).toBe("No watches or reports in this conversation.");
     const id = x.watches.list(DM)[0]!.id;
     expect(await x.run(createWatchTool(x.ctx(WORK)), { action: "cancel", id })).toMatch(/^No watch or report/);
@@ -95,6 +96,7 @@ describe("ademu_location_watch", () => {
     await expect(x.run(createWatchTool(x.ctx(WORK)), { action: "set", share_id: "l1", kind: "ended" })).rejects.toThrow(/no such live location/);
     await expect(x.run(createWatchTool(x.ctx(DM)), { action: "set", share_id: "l1", kind: "report", minutes: 0.5 })).rejects.toThrow(/out of range/);
     await expect(x.run(createWatchTool(x.ctx(DM)), { action: "set", share_id: "l1", kind: "near", place: "mars" })).rejects.toThrow(/No place named "mars"/);
+    await expect(x.run(createWatchTool(x.ctx(DM)), { action: "set", share_id: "l1", kind: "eta", lat: 1, lon: 1 })).rejects.toThrow(/out of range/);
     await expect(x.run(createWatchTool(x.ctx(DM, { requesterSenderId: undefined })), { action: "set", share_id: "l1", kind: "ended" })).rejects.toThrow(/only be read while answering/);
     expect(x.watches.list(DM)).toEqual([]);
   });

@@ -29,11 +29,17 @@ export const MIN_REPORT_EVERY_MS = 60_000;
 export const STILL_AFTER_MS = 3 * 60_000;
 /** How far from the still point counts as moving again (or the fix's accuracy, if larger). */
 export const MOVED_AGAIN_M = 50;
+/** Within this distance an `eta` watch counts as arrived, whatever the speed. */
+export const ARRIVED_M = 100;
+/** Below this speed (m/s) nobody is on their way: an `eta` watch waits. */
+export const MOVING_MPS = 0.5;
 
 export type Place = Point & { name: string };
 
 export type WatchSpec =
   | { kind: "near"; point: Point; label: string; radiusM: number }
+  /** "N minutes away": distance over the recent speed, no routing (#33); arriving counts too. */
+  | { kind: "eta"; point: Point; label: string; minutes: number }
   | { kind: "still"; minutes: number }
   | { kind: "ended" };
 
@@ -45,6 +51,7 @@ type Report = Owner & {
   id: string;
   everyMs: number;
   untilMs: number | undefined;
+  untilTimer?: unknown;
   done: boolean;
   /** Set while the sharer seems still: the point they stopped at. */
   stillAt: Point | undefined;
@@ -66,8 +73,12 @@ export type LocationWatchesDeps = {
   places: (conversationId: string) => Place[];
   /** The plugin's own message into a conversation (a normal alert). */
   send: (conversationId: string, text: string) => Promise<void>;
-  /** One agent turn in the conversation, answering the person who set the watch. */
-  fireTurn: (owner: Owner, text: string) => Promise<void>;
+  /**
+   * One agent turn in the conversation, answering the person who set the watch. `share` is the share as it was when
+   * the watch fired (an ended one included): the turn's delivery checks visibility against it, never "allowed"
+   * because the share is gone.
+   */
+  fireTurn: (owner: Owner, share: Share, text: string) => Promise<void>;
   /** Structural fields only: never coordinates, names or texts. */
   log: (event: string, fields?: Record<string, string | number | boolean>) => void;
 };
@@ -111,7 +122,7 @@ export class LocationWatches {
   addWatch(owner: Owner, spec: WatchSpec): { id: string } | { already: true } {
     const share = this.#d.locations.get(owner.shareId);
     if (!share) throw new Error("unknown share");
-    if (spec.kind === "near" && distanceMeters(share, spec.point) <= spec.radiusM) return { already: true };
+    if (this.#holds(spec, share)) return { already: true };
     const w: Watch = { ...this.#norm(owner), id: `w${this.#next++}`, spec };
     this.#watches.set(w.id, w);
     if (spec.kind === "still") this.#armStill(w, share);
@@ -131,6 +142,16 @@ export class LocationWatches {
     };
     this.#reports.set(r.id, r);
     this.#schedule(r);
+    if (untilMs !== undefined) {
+      r.untilTimer = this.#d.setTimer(() => {
+        r.untilTimer = undefined;
+        const s = this.#d.locations.get(r.shareId);
+        this.#finish(r, strings.liveLocation.ended.until(s ? this.#d.nameOf(s) : ""));
+      }, Math.max(0, untilMs - this.#d.now()));
+    }
+    // A share that already went still before the report was asked for: its checkpoint counts from when it came.
+    const share = this.#d.locations.get(r.shareId);
+    if (share) this.#armStillReport(r, share);
     return { id: r.id };
   }
 
@@ -163,7 +184,10 @@ export class LocationWatches {
     this.#stopped = true;
     this.#unsubscribe();
     for (const w of this.#watches.values()) if (w.timer !== undefined) this.#d.clearTimer(w.timer);
-    for (const r of this.#reports.values()) this.#clearReport(r);
+    for (const r of this.#reports.values()) {
+      r.done = true;
+      this.#clearReport(r);
+    }
     this.#watches.clear();
     this.#reports.clear();
   }
@@ -175,26 +199,45 @@ export class LocationWatches {
     const id = c.share.id;
     if (c.kind === "ended") {
       for (const w of [...this.#watches.values()].filter((x) => x.shareId === id)) {
-        if (w.spec.kind === "ended") this.#fire(w, strings.liveLocation.firedWhat.ended(this.#d.nameOf(c.share)));
+        if (w.spec.kind === "ended") this.#fire(w, c.share, strings.liveLocation.firedWhat.ended(this.#d.nameOf(c.share)));
         else this.#dropWatch(w);
       }
       const why = strings.liveLocation.ended;
       const reason = c.reason ?? "stopped";
       const text = reason === "expired" ? why.expired : reason === "deleted" ? why.deleted : reason === "ended_while_away" ? why.away : why.stopped;
-      for (const r of [...this.#reports.values()].filter((x) => x.shareId === id && !x.done)) this.#finish(r, text(this.#d.nameOf(c.share)));
+      for (const r of [...this.#reports.values()].filter((x) => x.shareId === id && !x.done)) this.#finish(r, text(this.#d.nameOf(c.share)), c.share);
       return;
     }
     const share = c.share;
     for (const w of [...this.#watches.values()].filter((x) => x.shareId === id)) {
-      if (w.spec.kind === "near") {
-        const m = distanceMeters(share, w.spec.point);
-        if (m <= w.spec.radiusM) this.#fire(w, strings.liveLocation.firedWhat.near(this.#d.nameOf(share), w.spec.label, strings.liveLocation.distance(w.spec.radiusM)));
-      } else if (w.spec.kind === "still") this.#armStill(w, share);
+      if (w.spec.kind === "still") this.#armStill(w, share);
+      else if (this.#holds(w.spec, share)) {
+        const who = this.#d.nameOf(share);
+        const what =
+          w.spec.kind === "near"
+            ? strings.liveLocation.firedWhat.near(who, w.spec.label, strings.liveLocation.distance(w.spec.radiusM))
+            : w.spec.kind === "eta"
+              ? strings.liveLocation.firedWhat.eta(who, w.spec.label, strings.liveLocation.distance(distanceMeters(share, w.spec.point)))
+              : "";
+        if (what) this.#fire(w, share, what);
+      }
     }
     for (const r of [...this.#reports.values()].filter((x) => x.shareId === id && !x.done)) this.#moved(r, share);
   }
 
   // ------------------------------------------------------------------------------------------ watches
+
+  /** Whether a position-based watch's condition holds for the share now. */
+  #holds(spec: WatchSpec, share: Share): boolean {
+    if (spec.kind === "near") return distanceMeters(share, spec.point) <= spec.radiusM;
+    if (spec.kind === "eta") {
+      const m = distanceMeters(share, spec.point);
+      if (m <= ARRIVED_M) return true;
+      const v = share.speedMps;
+      return v !== undefined && v >= MOVING_MPS && m / v <= spec.minutes * 60;
+    }
+    return false;
+  }
 
   #norm(owner: Owner): Owner {
     return { conversationId: normalizeId(owner.conversationId), setterUserId: normalizeId(owner.setterUserId), shareId: normalizeId(owner.shareId) };
@@ -207,7 +250,7 @@ export class LocationWatches {
     w.timer = this.#d.setTimer(() => {
       w.timer = undefined;
       const s = this.#d.locations.get(w.shareId);
-      if (s) this.#fire(w, strings.liveLocation.firedWhat.still(this.#d.nameOf(s), minutes));
+      if (s) this.#fire(w, s, strings.liveLocation.firedWhat.still(this.#d.nameOf(s), minutes));
     }, minutes * 60_000 - Math.max(0, this.#d.now() - share.lastAtMs));
   }
 
@@ -217,17 +260,17 @@ export class LocationWatches {
   }
 
   /** Claimed before anything asynchronous: a watch fires at most once. */
-  #fire(w: Watch, what: string): void {
+  #fire(w: Watch, share: Share, what: string): void {
     if (!this.#watches.has(w.id)) return;
     this.#dropWatch(w);
-    const share = this.#d.locations.get(w.shareId);
     void (async () => {
-      // A share that just ended is no longer in the state; its `ended` watch carries no position, so it needs no check.
-      if (share && !(await this.#d.canSee(w.conversationId, share))) {
+      // Checked against the share as it was when the watch fired — an ended one too (the turn may still say where).
+      if (this.#stopped || !(await this.#d.canSee(w.conversationId, share))) {
         this.#d.log("location_watch_hidden", { kind: w.spec.kind });
         return;
       }
-      await this.#d.fireTurn({ conversationId: w.conversationId, setterUserId: w.setterUserId, shareId: w.shareId }, strings.liveLocation.fired(what));
+      if (this.#stopped) return;
+      await this.#d.fireTurn({ conversationId: w.conversationId, setterUserId: w.setterUserId, shareId: w.shareId }, share, strings.liveLocation.fired(what));
       this.#d.log("location_watch_fired", { kind: w.spec.kind });
     })().catch((err: unknown) => this.#d.log("location_watch_failed", { kind: w.spec.kind, errorClass: err instanceof Error ? err.name : typeof err }));
   }
@@ -274,47 +317,59 @@ export class LocationWatches {
 
   /** Only after a durable checkpoint: the phone sends one on going still, then nothing (§4.29). */
   #armStillReport(r: Report, share: Share): void {
-    if (share.lastLane !== "durable") return;
+    if (share.lastLane !== "durable" || r.done) return;
+    if (r.stillTimer !== undefined) this.#d.clearTimer(r.stillTimer);
     r.stillTimer = this.#d.setTimer(() => {
       r.stillTimer = undefined;
       const s = this.#d.locations.get(r.shareId);
       if (!s || r.done || r.stillAt) return;
       r.stillAt = { lat: s.lat, lon: s.lon };
       this.#enqueue(r, s, () => strings.liveLocation.still(this.#d.nameOf(s), mapLink(s)));
-    }, STILL_AFTER_MS);
+    }, Math.max(0, STILL_AFTER_MS - Math.max(0, this.#d.now() - share.lastAtMs)));
   }
 
   /** One send at a time per report, each after a fresh visibility check; a failed check ends the report. */
   #enqueue(r: Report, share: Share, text: () => string): void {
     r.chain = r.chain.then(async () => {
-      if (r.done) return;
+      if (r.done || this.#stopped) return;
+      if (r.untilMs !== undefined && this.#d.now() >= r.untilMs) {
+        this.#finish(r, strings.liveLocation.ended.until(this.#d.nameOf(share)));
+        return;
+      }
       if (!(await this.#d.canSee(r.conversationId, share))) {
         this.#finish(r, strings.liveLocation.ended.hidden(this.#d.nameOf(share)));
         return;
       }
-      if (r.done) return;
+      if (r.done || this.#stopped) return;
       await this.#d.send(r.conversationId, text()).catch((err: unknown) => this.#d.log("location_report_failed", { errorClass: err instanceof Error ? err.name : typeof err }));
     });
   }
 
   #clearReport(r: Report): void {
-    if (r.tick !== undefined) this.#d.clearTimer(r.tick);
-    if (r.stillTimer !== undefined) this.#d.clearTimer(r.stillTimer);
+    for (const t of [r.tick, r.stillTimer, r.untilTimer]) if (t !== undefined) this.#d.clearTimer(t);
     r.tick = undefined;
     r.stillTimer = undefined;
+    r.untilTimer = undefined;
   }
 
-  /** The one terminal transition: marked done synchronously, its last message (if any) after the sends in flight. */
-  #finish(r: Report, lastText: string | undefined): void {
+  /**
+   * The one terminal transition: marked done synchronously, its last message (if any) after the sends in flight. With
+   * `share` (the share ended), the message ends with its last position — only if the conversation still passes the
+   * visibility rule.
+   */
+  #finish(r: Report, lastText: string | undefined, share?: Share): void {
     if (r.done) return;
     r.done = true;
     this.#clearReport(r);
     this.#reports.delete(r.id);
     this.#d.log("location_report_ended", { with_message: lastText !== undefined });
     if (lastText === undefined || this.#stopped) return;
-    r.chain = r.chain.then(() =>
-      this.#d.send(r.conversationId, lastText).catch((err: unknown) => this.#d.log("location_report_failed", { errorClass: err instanceof Error ? err.name : typeof err })),
-    );
+    r.chain = r.chain.then(async () => {
+      if (this.#stopped) return;
+      const where = share && (await this.#d.canSee(r.conversationId, share)) ? `\n${strings.liveLocation.lastPosition(mapLink(share))}` : "";
+      if (this.#stopped) return;
+      await this.#d.send(r.conversationId, lastText + where).catch((err: unknown) => this.#d.log("location_report_failed", { errorClass: err instanceof Error ? err.name : typeof err }));
+    });
   }
 }
 
