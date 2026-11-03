@@ -8,7 +8,9 @@
 // agent; a failed lookup is "no"): there the position reaches nobody but its own sharer, whatever conversation the
 // share lives in. In a room it refuses — membership cannot prove who sees a share (a member added mid-share shows
 // nothing, AdemuMLS DECISIONS §4.29), so a room answer could reach someone the person never shared with.
-// Nothing here is logged with ids or coordinates.
+// Accepted residual (owner, 2026-11-03): Ademú has no direct-chat marker — a 1-1 is a two-member conversation — and
+// the reply is not re-checked at delivery, so a third member added in the seconds between this call and the agent's
+// reply would see the asker's own position. Nothing here is logged with ids or coordinates.
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { Type } from "typebox";
 import { CHANNEL_ID } from "../config.js";
