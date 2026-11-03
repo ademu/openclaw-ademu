@@ -42,6 +42,8 @@ both together (the flag day).
 - **A location reads as one.** A pin is a turn with its coordinates (`[location: lat, lon (±N m) — the
   sender's current position]`, or a place the sender picked); a live share's START says until when,
   with its comment on the next line. Before, both read as a message of an unknown kind.
+- The skill tells the agent how to answer a location: one short acknowledgement and a map link, no
+  invented address, and for a live location never a promise to follow it (it sees only the start).
 - The location bodies and `location_ended` are read through `@ademu/adc-client` 1.1's types (`chatBodyOf`
   knows `location` and `live_location`; `location_ended` is a known event, logged by name and never acked).
 
