@@ -1,5 +1,5 @@
-// ademu_my_location (owner, 2026-11-03): the asker's OWN live location, read from the daemon per call, only where
-// everyone in the conversation can already see it.
+// ademu_my_location (owner, 2026-11-03): the asker's OWN live location, read from the daemon per call, only in the
+// asker's 1-1 with the agent.
 import { afterEach, describe, expect, it } from "vitest";
 import { registerLiveAccount, resetLiveAccountsForTests } from "../src/outbound.js";
 import { createMyLocationTool } from "../src/tools/my-location.js";
@@ -28,7 +28,7 @@ const share = (over: Record<string, unknown> = {}) => ({
 });
 
 function setup(opts: { shares?: unknown[]; services?: string[]; members?: Record<string, string[]>; fail?: boolean } = {}) {
-  const members = opts.members ?? { [DM]: [TASOS, AGENT], [FAMILY]: [TASOS, MARIA, AGENT], [WORK]: [TASOS, AGENT, "giannis"] };
+  const members = opts.members ?? { [DM]: [TASOS, AGENT], [FAMILY]: [TASOS, MARIA, AGENT], [WORK]: [TASOS, AGENT, "giannis"], ["99999999-9999-4999-8999-999999999999"]: [MARIA, AGENT] };
   registerLiveAccount("iris", {
     client: {} as never,
     locations: {
@@ -39,7 +39,7 @@ function setup(opts: { shares?: unknown[]; services?: string[]; members?: Record
       },
       getMembers: async ({ group_id }: { group_id: string }) => {
         if (!(group_id in members)) throw new Error("not_found");
-        return { members: members[group_id]!.map((user_id) => ({ user_id })) } as never;
+        return { members: members[group_id]!.map((user_id) => ({ user_id, kind: user_id === AGENT ? "agent" : "human" })) } as never;
       },
     } as never,
   });
@@ -57,20 +57,26 @@ describe("ademu_my_location", () => {
     );
   });
 
-  it("never someone else's share, even in a chat where it is visible", async () => {
+  it("never someone else's share", async () => {
     const x = setup({ shares: [share({ sender_user_id: MARIA, group_id: FAMILY })] });
-    expect(await x.run(x.ctx(FAMILY, TASOS))).toMatch(/^They are not sharing a live location/);
+    expect(await x.run(x.ctx(DM, TASOS))).toMatch(/^They are not sharing a live location/);
   });
 
-  it("a share of a group the asker's 1-1 members are all in is readable there; a room with an outsider is not", async () => {
+  it("in the 1-1 it reads the asker's share of any conversation; in a group it refuses, even the group the share is in", async () => {
     const x = setup({ shares: [share({ group_id: FAMILY })] });
     expect(await x.run(x.ctx(DM))).toMatch(/^Their live location: /);
-    expect(await x.run(x.ctx(WORK))).toMatch(/^They are not sharing/);
+    expect(await x.run(x.ctx(FAMILY))).toMatch(/only read in their 1-1 chat with you/);
+    expect(await x.run(x.ctx(WORK))).toMatch(/only read in their 1-1 chat with you/);
+  });
+
+  it("someone else's 1-1 with the agent is not the asker's", async () => {
+    const x = setup();
+    expect(await x.run(x.ctx("99999999-9999-4999-8999-999999999999", TASOS))).toMatch(/only read in their 1-1 chat with you/);
   });
 
   it("a failed membership lookup, an expired share, an older daemon, a failed query and a turn without a sender all refuse", async () => {
-    const unknown = setup({ shares: [share({ group_id: "77777777-7777-4777-8777-777777777777" })] });
-    expect(await unknown.run(unknown.ctx(DM))).toMatch(/^They are not sharing/);
+    const lookup = setup();
+    expect(await lookup.run(lookup.ctx("88888888-8888-4888-8888-888888888888"))).toMatch(/only read in their 1-1 chat with you/);
     const expired = setup({ shares: [share({ until_ms: NOW - 1 })] });
     expect(await expired.run(expired.ctx(DM))).toMatch(/^They are not sharing/);
     const old = setup({ services: ["get_members"] });

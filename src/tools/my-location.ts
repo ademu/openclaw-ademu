@@ -4,9 +4,11 @@
 // The plugin keeps no position state: a live share's positions never reach the agent (#35), and this asks the
 // daemon at call time (`get_live_locations`, adc ≥ 1.1.0, AdemuMLS #941), which holds each share's latest applied
 // position. Whose share it is comes from the host's trusted `requesterSenderId`, never from the model's arguments.
-// It answers only in a conversation whose every member can already see that share (memberships read fresh, a
-// failed lookup is "no"): asked in the chat the share was sent to, it answers; in a room with someone who cannot
-// see it, it does not. Nothing here is logged with ids or coordinates.
+// It answers only in the asker's 1-1 with this agent (the conversation's fresh members are exactly the asker and an
+// agent; a failed lookup is "no"): there the position reaches nobody but its own sharer, whatever conversation the
+// share lives in. In a room it refuses — membership cannot prove who sees a share (a member added mid-share shows
+// nothing, AdemuMLS DECISIONS §4.29), so a room answer could reach someone the person never shared with.
+// Nothing here is logged with ids or coordinates.
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { Type } from "typebox";
 import { CHANNEL_ID } from "../config.js";
@@ -42,19 +44,11 @@ function locationClientFor(ctx: OpenClawPluginToolContext): LocationClient {
   throw new MyLocationToolError(strings.myLocation.notRunning);
 }
 
-/**
- * Every member of `conversationId` is a member of `groupId` (fresh lookups; a failure is "no"). A share sent to this
- * very conversation needs no lookup: its members are the share's audience by definition (the subset is reflexive), and
- * the daemon passes a group's live shares only while the agent is in it — a lookup could only refuse what every
- * member already sees.
- */
-async function everyoneCanSee(client: LocationClient, conversationId: string, groupId: string): Promise<boolean> {
-  if (normalizeId(groupId) === conversationId) return true;
+/** The conversation is the asker's 1-1 with this agent: exactly two members, the asker and an agent (fresh lookup). */
+async function isAskersOneToOne(client: LocationClient, conversationId: string, asker: string): Promise<boolean> {
   try {
-    const [here, there] = await Promise.all([client.getMembers({ group_id: conversationId }), client.getMembers({ group_id: groupId })]);
-    if (here.members.length === 0) return false;
-    const inGroup = new Set(there.members.map((m) => normalizeId(m.user_id)));
-    return here.members.every((m) => inGroup.has(normalizeId(m.user_id)));
+    const { members } = await client.getMembers({ group_id: conversationId });
+    return members.length === 2 && members.some((m) => normalizeId(m.user_id) === asker) && members.some((m) => normalizeId(m.user_id) !== asker && m.kind === "agent");
   } catch {
     return false;
   }
@@ -86,11 +80,11 @@ export function createMyLocationTool(ctx: OpenClawPluginToolContext, now: () => 
       } catch {
         throw new MyLocationToolError(strings.myLocation.failed);
       }
+      if (!(await isAskersOneToOne(client, conversation, asker))) return text(strings.myLocation.notOneToOne, { reason: "not_one_to_one" });
       const t = now();
       const mine = shares.filter((s) => normalizeId(s.sender_user_id) === asker && s.until_ms > t);
       const lines: string[] = [];
       for (const s of mine) {
-        if (!(await everyoneCanSee(client, conversation, s.group_id))) continue;
         lines.push(
           strings.myLocation.share({
             coords: `${s.lat}, ${s.lon}`,

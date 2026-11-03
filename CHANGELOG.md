@@ -46,8 +46,8 @@ both together (the flag day).
   invented address, and for a live location never a promise to follow it.
 - **`ademu_my_location`: where am I now.** The person asking gets the latest position of the live
   location they themselves share. The tool asks the daemon per call (`get_live_locations`, adc ≥ 1.1.0)
-  and keeps no state. It answers only in a conversation whose every member can already see that share,
-  and never about anyone else. Owner, 2026-11-03: "where is X" for other people stays out.
+  and keeps no state. It answers only in the asker's 1-1 with the agent, never in a group (membership
+  cannot prove who sees a share), and never about anyone else. Owner, 2026-11-03: "where is X" for other people stays out.
 - The location bodies and `location_ended` are read through `@ademu/adc-client` 1.1's types (`chatBodyOf`
   knows `location` and `live_location`; `location_ended` is a known event, logged by name and never acked).
 
