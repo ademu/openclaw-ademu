@@ -38,6 +38,50 @@ describe("describeContent", () => {
   });
 });
 
+describe("a location (AdemuMLS #941; bodies from ipc_v2.ndjson lines 157–158)", () => {
+  const pin = { accuracy_m: 12.5, is_current: true, lat: 50.064712, lon: 19.944981, type: "location" };
+  const start = { accuracy_m: 6.5, is_current: true, lat: 37.9416, live: { comment: "On my way", until_ms: 1_793_793_600_000 }, lon: 23.7392, type: "location" };
+
+  it("a pin reads its coordinates; a live share's START its end time, with the comment as its caption", () => {
+    expect(describeContent(chat(pin))).toEqual({ kind: "location", location: { lat: 50.064712, lon: 19.944981, isCurrent: true, accuracyM: 12.5, live: undefined } });
+    expect(describeContent(chat(start))).toEqual({
+      kind: "location",
+      location: { lat: 37.9416, lon: 23.7392, isCurrent: true, accuracyM: 6.5, live: { untilMs: 1_793_793_600_000 } },
+      comment: "On my way",
+    });
+    expect(describeContent(chat({ type: "location", lat: 1, lon: 2, is_current: false }))).toEqual({
+      kind: "location",
+      location: { lat: 1, lon: 2, isCurrent: false, accuracyM: undefined, live: undefined },
+    });
+  });
+
+  it("coordinates out of range or not numbers read as an unknown kind; a live without an end reads as a pin", () => {
+    expect(describeContent(chat({ type: "location", lat: 91, lon: 0, is_current: false }))).toEqual({ kind: "unknown" });
+    expect(describeContent(chat({ type: "location", lat: "1", lon: 0, is_current: false }))).toEqual({ kind: "unknown" });
+    expect(describeContent(chat({ type: "location", lat: 0, lon: Infinity, is_current: false }))).toEqual({ kind: "unknown" });
+    expect(describeContent(chat({ type: "location", lat: 0, lon: 0, is_current: true, live: { comment: "x" } }))).toEqual({
+      kind: "location",
+      location: { lat: 0, lon: 0, isCurrent: true, accuracyM: undefined, live: undefined },
+    });
+    expect(describeContent({ protocol: "example.cursor", body: pin })).toEqual({ kind: "unknown" });
+  });
+
+  it("renders a pin, a picked place and a live START; the comment follows on its own line", () => {
+    const text = (body: unknown) => {
+      const c = describeContent(chat(body));
+      if (c.kind === "text") throw new Error("text");
+      return bodyForAgent(c.kind === "location" ? (c.comment ?? "") : "", c);
+    };
+    expect(text(pin)).toBe("[location: 50.064712, 19.944981 (±13 m) — the sender's current position]");
+    expect(text({ type: "location", lat: 1, lon: 2, is_current: false })).toBe("[location: 1, 2 — a place the sender picked]");
+    expect(text(start)).toBe("[started sharing live location until 2026-11-04T12:00:00Z: 37.9416, 23.7392 (±7 m)]\nOn my way");
+  });
+
+  it("a live_location position is not described as a location", () => {
+    expect(describeContent(chat({ type: "live_location", target_message_id: "l2", lat: 1, lon: 2, seq: 3, until_ms: 1, fix_at_ms: 1, accuracy_m: 1 }))).toEqual({ kind: "unknown" });
+  });
+});
+
 describe("rendering", () => {
   it("formats sizes", () => {
     expect(formatSize(0)).toBe("");
