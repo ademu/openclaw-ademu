@@ -8,7 +8,7 @@ plugin bundles no daemon. Releases up to 0.1.0 pinned the exact `@ademu/adc-bin`
 ## [Unreleased]
 
 Requires adc ≥ **1.0.0** (the installed device host; the plugin bundles none) and
-`@ademu/adc-client` / `@ademu/adc-control` 1.0 — the device session speaks **envelope v2**
+`@ademu/adc-client` / `@ademu/adc-control` ≥ 1.1 (1.0 plus #941's location types) — the device session speaks **envelope v2**
 (AdemuMLS #978). A 1.0 daemon refuses older plugins and this plugin refuses an older daemon: upgrade
 both together (the flag day).
 
@@ -42,6 +42,8 @@ both together (the flag day).
 - **A location reads as one.** A pin is a turn with its coordinates (`[location: lat, lon (±N m) — the
   sender's current position]`, or a place the sender picked); a live share's START says until when,
   with its comment on the next line. Before, both read as a message of an unknown kind.
+- The location bodies and `location_ended` are read through `@ademu/adc-client` 1.1's types (`chatBodyOf`
+  knows `location` and `live_location`; `location_ended` is a known event, logged by name and never acked).
 
 Requires adc ≥ **0.6.0** for everything below (the installed device host; the plugin bundles none).
 

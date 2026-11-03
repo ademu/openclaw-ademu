@@ -526,6 +526,10 @@ export function startIngress(params: IngressParams): IngressHandle {
           case "media_send_changed":
           case "call_changed":
             break;
+          // A live share ended (AdemuMLS #941; live-only, never acked): the plugin keeps no position state.
+          case "location_ended":
+            log("location_ended", { seq: ev.seq });
+            break;
         }
       }
       // The iterator finished cleanly (client closed) — only shutdown does that.

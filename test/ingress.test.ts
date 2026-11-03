@@ -641,15 +641,16 @@ describe("a location (AdemuMLS #941): a pin or a START is a turn; a position nev
     expect(w.client.acks).toEqual([]);
   });
 
-  it("location_ended is logged as an unknown event and never acked", async () => {
+  it("location_ended is logged by its name (seq only) and never acked", async () => {
     const w = await world();
-    w.client.unknownEvent("location_ended", { group_id: ROOM_DM, message_id: "l2", reason: "stopped" });
+    w.client.live({ event: "location_ended", group_id: ROOM_DM, message_id: "l2", reason: "stopped" });
     w.client.message({ body: "after" });
     const d = await w.rt.nextDispatch();
     await d.lifecycle.onAdopted();
     await w.settle();
     expect(w.client.acks).toEqual([1]);
-    expect(w.logs).toContainEqual({ event: "event_unknown", fields: { event: "location_ended", seq: 0 } });
+    expect(w.logs).toContainEqual({ event: "location_ended", fields: { seq: 0 } });
+    expect(w.logs.some((l) => l.event === "event_unknown")).toBe(false);
   });
 
   it("a pin is a turn with its coordinates, acked at adoption", async () => {
