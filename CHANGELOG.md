@@ -42,6 +42,14 @@ both together (the flag day).
 - **A location reads as one.** A pin is a turn with its coordinates (`[location: lat, lon (±N m) — the
   sender's current position]`, or a place the sender picked); a live share's START says until when,
   with its comment on the next line. Before, both read as a message of an unknown kind.
+- The skill tells the agent how to answer a location: one short acknowledgement and a map link, no
+  invented address, and for a live location never a promise to follow it.
+- **`ademu_my_location`: where am I now.** The person asking gets the latest position of the live
+  location they themselves share. The tool asks the daemon per call (`get_live_locations`, adc ≥ 1.1.0)
+  and keeps no state. It answers only in the asker's 1-1 with the agent, never in a group (membership
+  cannot prove who sees a share), and never about anyone else. Accepted residual (owner): a 1-1 is a
+  two-member conversation, and the reply is not re-checked when it goes out, so someone added in the
+  seconds while the agent writes would see the asker's own position. Owner, 2026-11-03: "where is X" for other people stays out.
 - The location bodies and `location_ended` are read through `@ademu/adc-client` 1.1's types (`chatBodyOf`
   knows `location` and `live_location`; `location_ended` is a known event, logged by name and never acked).
 

@@ -69,7 +69,11 @@ export type LiveAccount = {
   refusalNotes?: RefusalNotes;
   /** The account's structural log (media sends from the agent's own tool calls log through it). */
   log?: MediaSendLog;
+  /** Live shares and memberships, read fresh (the `ademu_my_location` tool). */
+  locations?: LocationClient;
 };
+
+export type LocationClient = Pick<AdcClient, "getLiveLocations" | "getMembers" | "services">;
 
 /**
  * OpenClaw registers the plugin again in the same gateway process for tool discovery, and the media
