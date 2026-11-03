@@ -1,6 +1,6 @@
 // Full runtime entry of the Ademú channel plugin (plan T10). `registerFull` reads the plugin's
 // manifest config and adds the owner-gated `ademu_enroll` tool (T13) and the `ademu_get_media` tool
-// (openclaw-ademu #22).
+// (openclaw-ademu #22), and `ademu_my_location` (the asker's own live location).
 import { connect as connectSessionReal } from "@ademu/adc-client";
 import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
 import { ademuPlugin, hostLog, realEnrollmentLeaseDeps } from "./src/channel.js";
@@ -11,6 +11,7 @@ import { createQr } from "./src/qr.js";
 import { applyPluginSettings, getPluginSettings, setAdemuRuntime } from "./src/runtime.js";
 import { cancelByHuman, confirmByHuman, type EnrollToolDeps, registerEnrollTool } from "./src/tools/enroll.js";
 import { registerMediaTool } from "./src/tools/media.js";
+import { registerMyLocationTool } from "./src/tools/my-location.js";
 
 export default defineChannelPluginEntry({
   id: CHANNEL_ID,
@@ -49,6 +50,8 @@ export default defineChannelPluginEntry({
       maxOpenBytes: () => getPluginSettings().mediaMaxOpenMb * 1024 * 1024,
       log: hostLog,
     });
+    // Where the person asking is now, from their own live location (adc ≥ 1.1.0): read from the daemon per call.
+    registerMyLocationTool(api);
     // The browser enrollment page (QR → words → Yes / No) shares the tool's registry and decision paths.
     registerEnrollmentPage(api, {
       registry,

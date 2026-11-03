@@ -133,6 +133,20 @@ export const strings = {
     },
   },
 
+  // ----- the ademu_my_location tool: where the person asking is now, from their own live location -----
+  myLocation: {
+    label: "Ademú: my live location",
+    description:
+      "Where the person you are answering is now, from the live location THEY are sharing (never anyone else's). Use it when they ask where they are. It answers only if they share a live location that everyone in this conversation can already see — e.g. one shared in this chat. Put the map link in your answer.",
+    share: (s: { coords: string; accuracy: string; age: string; left: string; map: string }) =>
+      `Their live location: ${s.coords}${s.accuracy ? ` (±${s.accuracy})` : ""}, measured ${s.age}, sharing for ${s.left} more.\n${s.map}`,
+    none: "They are not sharing a live location that can be read in this conversation. If they want you to see it, they can share their live location in this chat and ask again.",
+    noTurn: "This only works while answering a person in an Ademú conversation.",
+    notRunning: "This Ademú account is not running right now.",
+    tooOld: "The Ademú device host (adc) on this machine is too old for live locations (it needs 1.1.0). Upgrade it: re-run the adc installer.",
+    failed: "Reading the live locations failed. Ask again in a moment.",
+  },
+
   // ----- reactions: one queued line per reaction, read by the agent at its next turn there -----
   reactions: {
     yourMessage: "your message",

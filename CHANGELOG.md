@@ -43,7 +43,11 @@ both together (the flag day).
   sender's current position]`, or a place the sender picked); a live share's START says until when,
   with its comment on the next line. Before, both read as a message of an unknown kind.
 - The skill tells the agent how to answer a location: one short acknowledgement and a map link, no
-  invented address, and for a live location never a promise to follow it (it sees only the start).
+  invented address, and for a live location never a promise to follow it.
+- **`ademu_my_location`: where am I now.** The person asking gets the latest position of the live
+  location they themselves share. The tool asks the daemon per call (`get_live_locations`, adc ≥ 1.1.0)
+  and keeps no state. It answers only in a conversation whose every member can already see that share,
+  and never about anyone else. Owner, 2026-11-03: "where is X" for other people stays out.
 - The location bodies and `location_ended` are read through `@ademu/adc-client` 1.1's types (`chatBodyOf`
   knows `location` and `live_location`; `location_ended` is a known event, logged by name and never acked).
 

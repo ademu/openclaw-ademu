@@ -233,6 +233,7 @@ async function runWithLease(
     live = {
       client: session.client,
       media: session.client,
+      locations: session.client,
       refusalNotes,
       log,
       conversationKind: (groupId: string): ConversationKind | undefined => {
