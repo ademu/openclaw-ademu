@@ -34,6 +34,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: bash dev/privacy-audit.sh
+      - name: what's new collector (python)
+        run: python3 -m unittest discover -s dev/whats-new/tests
 
   acceptance:
     name: acceptance (openclaw host)
