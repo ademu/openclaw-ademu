@@ -60,8 +60,10 @@ export function cleanPhrases(raw: unknown): Partial<ReportPhrases> {
   return out;
 }
 
+/** Fills `{key}` from `vars`' own keys only (an unknown or inherited name stays literal), then escapes the result:
+ *  a phrase and a value could otherwise assemble an OpenClaw runtime-context delimiter between them. */
 function fill(template: string, vars: Record<string, string>): string {
-  return template.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k]! : m));
+  return escapeRuntimeContextDelimiters(template.replace(/\{(\w+)\}/g, (m, k: string) => (Object.hasOwn(vars, k) ? vars[k]! : m)));
 }
 
 /** The texts of one report, in its phrases. */
@@ -79,13 +81,13 @@ class ReportText {
     const places = r.places.map((p) => fill(this.#p.from, { distance: strings.liveLocation.distance(p.m), place: p.name }));
     const age = r.ageMs < 60_000 ? this.#p.just_now : fill(this.#p.ago, { time: this.#span(r.ageMs) });
     const left = fill(this.#p.left, { time: this.#span(r.leftMs) });
-    return `📍 ${r.who}${places.length ? ` — ${places.join(", ")}` : ""} · ${age} · ${left}\n${r.map}`;
+    return escapeRuntimeContextDelimiters(`📍 ${r.who}${places.length ? ` — ${places.join(", ")}` : ""} · ${age} · ${left}\n${r.map}`);
   }
   say(key: PhraseKey, name: string): string {
     return fill(this.#p[key], { name });
   }
   lastPosition(map: string): string {
-    return `${this.#p.last_position} ${map}`;
+    return escapeRuntimeContextDelimiters(`${this.#p.last_position} ${map}`);
   }
 }
 
