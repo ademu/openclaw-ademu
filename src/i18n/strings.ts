@@ -124,6 +124,15 @@ export const strings = {
     },
   },
 
+  // ----- an inbound location (AdemuMLS #941): coordinates only; a live share's positions are never a turn -----
+  location: {
+    line: (l: { coords: string; accuracy: string; current: boolean; until: string | undefined }) => {
+      const where = `${l.coords}${l.accuracy ? ` (±${l.accuracy})` : ""}`;
+      if (l.until !== undefined) return `[started sharing live location until ${l.until}: ${where}]`;
+      return `[location: ${where} — ${l.current ? "the sender's current position" : "a place the sender picked"}]`;
+    },
+  },
+
   // ----- reactions: one queued line per reaction, read by the agent at its next turn there -----
   reactions: {
     yourMessage: "your message",

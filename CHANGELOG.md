@@ -31,6 +31,18 @@ both together (the flag day).
   (`body.type === "media"`, `media[]` states).
 - The daemon's `services` and `protocols` replace `capabilities` everywhere the plugin looked.
 
+### Fixed (location, AdemuMLS #941)
+
+- **A live location's position never starts a turn.** A daemon with #941 passes every applied
+  position of a live share as a `received` with a `live_location` body — a live frame, or on the
+  durable lane a checkpoint (about every 2 min while the sharer moves), which is still live-only. A
+  checkpoint used to fall through to a model turn; both lanes are now skipped and never acked, like a
+  reaction (`DECISIONS.md` §4.29: a position never starts a turn on its own). `location_ended` is
+  logged as an unknown event.
+- **A location reads as one.** A pin is a turn with its coordinates (`[location: lat, lon (±N m) — the
+  sender's current position]`, or a place the sender picked); a live share's START says until when,
+  with its comment on the next line. Before, both read as a message of an unknown kind.
+
 Requires adc ≥ **0.6.0** for everything below (the installed device host; the plugin bundles none).
 
 ### Removed

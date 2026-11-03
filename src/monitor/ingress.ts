@@ -6,7 +6,8 @@
 // with an AdoptionTracker (whose `onAdopted` commits the watermark) → await the tracker → ack. A
 // media or view-once body takes the same path with a described text (`content.ts`); nothing here
 // waits for a file. An edit, a call record, a surface or a foreign frame is acked and not a turn; a
-// live frame (an activity) and the live-only `received` kinds (a reaction, a delete) are never acked.
+// live frame (an activity, a live-location position) and the live-only `received` kinds (a reaction, a
+// delete, a live-location checkpoint) are never acked and never a turn.
 //
 // Acks are CUMULATIVE and carry read-receipt weight, so: N+1 is never dispatched before N settled;
 // gated/malformed/self-sent/replayed messages ack immediately after the decision; any pre-adoption
@@ -124,8 +125,12 @@ function validMessage(ev: DeviceEvent): ev is ReceivedFrame {
   );
 }
 
-/** The chat body types that are not a turn: applied by the daemon (live-only, never acked here) or an edit (acked). */
-const APPLIED_BODY_TYPES = new Set(["reaction", "delete", "activity"]);
+/**
+ * The chat body types that are not a turn and never acked: applied by the daemon (live-only) or live.
+ * A `live_location` is a live share's position (AdemuMLS #941) — a live frame or, on the durable lane, a
+ * checkpoint that is still live-only — and silent state: a position never starts a turn on its own.
+ */
+const APPLIED_BODY_TYPES = new Set(["reaction", "delete", "activity", "live_location"]);
 
 function validSeq(seq: unknown): seq is number {
   return typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 0;
@@ -204,10 +209,12 @@ export function startIngress(params: IngressParams): IngressHandle {
       return;
     }
     // A non-text message (a file, or a kind this plugin does not handle) is never a command; its
-    // caption still counts for the mention decision below.
+    // caption (a live share's comment) still counts for the mention decision below.
     const content = describeContent(ev);
     // Sender-controlled text never reaches the host with OpenClaw's runtime-context delimiters (content.ts).
-    const body = escapeRuntimeContextDelimiters(content.kind === "text" ? content.text : content.kind === "media" ? (content.caption ?? "") : "");
+    const body = escapeRuntimeContextDelimiters(
+      content.kind === "text" ? content.text : content.kind === "media" ? (content.caption ?? "") : content.kind === "location" ? (content.comment ?? "") : "",
+    );
     const commandRequested = content.kind === "text" && runtime.commands.shouldComputeCommandAuthorized(body, cfg);
     const isTextCommand = content.kind === "text" && runtime.commands.isControlCommandMessage(body, cfg);
 
@@ -476,8 +483,8 @@ export function startIngress(params: IngressParams): IngressHandle {
               break;
             }
             if (typeof kind === "string" && APPLIED_BODY_TYPES.has(kind)) {
-              // A reaction or a delete is live-only (already applied by the daemon; never acked
-              // here, so an in-flight turn is never claimed as read); an activity is live.
+              // A reaction, a delete or a live-location checkpoint is live-only (already applied by the
+              // daemon; never acked here, so an in-flight turn is never claimed as read); an activity is live.
               log("ingress_chat_frame_skipped", { seq, kind });
               break;
             }
@@ -487,7 +494,7 @@ export function startIngress(params: IngressParams): IngressHandle {
               ack(seq);
               break;
             }
-            // text, media, view_once — and a body type this plugin does not know, described as such.
+            // text, media, view_once, location — and a body type this plugin does not know, described as such.
             try {
               await handleMessage(ev);
             } catch (err) {
