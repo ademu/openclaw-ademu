@@ -11,6 +11,7 @@
 // which declares, pushes the bytes and waits for the daemon's outcome (`awaitOutcome`, clients 1.0).
 // What the client leaves to us is small: URL → local file (the host's loader), photo vs file, the
 // hello's `media_send` advert, and turning a refusal into a short line the chat and the agent see.
+import type { LiveLocationsHandle } from "./monitor/location-watch.js";
 import { basename } from "node:path";
 import {
   BlobWriteError,
@@ -69,6 +70,8 @@ export type LiveAccount = {
   refusalNotes?: RefusalNotes;
   /** The account's structural log (media sends from the agent's own tool calls log through it). */
   log?: MediaSendLog;
+  /** Live locations (#33): the state, its watches and reports, the places, the visibility rule. */
+  liveLocations?: LiveLocationsHandle;
 };
 
 /**

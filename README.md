@@ -195,6 +195,13 @@ A device host older than adc 1.0.0 — or one without the enrollment socket — 
   let every message through); the agent answers when addressed by name, by an alias from
   `plugins.entries.ademu.config.mentionAliases`, or by the owner (always heard). Per-room settings
   live under `channels.ademu.groups.<conversationId>` (`requireMention`, `toolsBySender`, …).
+- **Locations:** a location pin reaches the agent as coordinates, and a live share's moving
+  positions never start a turn. Ask the agent where someone is now, save named places ("this is
+  home"), set a one-shot watch ("tell me when she is near home"; the agent answers when it fires),
+  or a report ("where is she, every 5 minutes"), which the plugin posts by itself until the share
+  ends. Only shares that everyone in the conversation can already see are used: in your 1-1 with the
+  agent, the shares of groups you are both in. Watches and reports live in the gateway's memory and
+  end when it restarts.
 - **Room history:** the messages a room let through without addressing the agent are kept, and the
   agent's next turn in that room gets them as "chat history since last reply", so it knows what was
   said in between. `channels.ademu.historyLimit` (or `channels.ademu.accounts.<id>.historyLimit`)

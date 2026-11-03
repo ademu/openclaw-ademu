@@ -2,6 +2,9 @@
 // via Node's built-in `node:sqlite` (zero dependencies; unflagged on both supported Node floors).
 //   watermarks — per account: the device id the account is bound to and the last ADOPTED seq (the
 //                commit that makes a cumulative ack truthful; §2 R2b).
+//   places     — named points per account and conversation ("home", "office"; #33), saved by the agent from a
+//                pin the person sent or a share's position, read for distances. Added later as its own table
+//                (`CREATE TABLE IF NOT EXISTS`, the version unchanged: an older plugin ignores it).
 // The plugin owns no daemon state (AdemuMLS #712: it attaches to an installed adc and never runs one);
 // databases written by an earlier build keep their dead `daemon_ownership`/`daemon_holders` tables,
 // which nothing reads. Transactions are synchronous commit sections (`BEGIN IMMEDIATE … COMMIT`);
@@ -61,6 +64,16 @@ export class AdemuStore {
         adopted_seq INTEGER NOT NULL,
         updated_at_ms INTEGER NOT NULL
       ) STRICT;`);
+      db.exec(`CREATE TABLE IF NOT EXISTS places (
+        account_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        name_key TEXT NOT NULL,
+        lat REAL NOT NULL,
+        lon REAL NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (account_id, conversation_id, name_key)
+      ) STRICT;`);
       db.exec("COMMIT;");
     } catch (err) {
       db.exec("ROLLBACK;");
@@ -104,4 +117,34 @@ export class AdemuStore {
   deleteWatermark(accountId: string): void {
     this.#db.prepare("DELETE FROM watermarks WHERE account_id = ?").run(accountId);
   }
+
+  // ------------------------------------------------------------------ places (#33)
+
+  /** Saves (or moves) a named place of one conversation; the name is matched case-insensitively. */
+  setPlace(accountId: string, conversationId: string, place: { name: string; lat: number; lon: number }): void {
+    this.#db
+      .prepare(
+        `INSERT INTO places (account_id, conversation_id, name, name_key, lat, lon, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(account_id, conversation_id, name_key) DO UPDATE SET name = excluded.name, lat = excluded.lat, lon = excluded.lon,
+           updated_at_ms = excluded.updated_at_ms`,
+      )
+      .run(accountId, conversationId, place.name.trim().replace(/\s+/g, " "), placeKey(place.name), place.lat, place.lon, this.#now());
+  }
+
+  places(accountId: string, conversationId: string): Array<{ name: string; lat: number; lon: number }> {
+    const rows = this.#db
+      .prepare("SELECT name, lat, lon FROM places WHERE account_id = ? AND conversation_id = ? ORDER BY name_key")
+      .all(accountId, conversationId) as Array<{ name: string; lat: number; lon: number }>;
+    return rows.map((r) => ({ name: r.name, lat: Number(r.lat), lon: Number(r.lon) }));
+  }
+
+  deletePlace(accountId: string, conversationId: string, name: string): boolean {
+    const r = this.#db.prepare("DELETE FROM places WHERE account_id = ? AND conversation_id = ? AND name_key = ?").run(accountId, conversationId, placeKey(name));
+    return Number(r.changes) > 0;
+  }
+}
+
+/** A place name's key: trimmed, inner whitespace collapsed, case-folded. */
+export function placeKey(name: string): string {
+  return name.trim().replace(/\s+/g, " ").toLocaleLowerCase("und");
 }

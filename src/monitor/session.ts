@@ -38,6 +38,11 @@ export type OpenSessionParams = {
   deps: SessionDeps;
   onRetry?: ((info: RetryInfo) => void) | undefined;
   onReconnected?: (() => void) | undefined;
+  /**
+   * More live state read at attach and after every reconnect, after the members and INSIDE the barrier (the
+   * ingress loop waits for it): the live locations (#33). It must not throw — a failure is its own to handle.
+   */
+  warmup?: ((client: AdcClient) => Promise<void>) | undefined;
   /** Account shutdown: aborts the connect/warm-up (a late connect success is closed). */
   signal?: AbortSignal | undefined;
 };
@@ -198,6 +203,7 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
     // The initial warm-up is inside the close-on-failure scope too: a seated, auto-reconnecting
     // client must never be leaked holding the device seat when openSession rejects.
     await Promise.race([members.refresh(signal), aborted]);
+    if (params.warmup) await Promise.race([params.warmup(client), aborted]);
   } catch (err) {
     if (signal?.aborted) {
       void closeOnce();
@@ -247,31 +253,34 @@ export async function openSession(params: OpenSessionParams): Promise<Session> {
   });
   client.on("reconnected", () => {
     const mine = generation;
-    void members.refresh(undefined, () => mine === generation).then(
-      () => {
-        if (mine !== generation) return; // a newer outage superseded this warm-up
-        retries = 0;
-        const r = release;
-        stale = undefined;
-        release = undefined;
-        fail = undefined;
-        r?.();
-        params.onReconnected?.();
-      },
-      (err: unknown) => {
-        if (mine !== generation) return;
-        params.deps.log("session_refresh_failed", { errorClass: err instanceof Error ? err.name : typeof err });
-        // REJECT the barrier (a loop body already parked on it must wake and halt — closing the
-        // iterator alone cannot unblock it), then close the client so the account restarts.
-        // The barrier STAYS the rejected promise (later callers must not see "fresh") until the
-        // next retry replaces it or the account is torn down.
-        const f = fail;
-        release = undefined;
-        fail = undefined;
-        f?.(new SessionWarmupError());
-        void closeOnce();
-      },
-    );
+    void members
+      .refresh(undefined, () => mine === generation)
+      .then(() => (mine === generation && params.warmup ? params.warmup(client) : undefined))
+      .then(
+        () => {
+          if (mine !== generation) return; // a newer outage superseded this warm-up
+          retries = 0;
+          const r = release;
+          stale = undefined;
+          release = undefined;
+          fail = undefined;
+          r?.();
+          params.onReconnected?.();
+        },
+        (err: unknown) => {
+          if (mine !== generation) return;
+          params.deps.log("session_refresh_failed", { errorClass: err instanceof Error ? err.name : typeof err });
+          // REJECT the barrier (a loop body already parked on it must wake and halt — closing the
+          // iterator alone cannot unblock it), then close the client so the account restarts.
+          // The barrier STAYS the rejected promise (later callers must not see "fresh") until the
+          // next retry replaces it or the account is torn down.
+          const f = fail;
+          release = undefined;
+          fail = undefined;
+          f?.(new SessionWarmupError());
+          void closeOnce();
+        },
+      );
   });
 
   return {

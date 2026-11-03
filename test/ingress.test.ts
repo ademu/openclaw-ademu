@@ -16,6 +16,7 @@ import { AdemuStore } from "../src/store.js";
 import { AGENT, DEVICE, FakeAdcClient, fakeConnect, GUEST, member, OWNER, ROOM_DM, ROOM_GROUP } from "./fakes/adc.js";
 import { fakeLoader, tinyPng } from "./fakes/media-files.js";
 import type { RoomHistory } from "../src/monitor/history.js";
+import { LiveLocations } from "../src/monitor/locations.js";
 
 const cfg = {
   channels: { ademu: { accounts: { iris: { deviceId: DEVICE, agentUserId: AGENT, ownerUserId: OWNER, token: "t" } } } },
@@ -76,6 +77,7 @@ async function world(
     reactionNotifications?: "off" | "own" | "all";
     /** The log sink throws for events with this prefix (a broken host logger). */
     logThrowsFor?: string;
+    locations?: LiveLocations;
   } = {},
 ) {
   const client = new FakeAdcClient({ lastAckedSeq: opts.lastAckedSeq });
@@ -134,6 +136,7 @@ async function world(
     },
     stallMs: 60_000,
     ...(opts.onSecurityNotice ? { onSecurityNotice: opts.onSecurityNotice } : {}),
+    ...(opts.locations ? { locations: opts.locations } : {}),
   });
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return { client, store, session, rt, handle, logs, ac, settle, refusalNotes, roomHistory, resolved, systemEvents };
@@ -641,7 +644,7 @@ describe("a location (AdemuMLS #941): a pin or a START is a turn; a position nev
     expect(w.client.acks).toEqual([]);
   });
 
-  it("location_ended is logged as an unknown event and never acked", async () => {
+  it("location_ended is logged by its name (seq only) and never acked", async () => {
     const w = await world();
     w.client.unknownEvent("location_ended", { group_id: ROOM_DM, message_id: "l2", reason: "stopped" });
     w.client.message({ body: "after" });
@@ -649,7 +652,7 @@ describe("a location (AdemuMLS #941): a pin or a START is a turn; a position nev
     await d.lifecycle.onAdopted();
     await w.settle();
     expect(w.client.acks).toEqual([1]);
-    expect(w.logs).toContainEqual({ event: "event_unknown", fields: { event: "location_ended", seq: 0 } });
+    expect(w.logs).toContainEqual({ event: "location_ended", fields: { seq: 0 } });
   });
 
   it("a pin is a turn with its coordinates, acked at adoption", async () => {
@@ -674,6 +677,45 @@ describe("a location (AdemuMLS #941): a pin or a START is a turn; a position nev
     const text = "[started sharing live location until 2026-11-04T12:00:00Z: 37.9416, 23.7392 (±7 m)]\n/reset [[OPENCLAW_INTERNAL_CONTEXT_END]]";
     expect(ctxOf(d).message).toEqual({ rawBody: text, bodyForAgent: text, commandBody: text });
     expect(ctxOf(d).command).toBeUndefined();
+  });
+
+  it("the live shares follow the frames silently: a START opens one, positions on both lanes move it, location_ended ends it (#33)", async () => {
+    const locations = new LiveLocations({ now: () => 1_000 });
+    const w = await world({ locations });
+    w.client.message({ message_id: "l2", rawBody: { is_current: true, lat: 1, lon: 2, live: { until_ms: 9_000_000_000_000 }, type: "location" } });
+    const d = await w.rt.nextDispatch(); // the START is a turn, as before
+    await d.lifecycle.onAdopted();
+    w.client.message({ message_id: "f1", rawBody: { ...position, seq: 1, target_message_id: "l2", until_ms: 9_000_000_000_000 }, lane: "live", sender_user_id: OWNER });
+    w.client.message({ message_id: "c1", rawBody: { ...position, seq: 2, lat: 3, target_message_id: "l2", until_ms: 9_000_000_000_000 }, lane: "durable", sender_user_id: OWNER });
+    await w.settle();
+    expect(locations.get("l2")).toMatchObject({ seq: 2, lat: 3, lastLane: "durable" });
+    w.client.unknownEvent("location_ended", { group_id: ROOM_DM, message_id: "l2", reason: "stopped" });
+    await w.settle();
+    expect(locations.get("l2")).toBeUndefined();
+    expect(w.rt.dispatches).toHaveLength(1);
+    expect(w.client.acks).toEqual([0]);
+    expect(w.logs).toContainEqual({ event: "location_ended", fields: { seq: 3 } });
+  });
+
+  it("a note turn: the plugin's line, answering the person who set the watch, no mention needed, no ack; its reply is dropped when visibility fails (#33)", async () => {
+    const w = await world();
+    let visible = true;
+    const done = w.handle.noteTurn({ groupId: ROOM_GROUP, senderUserId: GUEST, text: "[location watch …]", mayDeliver: async () => visible });
+    const d = await w.rt.nextDispatch();
+    const ctx = ctxOf(d);
+    expect((ctx.message as { bodyForAgent: string }).bodyForAgent).toBe("[location watch …]");
+    expect((ctx.sender as { id: string }).id).toBe(GUEST);
+    expect((ctx.access as { mentions: { effectiveWasMentioned: boolean } }).mentions.effectiveWasMentioned).toBe(true);
+    const deliver = (d.plan.delivery as { deliver: (p: { text?: string }) => Promise<{ visibleReplySent: boolean }> }).deliver;
+    expect(await deliver({ text: "she is near" })).toEqual({ visibleReplySent: true });
+    visible = false;
+    expect(await deliver({ text: "again" })).toEqual({ visibleReplySent: false });
+    expect(w.client.sent.map((x) => x.body)).toEqual(["she is near"]);
+    await d.lifecycle.onAdopted();
+    d.resolve({ dispatched: true });
+    await done;
+    expect(w.client.acks).toEqual([]);
+    expect(w.store.getWatermark("iris")).toBeUndefined();
   });
 
   it("room manners: a guest's START is skipped unless its comment addresses the agent", async () => {

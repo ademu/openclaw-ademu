@@ -11,7 +11,7 @@
 // error; once seated, the client's own reconnect loop rides out a daemon restart.
 import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
 import { CHANNEL_ID, type ResolvedAdemuAccount } from "../config.js";
-import { classifyConversation, type ConversationKind } from "../grammar.js";
+import { classifyConversation, displayNameOf, normalizeId, type ConversationKind } from "../grammar.js";
 import { strings } from "../i18n/strings.js";
 import { createReplyMediaSender, registerLiveAccount, sendAdemuText, unregisterLiveAccount, type LiveAccount, type RefusalNotes } from "../outbound.js";
 import { createAdemuIngressResolver } from "../security.js";
@@ -22,6 +22,9 @@ import { resolveHistoryLimit } from "./history.js";
 import type { RuntimeSystemSurface } from "./reactions.js";
 import { startIngress, type IngressHandle, type RuntimeChannelSurface } from "./ingress.js";
 import { openSession, type Session, type SessionDeps } from "./session.js";
+import { LiveLocations } from "./locations.js";
+import { LocationWatches, visibleFrom, type LiveLocationsHandle } from "./location-watch.js";
+import { escapeRuntimeContextDelimiters } from "./content.js";
 
 export const STOP_DEADLINE_MS = 4500;
 export const RELEASE_TAIL_MS = 2500;
@@ -167,7 +170,10 @@ async function runWithLease(
   let session: Session | undefined;
   let ingress: IngressHandle | undefined;
   let live: LiveAccount | undefined;
+  let watches: LocationWatches | undefined;
   let outcome: StartOutcome = { kind: "aborted" };
+  // Live locations (#33): seeded from the daemon inside the session's barrier, at attach and after every reconnect.
+  const locations = new LiveLocations({ now: deps.now });
   let deadline = deps.now() + STOP_DEADLINE_MS;
 
   try {
@@ -207,6 +213,9 @@ async function runWithLease(
         onReconnected: () => {
           setStatus(readyPatch());
         },
+        warmup: async (client) => {
+          log("live_locations_seeded", { result: await locations.seedFrom(client) });
+        },
         signal: ctx.abortSignal,
       });
     } catch (err) {
@@ -240,6 +249,48 @@ async function runWithLease(
         return list ? classifyConversation({ members: list, agentUserId: account.agentUserId!, ownerUserId }).kind : undefined;
       },
     };
+    // Watches and reports (#33): a fired watch is one turn through ingress (bound below), a report the plugin's own text.
+    const getMembers = async (groupId: string) => (await session!.client.getMembers({ group_id: groupId })).members;
+    let noteTurn: IngressHandle["noteTurn"] | undefined;
+    const placesOf = (conversationId: string) => deps.store.places(accountId, normalizeId(conversationId));
+    const nameOf = (share: { groupId: string; sharerUserId: string }) => {
+      const m = members.peek(share.groupId)?.find((x) => normalizeId(x.user_id) === share.sharerUserId);
+      return escapeRuntimeContextDelimiters((m ? displayNameOf(m) : "") || m?.username || "someone");
+    };
+    const canSee: LiveLocationsHandle["canSee"] = (conversationId, share) => visibleFrom(getMembers, conversationId, share);
+    watches = new LocationWatches({
+      locations,
+      now: deps.now,
+      setTimer: (fn, ms) => setTimeout(fn, Math.max(0, ms)),
+      clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+      canSee,
+      nameOf,
+      places: placesOf,
+      send: async (groupId, text) => {
+        await sendAdemuText({ client: session!.client, groupId, text });
+      },
+      fireTurn: async (owner, text) => {
+        const share = locations.get(owner.shareId);
+        await noteTurn?.({
+          groupId: owner.conversationId,
+          senderUserId: owner.setterUserId,
+          text,
+          mayDeliver: async () => (share ? canSee(owner.conversationId, share) : true),
+        });
+      },
+      log,
+    });
+    live.liveLocations = {
+      locations,
+      watches,
+      places: {
+        list: placesOf,
+        set: (conversationId, place) => deps.store.setPlace(accountId, normalizeId(conversationId), place),
+        remove: (conversationId, name) => deps.store.deletePlace(accountId, normalizeId(conversationId), name),
+      },
+      canSee,
+      nameOf,
+    };
     registerLiveAccount(accountId, live);
 
     // --- ingress ---------------------------------------------------------------------------
@@ -266,12 +317,14 @@ async function runWithLease(
       historyLimit: resolveHistoryLimit(cfg, account),
       signal: loopAbort.signal,
       log,
+      locations,
       onSecurityNotice: (groupId) => {
         // Fixed copy only — never a field of the frame.
         setStatus({ lastError: strings.status.securityNotice });
         if (groupId) void sendAdemuText({ client: session!.client, groupId, text: strings.room.securityNotice }).catch(() => {});
       },
     });
+    noteTurn = ingress.noteTurn;
     setStatus(readyPatch());
     log("account_ready", {});
 
@@ -295,6 +348,7 @@ async function runWithLease(
     try {
       try {
         try {
+          watches?.stop();
           if (ingress) {
             ingress.stop();
             const budget = Math.min(DRAIN_CAP_MS, deadline - deps.now() - RELEASE_TAIL_MS);

@@ -57,7 +57,7 @@ describe("no daemon state (AdemuMLS #712)", () => {
     s.close();
     const raw = new DatabaseSync(path);
     const tables = (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((t) => t.name);
-    expect(tables.sort()).toEqual(["schema_version", "watermarks"]);
+    expect(tables.sort()).toEqual(["places", "schema_version", "watermarks"]);
     // An earlier build's dead tables are harmless: nothing reads them, the file opens as schema 1.
     raw.exec("CREATE TABLE daemon_ownership (data_dir TEXT PRIMARY KEY) STRICT;");
     raw.exec("CREATE TABLE daemon_holders (holder_id TEXT PRIMARY KEY) STRICT;");
@@ -76,5 +76,31 @@ describe("no daemon state (AdemuMLS #712)", () => {
     clock += 1;
     a.close();
     b.close();
+  });
+});
+
+describe("places (#33)", () => {
+  it("per account and conversation, case-insensitive names, moved in place, removed", () => {
+    const s = AdemuStore.open({ path: ":memory:" });
+    s.setPlace("a", "c1", { name: "Home", lat: 1, lon: 2 });
+    s.setPlace("a", "c1", { name: "  home ", lat: 3, lon: 4 });
+    s.setPlace("a", "c2", { name: "home", lat: 5, lon: 6 });
+    s.setPlace("b", "c1", { name: "office", lat: 7, lon: 8 });
+    expect(s.places("a", "c1")).toEqual([{ name: "home", lat: 3, lon: 4 }]);
+    expect(s.places("a", "c2")).toEqual([{ name: "home", lat: 5, lon: 6 }]);
+    expect(s.deletePlace("a", "c1", "HOME")).toBe(true);
+    expect(s.deletePlace("a", "c1", "home")).toBe(false);
+    expect(s.places("a", "c1")).toEqual([]);
+  });
+
+  it("a database from before places opens and gains the table", () => {
+    const path = join(tmp, "pre-places.sqlite");
+    const db = new DatabaseSync(path);
+    db.exec("CREATE TABLE schema_version (version INTEGER NOT NULL) STRICT; INSERT INTO schema_version VALUES (1);");
+    db.close();
+    const s = AdemuStore.open({ path });
+    s.setPlace("a", "c", { name: "x", lat: 0, lon: 0 });
+    expect(s.places("a", "c")).toHaveLength(1);
+    s.close();
   });
 });

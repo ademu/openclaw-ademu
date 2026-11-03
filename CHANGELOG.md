@@ -31,6 +31,23 @@ both together (the flag day).
   (`body.type === "media"`, `media[]` states).
 - The daemon's `services` and `protocols` replace `capabilities` everywhere the plugin looked.
 
+### Added (live location, #33)
+
+- **Where is someone now, places, watches and reports.** Live shares are followed as silent state:
+  each START, each position on either lane and `location_ended`, seeded at attach and after every
+  reconnect from `get_live_locations` (events at or below its `as_of` are ignored). Three tools:
+  - `ademu_live_locations`: each share's position, age, time left, distance to places and a map link.
+  - `ademu_place`: named places per conversation, from a pin's coordinates or a share's position.
+    Places are stored in the plugin's database (a new `places` table) and are never geocoded.
+  - `ademu_location_watch`: a one-shot watch (`near`, `still`, `ended`) that starts exactly one
+    agent turn when it fires, or a report every N minutes (≥ 1). The plugin sends each report itself
+    as a normal message, pauses it when the person stops (3 min of silence after a checkpoint),
+    resumes it on real movement, and ends it with one last message.
+- **Visibility.** A share is used only in a conversation whose every member can already see it.
+  Memberships are read fresh every time a watch fires or a report goes out, and again before a watch
+  turn's reply goes out.
+- Watches and reports live in memory: a gateway restart ends them.
+
 ### Fixed (location, AdemuMLS #941)
 
 - **A live location's position never starts a turn.** A daemon with #941 passes every applied

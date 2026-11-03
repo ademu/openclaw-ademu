@@ -14,11 +14,32 @@
   "contracts": {
     "tools": [
       "ademu_enroll",
-      "ademu_get_media"
+      "ademu_get_media",
+      "ademu_live_locations",
+      "ademu_place",
+      "ademu_location_watch"
     ]
   },
   "toolMetadata": {
     "ademu_get_media": {
+      "profiles": [
+        "coding",
+        "messaging"
+      ]
+    },
+    "ademu_live_locations": {
+      "profiles": [
+        "coding",
+        "messaging"
+      ]
+    },
+    "ademu_place": {
+      "profiles": [
+        "coding",
+        "messaging"
+      ]
+    },
+    "ademu_location_watch": {
       "profiles": [
         "coding",
         "messaging"

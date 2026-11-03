@@ -40,6 +40,7 @@ import { AdoptionFailedError, AdoptionTracker, type TurnResultLike } from "./ado
 import { bodyForAgent, describeContent, escapeRuntimeContextDelimiters } from "./content.js";
 import { forgetRoomHistory, peekRoomHistory, recordSkipped, type RoomHistory } from "./history.js";
 import { gateSender } from "./sender-gate.js";
+import type { LiveLocations } from "./locations.js";
 import { createReactionQueue, DEFAULT_REACTION_NOTIFICATIONS, reactionOf, type ReactionNotificationMode, type RuntimeSystemSurface } from "./reactions.js";
 import type { Session } from "./session.js";
 
@@ -86,6 +87,8 @@ export type IngressParams = {
   historyLimit?: number | undefined;
   /** Shutdown signal for the loop (NOT propagated to adopted turns). */
   signal: AbortSignal;
+  /** Live shares (#33): every chat frame and `location_ended` updates it, silently — never a turn. */
+  locations?: LiveLocations | undefined;
   /** A future `security_notice` live event: the caller sets a fixed status and posts a fixed room note. */
   onSecurityNotice?: ((groupId: string | undefined) => void) | undefined;
   log: (event: string, fields?: Record<string, string | number | boolean>) => void;
@@ -104,6 +107,14 @@ export type IngressHandle = {
   stop: () => void;
   /** Wait for in-flight dispatches to settle (shutdown step 2, bounded by the caller). */
   drain: () => Promise<void>;
+  /**
+   * One agent turn that no message started (#33: a fired location watch), in `groupId`, answering `senderUserId` — the
+   * person who set the watch, whose access is resolved again now. Its text is the plugin's own fixed line. It needs no
+   * mention (the request that set it was already admitted), carries no seq and acks nothing. `mayDeliver` is asked
+   * before each reply goes out; false drops the reply (the conversation's members changed since). Resolves once the
+   * turn settled; at most one attempt.
+   */
+  noteTurn: (p: { groupId: string; senderUserId: string; text: string; mayDeliver: () => Promise<boolean> }) => Promise<void>;
 };
 
 type ReceivedFrame = ReceivedEvent & { known: true; type: "event"; seq: number };
@@ -435,6 +446,124 @@ export function startIngress(params: IngressParams): IngressHandle {
     }
   };
 
+  // A turn no message started (#33): built like a message's (route, access, context, dispatch, delivery into the
+  // conversation), but with the plugin's own line, no mention requirement, no seq, no ack and no watermark.
+  let noteCount = 0;
+  const noteTurn: IngressHandle["noteTurn"] = async ({ groupId, senderUserId, text, mayDeliver }) => {
+    if (stopped) return;
+    const { members, shape, access: pre } = await gateSender({
+      members: session.members,
+      resolver: params.resolver,
+      account: params.account,
+      groupId,
+      senderUserId,
+      commandRequested: false,
+    });
+    if (!pre.senderAccess.allowed) {
+      log("note_turn_dropped", { reason: "access" });
+      return;
+    }
+    const conversationId = normalizeId(groupId);
+    const route = runtime.routing.resolveAgentRoute({ cfg, channel: CHANNEL_ID, accountId, peer: { kind: shape.kind, id: conversationId } });
+    const messageId = `ademu-note-${Date.now()}-${++noteCount}`;
+    const access = await resolveMessageAccess({
+      resolver: params.resolver,
+      senderUserId,
+      ownerUserId: params.account.ownerUserId,
+      conversation: { kind: shape.kind, id: groupId },
+      commandRequested: false,
+      contextBinding: { agentId: route.agentId, sessionKey: route.sessionKey, messageId, inboundEventKind: "user_request" },
+    });
+    if (!access.senderAccess.allowed) {
+      log("note_turn_dropped", { reason: "access_late" });
+      return;
+    }
+    const sender = members.find((m) => normalizeId(m.user_id) === normalizeId(senderUserId));
+    const senderName = sender ? escapeRuntimeContextDelimiters(displayNameOf(sender)) : undefined;
+    const senderRole = resolveSenderRole(senderUserId, params.account.ownerUserId);
+    const ctxPayload = runtime.inbound.buildContext({
+      channel: CHANNEL_ID,
+      accountId,
+      messageId,
+      timestamp: Date.now(),
+      from: `${CHANNEL_ID}:${normalizeId(senderUserId)}`,
+      sender: {
+        id: normalizeId(senderUserId),
+        ...(senderName ? { name: senderName } : {}),
+        ...(sender?.username ? { username: escapeRuntimeContextDelimiters(sender.username) } : {}),
+        roles: [senderRole],
+        isBot: false,
+      },
+      conversation: {
+        kind: shape.kind,
+        id: conversationId,
+        label: escapeRuntimeContextDelimiters(describeConversation(shape, params.account.agentName)),
+        routePeer: { kind: shape.kind, id: conversationId },
+      },
+      route: { agentId: route.agentId, dmScope: route.dmScope, accountId: route.accountId, routeSessionKey: route.sessionKey },
+      reply: { to: `${CHANNEL_ID}:${conversationId}`, originatingTo: `${CHANNEL_ID}:${conversationId}` },
+      message: { rawBody: text, commandBody: text, bodyForAgent: text },
+      access: {
+        mentions: { canDetectMention: true, wasMentioned: true, hasAnyMention: true, requireMention: false, effectiveWasMentioned: true },
+      },
+      channelIngress: access,
+      extra: { SenderRole: senderRole },
+    });
+    const tracker = new AdoptionTracker({
+      seq: 0,
+      commit: () => {},
+      ...(params.stallMs !== undefined ? { stallMs: params.stallMs } : {}),
+      ...(params.setTimer ? { setTimer: params.setTimer } : {}),
+      ...(params.clearTimer ? { clearTimer: params.clearTimer } : {}),
+    });
+    trackers.add(tracker);
+    void tracker.settled.then(
+      () => trackers.delete(tracker),
+      () => trackers.delete(tracker),
+    );
+    const dispatchPromise = runtime.inbound
+      .dispatch({
+        channel: CHANNEL_ID,
+        accountId,
+        cfg,
+        route: { agentId: route.agentId, dmScope: route.dmScope, sessionKey: route.sessionKey },
+        ctxPayload,
+        replyPipeline: createChannelMessageReplyPipeline({ cfg, agentId: route.agentId, channel: CHANNEL_ID, accountId }),
+        delivery: {
+          durable: () => ({ to: `${CHANNEL_ID}:${conversationId}` }),
+          deliver: async (payload: { text?: string; mediaUrl?: string | null; mediaUrls?: readonly (string | null | undefined)[] | null }) => {
+            // Checked again here: the conversation's members may have changed since the watch fired.
+            if (!(await mayDeliver())) {
+              log("note_turn_reply_dropped", { reason: "visibility" });
+              return { visibleReplySent: false };
+            }
+            const urls = [...new Set([payload.mediaUrl, ...(payload.mediaUrls ?? [])].filter((u): u is string => typeof u === "string" && u.length > 0))];
+            if (urls.length > 0) return { visibleReplySent: await params.sendMedia(groupId, payload.text, urls, route.agentId) };
+            if (!payload.text) return { visibleReplySent: false };
+            await params.sendText(groupId, payload.text);
+            return { visibleReplySent: true };
+          },
+          onError: (err: unknown) => log("reply_failed", { errorClass: err instanceof Error ? err.name : typeof err }),
+        },
+        replyOptions: bindIngressLifecycleToReplyOptions(tracker.lifecycle),
+        record: {
+          onRecordError: (err: unknown) => log("session_record_failed", { errorClass: err instanceof Error ? err.name : typeof err }),
+        },
+      })
+      .then(
+        (result) => tracker.onDispatchSettled(result),
+        (err: unknown) => tracker.onDispatchSettled(undefined, err),
+      );
+    inflight.add(dispatchPromise);
+    void dispatchPromise.finally(() => inflight.delete(dispatchPromise));
+    try {
+      await tracker.settled;
+      log("note_turn_adopted");
+    } catch {
+      log("note_turn_not_adopted");
+    }
+  };
+
   void (async () => {
     try {
       for await (const ev of client.events()) {
@@ -451,6 +580,13 @@ export function startIngress(params: IngressParams): IngressHandle {
             params.onSecurityNotice?.(groupId);
             continue;
           }
+          if (String(ev.event) === "location_ended") {
+            // A live share ended (AdemuMLS #941; live-only, never acked). The 1.0 client does not know the event.
+            const raw = (ev as { raw?: { group_id?: unknown; message_id?: unknown; reason?: unknown } }).raw ?? {};
+            params.locations?.ended({ seq: ev.seq, group_id: raw.group_id, message_id: raw.message_id, reason: raw.reason });
+            log("location_ended", { seq: ev.seq });
+            continue;
+          }
           log("event_unknown", { event: String(ev.event), seq: ev.seq });
           continue;
         }
@@ -463,6 +599,9 @@ export function startIngress(params: IngressParams): IngressHandle {
               ack(seq);
               break;
             }
+            // Live shares follow every chat frame first, whatever happens to the frame next (#33): a START, a
+            // position on either lane, a delete of a START. Silent: no turn, no line.
+            params.locations?.received(ev);
             // A live frame (an activity, a foreign heartbeat) is never stored or acked: nothing to do.
             if (ev.lane === "live") {
               log("ingress_live_skipped", { seq });
@@ -514,6 +653,7 @@ export function startIngress(params: IngressParams): IngressHandle {
           case "removed_from_group":
             session.members.markInactive(ev.group_id);
             forgetRoomHistory(params.roomHistory, ev.group_id);
+            params.locations?.leftGroup(ev.group_id);
             log("removed_from_group", { seq: ev.seq });
             break;
           case "message_status_changed":
@@ -549,5 +689,6 @@ export function startIngress(params: IngressParams): IngressHandle {
     drain: async () => {
       await Promise.allSettled([...inflight]);
     },
+    noteTurn,
   };
 }
