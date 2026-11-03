@@ -1,0 +1,77 @@
+[
+ {
+  "title": "feat(984): the Humans tab (#989)",
+  "body": "Summary\n\nWhat's new: You can find your humans in one tab\n",
+  "want": "You can find your humans in one tab"
+ },
+ {
+  "title": "x",
+  "body": "what’s NEW:   Faster chats  ",
+  "want": "Faster chats"
+ },
+ {
+  "title": "fix(917): reply bubble width (#918)",
+  "body": "<!--\nWhat's new: one sentence a user understands\n-->\n",
+  "want": "Reply bubble width"
+ },
+ {
+  "title": "docs: registry re-dated",
+  "body": "What's new:\n",
+  "want": "Registry re-dated"
+ },
+ {
+  "title": "docs: registry re-dated",
+  "body": "What's new:\n\nWhat's new: The second line counts\n",
+  "want": "The second line counts"
+ },
+ {
+  "title": "feat(984): the Humans tab — my humans, lists",
+  "body": "",
+  "want": "The Humans tab — my humans, lists"
+ },
+ {
+  "title": "fix!: crash on launch",
+  "body": null,
+  "want": "Crash on launch"
+ },
+ {
+  "title": "#991 New chat and New group as in the prototype",
+  "body": "",
+  "want": "New chat and New group as in the prototype"
+ },
+ {
+  "title": "Chats list row in WhatsApp's geometry (#997)",
+  "body": "",
+  "want": "Chats list row in WhatsApp's geometry"
+ },
+ {
+  "title": "feat(965): WhatsApp's attach panel (#965, #962)",
+  "body": "",
+  "want": "WhatsApp's attach panel"
+ },
+ {
+  "title": "Featuring nothing: plain prose",
+  "body": "",
+  "want": "Featuring nothing: plain prose"
+ },
+ {
+  "title": "feat: tab\there",
+  "body": "",
+  "want": "Tab here"
+ },
+ {
+  "title": "x",
+  "body": "What's new: a b  c\r\n",
+  "want": "a b c"
+ },
+ {
+  "title": "x",
+  "body": "What's new: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "want": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+ },
+ {
+  "title": "fix(33): a live-location position never starts a turn; a location reads as one",
+  "body": "Intro\nWhat's new: Your agent understands a location you send it.\n",
+  "want": "Your agent understands a location you send it."
+ }
+]

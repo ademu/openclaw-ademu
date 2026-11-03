@@ -1,0 +1,49 @@
+# whats-new — the what's new feed (AdemuMLS #999): after every push to main, one message per merged PR in the team's
+# "Ademú Releases" group, saying how to update the plugin and the adc it needs. dev/whats-new/collect.py reads GitHub (the
+# push range before..sha) and ssh-send.sh hands the events to the agent host, where AdemuMLS's announce.py is this key's
+# forced command with `--source plugin`: this key can post a plugin merge and nothing else.
+name: whats-new
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+# One run per pushed sha, never cancelled: a shared group would let a later push cancel a pending run and its PRs
+# would never be announced.
+concurrency:
+  group: whats-new-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  announce:
+    name: announce merges
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Holds ANNOUNCE_SSH_KEY / ANNOUNCE_HOST / ANNOUNCE_KNOWN_HOSTS (deployment branches: main only).
+    environment: announce
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: collect the merged PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        run: python3 dev/whats-new/collect.py --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA" --before "$BEFORE" > "$RUNNER_TEMP/events.ndjson"
+
+      - name: send to the agent host
+        env:
+          ANNOUNCE_SSH_KEY: ${{ secrets.ANNOUNCE_SSH_KEY }}
+          ANNOUNCE_HOST: ${{ vars.ANNOUNCE_HOST }}
+          ANNOUNCE_KNOWN_HOSTS: ${{ vars.ANNOUNCE_KNOWN_HOSTS }}
+        run: ./dev/whats-new/ssh-send.sh "$RUNNER_TEMP/events.ndjson"
