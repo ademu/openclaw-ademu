@@ -146,7 +146,7 @@ export class LocationWatches {
       r.untilTimer = this.#d.setTimer(() => {
         r.untilTimer = undefined;
         const s = this.#d.locations.get(r.shareId);
-        this.#finish(r, strings.liveLocation.ended.until(s ? this.#d.nameOf(s) : ""));
+        this.#finish(r, strings.liveLocation.ended.until(s ? this.#d.nameOf(s) : ""), s);
       }, Math.max(0, untilMs - this.#d.now()));
     }
     // A share that already went still before the report was asked for: its checkpoint counts from when it came.
@@ -291,7 +291,7 @@ export class LocationWatches {
     const share = this.#d.locations.get(r.shareId);
     if (!share) return; // its end arrives as a change
     if (r.untilMs !== undefined && this.#d.now() >= r.untilMs) {
-      this.#finish(r, strings.liveLocation.ended.until(this.#d.nameOf(share)));
+      this.#finish(r, strings.liveLocation.ended.until(this.#d.nameOf(share)), share);
       return;
     }
     if (r.stillAt) return; // paused: the same position again is noise
@@ -332,8 +332,9 @@ export class LocationWatches {
   #enqueue(r: Report, share: Share, text: () => string): void {
     r.chain = r.chain.then(async () => {
       if (r.done || this.#stopped) return;
-      if (r.untilMs !== undefined && this.#d.now() >= r.untilMs) {
-        this.#finish(r, strings.liveLocation.ended.until(this.#d.nameOf(share)));
+      const pastUntil = () => r.untilMs !== undefined && this.#d.now() >= r.untilMs;
+      if (pastUntil()) {
+        this.#finish(r, strings.liveLocation.ended.until(this.#d.nameOf(share)), share);
         return;
       }
       if (!(await this.#d.canSee(r.conversationId, share))) {
@@ -341,6 +342,10 @@ export class LocationWatches {
         return;
       }
       if (r.done || this.#stopped) return;
+      if (pastUntil()) {
+        this.#finish(r, strings.liveLocation.ended.until(this.#d.nameOf(share)), share);
+        return;
+      }
       await this.#d.send(r.conversationId, text()).catch((err: unknown) => this.#d.log("location_report_failed", { errorClass: err instanceof Error ? err.name : typeof err }));
     });
   }

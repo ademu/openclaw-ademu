@@ -32,6 +32,8 @@ export type Share = Point & {
   lastAtMs: number;
   /** Recent ground speed in m/s (smoothed over the positions' own fix times); undefined until two fixes. */
   speedMps: number | undefined;
+  /** The fix speed is measured from: kept until the next fix is at least SPEED_MIN_INTERVAL_S later. */
+  speedFrom: (Point & { atMs: number }) | undefined;
 };
 
 /** The `get_live_locations` answer (AdemuMLS PROTOCOL.md `get_live_locations`). */
@@ -158,6 +160,7 @@ export class LiveLocations {
         lastLane: "seeded",
         lastAtMs: now,
         speedMps: undefined,
+        speedFrom: undefined,
       });
     }
     this.#asOf = validSeq(snapshot.as_of) ? snapshot.as_of : -1;
@@ -205,6 +208,7 @@ export class LiveLocations {
       lastLane: "durable",
       lastAtMs: this.#now(),
       speedMps: undefined,
+      speedFrom: { lat: b.lat as number, lon: b.lon as number, atMs: ev.created_at_ms },
     });
     this.#expire();
   }
@@ -214,10 +218,16 @@ export class LiveLocations {
     const share = this.#shares.get(normalizeId(b.target_message_id));
     if (!share || share.groupId !== normalizeId(ev.group_id) || share.sharerUserId !== normalizeId(ev.sender.user_id) || b.seq <= share.seq) return;
     const fixAtMs = finite(b.fix_at_ms) ? b.fix_at_ms : this.#now();
-    const dtS = (fixAtMs - share.fixAtMs) / 1000;
-    if (dtS >= SPEED_MIN_INTERVAL_S) {
-      const inst = distanceMeters(share, { lat: b.lat as number, lon: b.lon as number }) / dtS;
-      share.speedMps = share.speedMps === undefined ? inst : SPEED_SMOOTHING * inst + (1 - SPEED_SMOOTHING) * share.speedMps;
+    const here = { lat: b.lat as number, lon: b.lon as number };
+    const from = share.speedFrom;
+    if (!from) share.speedFrom = { ...here, atMs: fixAtMs };
+    else {
+      const dtS = (fixAtMs - from.atMs) / 1000;
+      if (dtS >= SPEED_MIN_INTERVAL_S) {
+        const inst = distanceMeters(from, here) / dtS;
+        share.speedMps = share.speedMps === undefined ? inst : SPEED_SMOOTHING * inst + (1 - SPEED_SMOOTHING) * share.speedMps;
+        share.speedFrom = { ...here, atMs: fixAtMs };
+      } else if (dtS < 0) share.speedFrom = { ...here, atMs: fixAtMs };
     }
     share.seq = b.seq;
     share.lat = b.lat as number;

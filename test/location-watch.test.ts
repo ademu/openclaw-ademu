@@ -133,6 +133,30 @@ describe("watches", () => {
     expect(x.turns[0]![2]).toContain("is about to reach home");
   });
 
+  it("eta: fixes closer than 5 s apart still give a speed (measured from an older fix)", async () => {
+    const x = world();
+    x.w.addWatch(x.owner, { kind: "eta", point: HOME, label: "home", minutes: 5 });
+    // 1 fix per second at ~10 m/s, starting 4 km out: within 5 min (3 km) after ~100 s
+    for (let i = 0; i <= 150; i++) x.loc.received(frame({ ...at(37.944 + (i * 10) / 111_000, 23.73), fix_at_ms: i * 1000 }, "live"));
+    await x.flush();
+    expect(x.turns).toHaveLength(1);
+  });
+
+  it("a report past its until never sends a plain report, even when the visibility check resolves late", async () => {
+    let release!: () => void;
+    let gate: Promise<void> = Promise.resolve();
+    const x = world({ wait: () => gate });
+    x.w.addReport(x.owner, 60_000, 1_000_000 + 60_000 + 1);
+    await x.move(37.9, 23.7);
+    gate = new Promise<void>((r) => (release = r));
+    await x.advance(60_000); // the report waits on the check, the deadline passes meanwhile
+    await x.advance(10);
+    gate = Promise.resolve();
+    release();
+    await x.advance(60_000);
+    expect(x.sent.map((s) => s[1].startsWith("⏹ Reports on Maria end here"))).toEqual([true]);
+  });
+
   it("an ended watch is checked against the ended share: no turn where it cannot be seen", async () => {
     let visible = true;
     const x = world({ visible: () => visible });
@@ -244,7 +268,7 @@ describe("reports", () => {
     x.w.addReport(x.owner, 60 * 60_000, 1_000_000 + 5 * 60_000);
     await x.move(37.9, 23.7);
     await x.advance(6 * 60_000);
-    expect(x.sent.map((s) => s[1])).toEqual(["⏹ Reports on Maria end here, as asked."]);
+    expect(x.sent.map((s) => s[1])).toEqual(["⏹ Reports on Maria end here, as asked.\nLast position: https://maps.apple.com/?ll=37.900000,23.700000"]);
   });
 
   it("nothing is sent after stop, not even a send that was waiting on the visibility check", async () => {
@@ -265,7 +289,7 @@ describe("reports", () => {
     const x = world();
     x.w.addReport(x.owner, 60_000, 1_000_000 + 2 * 60_000 + 1);
     await x.advance(4 * 60_000);
-    expect(x.sent.at(-1)![1]).toBe("⏹ Reports on Maria end here, as asked.");
+    expect(x.sent.at(-1)![1]).toMatch(/^⏹ Reports on Maria end here, as asked\.\nLast position: /);
     const n = x.sent.length;
     const { id } = x.w.addReport(x.owner, 60_000);
     expect(x.w.cancel(DM, id)).toBe(true);
