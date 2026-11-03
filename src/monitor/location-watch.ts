@@ -21,6 +21,7 @@
 // fires and before every report, and the turn's own delivery checks it again (src/monitor/ingress.ts).
 // Everything here lives in memory: it ends with the account (a gateway restart forgets watches and reports).
 import { strings } from "../i18n/strings.js";
+import { escapeRuntimeContextDelimiters } from "./content.js";
 import { normalizeId } from "../grammar.js";
 import { distanceMeters, type LiveLocations, type Point, type Share, type ShareChange } from "./locations.js";
 
@@ -35,6 +36,58 @@ export const ARRIVED_M = 100;
 export const MOVING_MPS = 0.5;
 
 export type Place = Point & { name: string };
+
+/** A report's fixed phrases (keys of `strings.liveLocation.reportPhrases`); missing ones stay English. */
+export type ReportPhrases = { -readonly [K in keyof typeof strings.liveLocation.reportPhrases]: string };
+export type PhraseKey = keyof ReportPhrases;
+export const PHRASE_KEYS = Object.keys(strings.liveLocation.reportPhrases) as PhraseKey[];
+/** The longest phrase accepted from the model. */
+export const MAX_PHRASE = 200;
+
+/**
+ * Phrases the agent gave, cleaned: known keys only, strings only, no control or format characters, no OpenClaw
+ * runtime-context delimiters, bounded. Anything else falls back to English.
+ */
+export function cleanPhrases(raw: unknown): Partial<ReportPhrases> {
+  const out: Partial<ReportPhrases> = {};
+  if (typeof raw !== "object" || raw === null) return out;
+  for (const k of PHRASE_KEYS) {
+    const v = (raw as Record<string, unknown>)[k];
+    if (typeof v !== "string") continue;
+    const t = escapeRuntimeContextDelimiters(v).replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/\s+/g, " ").trim();
+    if (t && [...t].length <= MAX_PHRASE) out[k] = t;
+  }
+  return out;
+}
+
+function fill(template: string, vars: Record<string, string>): string {
+  return template.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k]! : m));
+}
+
+/** The texts of one report, in its phrases. */
+class ReportText {
+  readonly #p: ReportPhrases;
+  constructor(phrases: Partial<ReportPhrases> = {}) {
+    this.#p = { ...strings.liveLocation.reportPhrases, ...phrases };
+  }
+  #span(ms: number): string {
+    const min = Math.round(ms / 60_000);
+    if (min < 60) return `${Math.max(1, min)} ${this.#p.min}`;
+    return `${Math.floor(min / 60)} ${this.#p.h} ${min % 60} ${this.#p.min}`;
+  }
+  line(r: { who: string; places: Array<{ name: string; m: number }>; ageMs: number; leftMs: number; map: string }): string {
+    const places = r.places.map((p) => fill(this.#p.from, { distance: strings.liveLocation.distance(p.m), place: p.name }));
+    const age = r.ageMs < 60_000 ? this.#p.just_now : fill(this.#p.ago, { time: this.#span(r.ageMs) });
+    const left = fill(this.#p.left, { time: this.#span(r.leftMs) });
+    return `📍 ${r.who}${places.length ? ` — ${places.join(", ")}` : ""} · ${age} · ${left}\n${r.map}`;
+  }
+  say(key: PhraseKey, name: string): string {
+    return fill(this.#p[key], { name });
+  }
+  lastPosition(map: string): string {
+    return `${this.#p.last_position} ${map}`;
+  }
+}
 
 export type WatchSpec =
   | { kind: "near"; point: Point; label: string; radiusM: number }
@@ -59,6 +112,8 @@ type Report = Owner & {
   stillTimer?: unknown;
   /** The serialized send chain. */
   chain: Promise<void>;
+  /** Its texts, in the phrases the agent gave (the person's language). */
+  text: ReportText;
 };
 
 export type LocationWatchesDeps = {
@@ -100,22 +155,15 @@ export class LocationWatches {
     this.#unsubscribe = deps.locations.onChange((c) => this.#changed(c));
   }
 
-  /** The text of one share as seen from a conversation (the read tool and the reports). */
-  describe(conversationId: string, share: Share): string {
+  /** The text of one share as seen from a conversation (the read tool, and the reports in their phrases). */
+  describe(conversationId: string, share: Share, text: ReportText = new ReportText()): string {
     const now = this.#d.now();
     const places = this.#d
       .places(conversationId)
       .map((p) => ({ name: p.name, m: distanceMeters(share, p) }))
       .sort((a, b) => a.m - b.m)
-      .slice(0, 3)
-      .map((p) => strings.liveLocation.fromPlace(strings.liveLocation.distance(p.m), p.name));
-    return strings.liveLocation.line({
-      who: this.#d.nameOf(share),
-      places,
-      age: strings.liveLocation.age(Math.max(0, now - share.fixAtMs)),
-      left: strings.liveLocation.left(Math.max(0, share.untilMs - now)),
-      map: mapLink(share),
-    });
+      .slice(0, 3);
+    return text.line({ who: this.#d.nameOf(share), places, ageMs: Math.max(0, now - share.fixAtMs), leftMs: Math.max(0, share.untilMs - now), map: mapLink(share) });
   }
 
   /** Sets a one-shot watch; `already` when its condition holds now (nothing is set). */
@@ -129,7 +177,7 @@ export class LocationWatches {
     return { id: w.id };
   }
 
-  addReport(owner: Owner, everyMs: number, untilMs?: number): { id: string } {
+  addReport(owner: Owner, everyMs: number, untilMs?: number, phrases: Partial<ReportPhrases> = {}): { id: string } {
     if (!this.#d.locations.get(owner.shareId)) throw new Error("unknown share");
     const r: Report = {
       ...this.#norm(owner),
@@ -139,6 +187,7 @@ export class LocationWatches {
       done: false,
       stillAt: undefined,
       chain: Promise.resolve(),
+      text: new ReportText(phrases),
     };
     this.#reports.set(r.id, r);
     this.#schedule(r);
@@ -146,13 +195,21 @@ export class LocationWatches {
       r.untilTimer = this.#d.setTimer(() => {
         r.untilTimer = undefined;
         const s = this.#d.locations.get(r.shareId);
-        this.#finish(r, strings.liveLocation.ended.until(s ? this.#d.nameOf(s) : ""), s);
+        this.#finish(r, r.text.say("until", s ? this.#d.nameOf(s) : ""), s);
       }, Math.max(0, untilMs - this.#d.now()));
     }
     // A share that already went still before the report was asked for: its checkpoint counts from when it came.
     const share = this.#d.locations.get(r.shareId);
     if (share) this.#armStillReport(r, share);
     return { id: r.id };
+  }
+
+  /** The person switched language: the report's phrases are replaced (missing ones English). */
+  updatePhrases(conversationId: string, id: string, phrases: Partial<ReportPhrases>): boolean {
+    const r = this.#reports.get(id);
+    if (!r || r.done || r.conversationId !== normalizeId(conversationId)) return false;
+    r.text = new ReportText(phrases);
+    return true;
   }
 
   list(conversationId: string): Array<{ id: string; kind: string; shareId: string }> {
@@ -202,10 +259,9 @@ export class LocationWatches {
         if (w.spec.kind === "ended") this.#fire(w, c.share, strings.liveLocation.firedWhat.ended(this.#d.nameOf(c.share)));
         else this.#dropWatch(w);
       }
-      const why = strings.liveLocation.ended;
       const reason = c.reason ?? "stopped";
-      const text = reason === "expired" ? why.expired : reason === "deleted" ? why.deleted : reason === "ended_while_away" ? why.away : why.stopped;
-      for (const r of [...this.#reports.values()].filter((x) => x.shareId === id && !x.done)) this.#finish(r, text(this.#d.nameOf(c.share)), c.share);
+      const key: PhraseKey = reason === "expired" ? "expired" : reason === "deleted" ? "deleted" : reason === "ended_while_away" ? "away" : "stopped";
+      for (const r of [...this.#reports.values()].filter((x) => x.shareId === id && !x.done)) this.#finish(r, r.text.say(key, this.#d.nameOf(c.share)), c.share);
       return;
     }
     const share = c.share;
@@ -291,11 +347,11 @@ export class LocationWatches {
     const share = this.#d.locations.get(r.shareId);
     if (!share) return; // its end arrives as a change
     if (r.untilMs !== undefined && this.#d.now() >= r.untilMs) {
-      this.#finish(r, strings.liveLocation.ended.until(this.#d.nameOf(share)), share);
+      this.#finish(r, r.text.say("until", this.#d.nameOf(share)), share);
       return;
     }
     if (r.stillAt) return; // paused: the same position again is noise
-    this.#enqueue(r, share, () => this.describe(r.conversationId, share));
+    this.#enqueue(r, share, () => this.describe(r.conversationId, share, r.text));
   }
 
   #moved(r: Report, share: Share): void {
@@ -310,7 +366,7 @@ export class LocationWatches {
         return;
       }
       r.stillAt = undefined;
-      this.#enqueue(r, share, () => strings.liveLocation.moving(this.#d.nameOf(share)));
+      this.#enqueue(r, share, () => r.text.say("moving", this.#d.nameOf(share)));
     }
     this.#armStillReport(r, share);
   }
@@ -324,7 +380,7 @@ export class LocationWatches {
       const s = this.#d.locations.get(r.shareId);
       if (!s || r.done || r.stillAt) return;
       r.stillAt = { lat: s.lat, lon: s.lon };
-      this.#enqueue(r, s, () => strings.liveLocation.still(this.#d.nameOf(s), mapLink(s)));
+      this.#enqueue(r, s, () => `${r.text.say("still", this.#d.nameOf(s))}\n${mapLink(s)}`);
     }, Math.max(0, STILL_AFTER_MS - Math.max(0, this.#d.now() - share.lastAtMs)));
   }
 
@@ -334,16 +390,16 @@ export class LocationWatches {
       if (r.done || this.#stopped) return;
       const pastUntil = () => r.untilMs !== undefined && this.#d.now() >= r.untilMs;
       if (pastUntil()) {
-        this.#finish(r, strings.liveLocation.ended.until(this.#d.nameOf(share)), share);
+        this.#finish(r, r.text.say("until", this.#d.nameOf(share)), share);
         return;
       }
       if (!(await this.#d.canSee(r.conversationId, share))) {
-        this.#finish(r, strings.liveLocation.ended.hidden(this.#d.nameOf(share)));
+        this.#finish(r, r.text.say("hidden", this.#d.nameOf(share)));
         return;
       }
       if (r.done || this.#stopped) return;
       if (pastUntil()) {
-        this.#finish(r, strings.liveLocation.ended.until(this.#d.nameOf(share)), share);
+        this.#finish(r, r.text.say("until", this.#d.nameOf(share)), share);
         return;
       }
       await this.#d.send(r.conversationId, text()).catch((err: unknown) => this.#d.log("location_report_failed", { errorClass: err instanceof Error ? err.name : typeof err }));
@@ -371,7 +427,7 @@ export class LocationWatches {
     if (lastText === undefined || this.#stopped) return;
     r.chain = r.chain.then(async () => {
       if (this.#stopped) return;
-      const where = share && (await this.#d.canSee(r.conversationId, share)) ? `\n${strings.liveLocation.lastPosition(mapLink(share))}` : "";
+      const where = share && (await this.#d.canSee(r.conversationId, share)) ? `\n${r.text.lastPosition(mapLink(share))}` : "";
       if (this.#stopped) return;
       await this.#d.send(r.conversationId, lastText + where).catch((err: unknown) => this.#d.log("location_report_failed", { errorClass: err instanceof Error ? err.name : typeof err }));
     });

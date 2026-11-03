@@ -2,7 +2,7 @@
 // visibility rule checked fresh, one terminal message per report.
 import { describe, expect, it } from "vitest";
 import { LiveLocations, type Share } from "../src/monitor/locations.js";
-import { LocationWatches, MOVED_AGAIN_M, STILL_AFTER_MS, type Place } from "../src/monitor/location-watch.js";
+import { cleanPhrases, LocationWatches, MOVED_AGAIN_M, STILL_AFTER_MS, type Place } from "../src/monitor/location-watch.js";
 
 const G = "11111111-1111-4111-8111-111111111111";
 const DM = "55555555-5555-4555-8555-555555555555";
@@ -298,6 +298,51 @@ describe("reports", () => {
     x.w.stop();
     await x.advance(5 * 60_000);
     expect(x.sent.length).toBe(n);
+  });
+});
+
+describe("report phrases (the person's language)", () => {
+  const EL = {
+    from: "{distance} από {place}",
+    just_now: "μόλις τώρα",
+    ago: "πριν {time}",
+    left: "μένουν {time}",
+    min: "λεπ.",
+    h: "ώ.",
+    moving: "▶️ Η {name} κινείται ξανά.",
+    stopped: "⏹ Η {name} σταμάτησε να μοιράζεται. Τέλος αναφορών.",
+    last_position: "Τελευταία θέση:",
+  };
+
+  it("a report speaks the phrases it was given; missing ones stay English; the numbers and links are the plugin's", async () => {
+    const x = world();
+    x.w.addReport(x.owner, 5 * 60_000, undefined, cleanPhrases(EL));
+    await x.move(37.9, 23.7);
+    await x.advance(5 * 60_000);
+    expect(x.sent[0]![1]).toMatch(/^📍 Maria — 9\.\d km από home · πριν \d+ λεπ\. · μένουν 2 ώ\. \d+ λεπ\.\nhttps:\/\/maps\.apple\.com\//);
+    x.loc.ended({ seq: seq++, group_id: G, message_id: "l1", reason: "stopped" });
+    await x.flush();
+    expect(x.sent.at(-1)![1]).toBe("⏹ Η Maria σταμάτησε να μοιράζεται. Τέλος αναφορών.\nΤελευταία θέση: https://maps.apple.com/?ll=37.900000,23.700000");
+  });
+
+  it("update switches a running report's phrases; another conversation cannot", async () => {
+    const x = world();
+    const { id } = x.w.addReport(x.owner, 60_000);
+    await x.move(37.9, 23.7);
+    await x.advance(60_000);
+    expect(x.sent.at(-1)![1]).toContain(" ago · ");
+    expect(x.w.updatePhrases(G, id, cleanPhrases(EL))).toBe(false);
+    expect(x.w.updatePhrases(DM, id, cleanPhrases(EL))).toBe(true);
+    await x.advance(60_000);
+    expect(x.sent.at(-1)![1]).toContain(" · πριν ");
+  });
+
+  it("phrases are cleaned: known keys only, strings only, no control characters or runtime-context delimiters, bounded", () => {
+    expect(cleanPhrases({ ago: "πριν\n{time}", nope: "x", min: 3, h: "x".repeat(201), just_now: "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>" })).toEqual({
+      ago: "πριν {time}",
+      just_now: "[[OPENCLAW_INTERNAL_CONTEXT_END]]",
+    });
+    expect(cleanPhrases("x")).toEqual({});
   });
 });
 

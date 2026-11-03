@@ -43,7 +43,9 @@ both together (the flag day).
     agent turn when it fires, or a report every N minutes (≥ 1). The plugin sends each report itself
     as a normal message, pauses it when the person stops (3 min of silence after a checkpoint),
     resumes it on real movement, and ends it with one last message (with the last position when the
-    conversation may still see it).
+    conversation may still see it). The agent gives the report's fixed phrases in the person's
+    language when it sets the report, and gives them again (`update`) if the person switches language.
+    Without phrases, reports are in English.
 - **Visibility.** A share is used only in a conversation whose every member can already see it.
   Memberships are read fresh every time a watch fires or a report goes out, and again before a watch
   turn's reply goes out.

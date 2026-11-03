@@ -12,7 +12,7 @@ import { Type } from "typebox";
 import { CHANNEL_ID } from "../config.js";
 import { normalizeId, normalizeTarget } from "../grammar.js";
 import { strings } from "../i18n/strings.js";
-import { MIN_REPORT_EVERY_MS, type LiveLocationsHandle, type WatchSpec } from "../monitor/location-watch.js";
+import { cleanPhrases, MIN_REPORT_EVERY_MS, PHRASE_KEYS, type LiveLocationsHandle, type WatchSpec } from "../monitor/location-watch.js";
 import type { Share } from "../monitor/locations.js";
 import { getLiveAccount, resolveOutboundAccountId } from "../outbound.js";
 
@@ -141,9 +141,9 @@ export function createWatchTool(ctx: OpenClawPluginToolContext) {
     label: "Ademú location watch",
     name: WATCH_TOOL,
     description:
-      'Watch a live location the person asked about (share_id from ademu_live_locations). set with kind: "near" (place name, or lat/lon, + radius_m — fires when the person comes that close), "eta" (place or lat/lon + minutes — fires when they are about that many minutes away at their recent pace, or arrive), "still" (minutes — fires when no new position arrives for that long: stopped, or no signal), "ended" (fires when the share ends) — each fires ONCE, as a new turn in which you tell the person who asked; or "report" (minutes ≥ 1, optional until_minutes) — the plugin itself posts where they are every N minutes, pauses when they stop, and ends with the share. list, cancel (id). Set only what the person asked for.',
+      'Watch a live location the person asked about (share_id from ademu_live_locations). set with kind: "near" (place name, or lat/lon, + radius_m — fires when the person comes that close), "eta" (place or lat/lon + minutes — fires when they are about that many minutes away at their recent pace, or arrive), "still" (minutes — fires when no new position arrives for that long: stopped, or no signal), "ended" (fires when the share ends) — each fires ONCE, as a new turn in which you tell the person who asked; or "report" (minutes ≥ 1, optional until_minutes, and phrases) — the plugin itself posts where they are every N minutes, pauses when they stop, and ends with the share. The plugin assembles each report from fixed phrases: ALWAYS pass phrases translated into the language the person writes in (keep the {placeholders} and emoji); without them it is English. If the person switches language while a report runs, call update with its id and the phrases in the new language. list, cancel (id). Set only what the person asked for.',
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("set"), Type.Literal("list"), Type.Literal("cancel")]),
+      action: Type.Union([Type.Literal("set"), Type.Literal("update"), Type.Literal("list"), Type.Literal("cancel")]),
       share_id: Type.Optional(Type.String()),
       kind: Type.Optional(Type.Union([Type.Literal("near"), Type.Literal("eta"), Type.Literal("still"), Type.Literal("ended"), Type.Literal("report")])),
       place: Type.Optional(Type.String({ description: "near / eta: a place saved with ademu_place." })),
@@ -152,7 +152,15 @@ export function createWatchTool(ctx: OpenClawPluginToolContext) {
       radius_m: Type.Optional(Type.Number({ description: `near: metres (default ${DEFAULT_RADIUS_M}).` })),
       minutes: Type.Optional(Type.Number({ description: `still: minutes without a new position (default ${DEFAULT_STILL_MIN}); eta: how many minutes away; report: every how many minutes (≥ 1).` })),
       until_minutes: Type.Optional(Type.Number({ description: "report: stop after this many minutes." })),
-      id: Type.Optional(Type.String({ description: "cancel: the id from set or list." })),
+      id: Type.Optional(Type.String({ description: "update / cancel: the id from set or list." })),
+      phrases: Type.Optional(
+        Type.Object(
+          Object.fromEntries(
+            PHRASE_KEYS.map((k) => [k, Type.Optional(Type.String({ description: `English: ${JSON.stringify(strings.liveLocation.reportPhrases[k])}` }))]),
+          ),
+          { description: "report: the report's fixed phrases in the person's language (each ≤ 200 characters)." },
+        ),
+      ),
     }),
     execute: async (_id: string, rawArgs: unknown): Promise<ToolResult> => {
       const args = (rawArgs ?? {}) as Record<string, unknown>;
@@ -161,6 +169,10 @@ export function createWatchTool(ctx: OpenClawPluginToolContext) {
       if (action === "list") {
         const items = h.watches.list(conversation);
         return text(items.length ? items.map((i) => `${i.id}: ${i.kind} on share_id=${i.shareId}`).join("\n") : "No watches or reports in this conversation.", { count: items.length });
+      }
+      if (action === "update") {
+        const id = readStringParam(args, "id")?.trim() ?? "";
+        return text(h.watches.updatePhrases(conversation, id, cleanPhrases(args.phrases)) ? `Report ${id} now uses these phrases.` : `No report ${id} in this conversation.`);
       }
       if (action === "cancel") {
         const id = readStringParam(args, "id")?.trim() ?? "";
@@ -177,7 +189,7 @@ export function createWatchTool(ctx: OpenClawPluginToolContext) {
         if (minutes === undefined || minutes * 60_000 < MIN_REPORT_EVERY_MS || minutes > MAX_MINUTES) throw new LocationToolError(strings.liveLocation.badArgs);
         const until = num(args.until_minutes);
         if (until !== undefined && (until <= 0 || until > MAX_MINUTES)) throw new LocationToolError(strings.liveLocation.badArgs);
-        const { id } = h.watches.addReport(owner, minutes * 60_000, until === undefined ? undefined : Date.now() + until * 60_000);
+        const { id } = h.watches.addReport(owner, minutes * 60_000, until === undefined ? undefined : Date.now() + until * 60_000, cleanPhrases(args.phrases));
         return text(`Report ${id} set: every ${minutes} min, ending with the share${until ? ` or in ${until} min` : ""}. Tell the person.`);
       }
       let spec: WatchSpec;

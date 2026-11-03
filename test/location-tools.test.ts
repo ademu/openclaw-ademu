@@ -83,7 +83,10 @@ describe("ademu_location_watch", () => {
     expect(await x.run(tool(), { action: "set", share_id: "l1", kind: "near", place: "home", radius_m: 500 })).toMatch(/^Watch w\d+ set \(near\)/);
     expect(await x.run(tool(), { action: "set", share_id: "l1", kind: "still" })).toMatch(/^Watch w\d+ set \(still\)/);
     expect(await x.run(tool(), { action: "set", share_id: "l1", kind: "eta", place: "Home", minutes: 5 })).toMatch(/^Watch w\d+ set \(eta\)/);
-    expect(await x.run(tool(), { action: "set", share_id: "l1", kind: "report", minutes: 5 })).toMatch(/^Report r\d+ set: every 5 min/);
+    expect(await x.run(tool(), { action: "set", share_id: "l1", kind: "report", minutes: 5, phrases: { ago: "πριν {time}" } })).toMatch(/^Report r\d+ set: every 5 min/);
+    const rid = x.watches.list(DM).find((i) => i.kind === "report")!.id;
+    expect(await x.run(tool(), { action: "update", id: rid, phrases: { ago: "{time} ago" } })).toBe(`Report ${rid} now uses these phrases.`);
+    expect(await x.run(createWatchTool(x.ctx(WORK)), { action: "update", id: rid, phrases: {} })).toMatch(/^No report/);
     expect((await x.run(tool(), { action: "list" })).split("\n")).toHaveLength(4);
     expect(await x.run(createWatchTool(x.ctx(WORK)), { action: "list" })).toBe("No watches or reports in this conversation.");
     const id = x.watches.list(DM)[0]!.id;

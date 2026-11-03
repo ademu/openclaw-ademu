@@ -136,21 +136,24 @@ export const strings = {
   // ----- live location (#33): the read tool, places, watches and the plugin's own reports -----
   liveLocation: {
     distance: (m: number) => (m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(1)} km`),
-    age: (ms: number) => (ms < 60_000 ? "just now" : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min ago` : `${Math.floor(ms / 3_600_000)} h ${Math.round((ms % 3_600_000) / 60_000)} min ago`),
-    left: (ms: number) => (ms < 3_600_000 ? `${Math.max(1, Math.round(ms / 60_000))} min left` : `${Math.floor(ms / 3_600_000)} h ${Math.round((ms % 3_600_000) / 60_000)} min left`),
-    fromPlace: (distance: string, place: string) => `${distance} from ${place}`,
-    // One report, or one share in the read tool: who, where relative to the conversation's places, how fresh, how long.
-    line: (r: { who: string; places: string[]; age: string; left: string; map: string }) =>
-      `📍 ${r.who}${r.places.length ? ` — ${r.places.join(", ")}` : ""} · ${r.age} · ${r.left}\n${r.map}`,
-    still: (who: string, map: string) => `⏸ ${who} seems to have stopped (or lost signal) — no new position for 3 min. Reports resume when they move.\n${map}`,
-    moving: (who: string) => `▶️ ${who} is moving again.`,
-    ended: {
-      stopped: (who: string) => `⏹ ${who} stopped sharing their location. Reports end here.`,
-      expired: (who: string) => `⏹ ${who}'s live location ended (its time ran out). Reports end here.`,
-      deleted: (who: string) => `⏹ ${who}'s live location was deleted. Reports end here.`,
-      away: (who: string) => `⏹ ${who}'s live location ended while this agent was offline. Reports end here.`,
-      hidden: (who: string) => `⏹ ${who}'s location can no longer be shown here (this conversation's members changed). Reports end here.`,
-      until: (who: string) => `⏹ Reports on ${who} end here, as asked.`,
+    // A report's fixed phrases in English, the default. The agent gives them in the person's language when it sets a
+    // report (and again when the person switches language); `{…}` are filled by the plugin.
+    reportPhrases: {
+      from: "{distance} from {place}",
+      just_now: "just now",
+      ago: "{time} ago",
+      left: "{time} left",
+      min: "min",
+      h: "h",
+      still: "⏸ {name} seems to have stopped (or lost signal) — no new position for 3 min. Reports resume when they move.",
+      moving: "▶️ {name} is moving again.",
+      stopped: "⏹ {name} stopped sharing their location. Reports end here.",
+      expired: "⏹ {name}'s live location ended (its time ran out). Reports end here.",
+      deleted: "⏹ {name}'s live location was deleted. Reports end here.",
+      away: "⏹ {name}'s live location ended while this agent was offline. Reports end here.",
+      hidden: "⏹ {name}'s location can no longer be shown here (this conversation's members changed). Reports end here.",
+      until: "⏹ Reports on {name} end here, as asked.",
+      last_position: "Last position:",
     },
     // The fixed line a fired watch's turn carries (the agent answers the person who set it).
     fired: (what: string) => `[location watch you were asked to set has fired: ${what}. Tell the person who asked.]`,
@@ -160,7 +163,6 @@ export const strings = {
       ended: (who: string) => `${who}'s live location ended`,
       eta: (who: string, place: string, distance: string) => `${who} is about to reach ${place} (${distance} away at their recent pace)`,
     },
-    lastPosition: (map: string) => `Last position: ${map}`,
     none: "Nobody shares a live location that can be shown in this conversation.",
     noTurn: "Live locations can only be read while answering an Ademú conversation.",
     notRunning: "This Ademú account is not running right now.",

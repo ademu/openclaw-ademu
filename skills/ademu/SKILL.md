@@ -98,7 +98,10 @@ tools below, and only the shares that everyone in this conversation can already 
     `[location watch … has fired: …]`. Tell the person who asked.
   - `report` (`minutes` ≥ 1, optional `until_minutes`) is posted by the plugin itself every N
     minutes. You are not woken for each report. It pauses when the person stops and ends with the
-    share.
+    share. The plugin builds every report from fixed `phrases`. Always pass them translated into the
+    language the person writes in, keeping the `{placeholders}` and the emoji. If the person
+    switches language while a report runs, call `update` with the report's `id` and the phrases in
+    the new language.
   - `list` shows the watches and reports of this conversation, and `cancel` removes one.
 
 ## Manners
