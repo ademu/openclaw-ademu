@@ -42,7 +42,12 @@ function locationClientFor(ctx: OpenClawPluginToolContext): LocationClient {
   throw new MyLocationToolError(strings.myLocation.notRunning);
 }
 
-/** Every member of `conversationId` is a member of `groupId` (fresh lookups; a failure is "no"). */
+/**
+ * Every member of `conversationId` is a member of `groupId` (fresh lookups; a failure is "no"). A share sent to this
+ * very conversation needs no lookup: its members are the share's audience by definition (the subset is reflexive), and
+ * the daemon passes a group's live shares only while the agent is in it — a lookup could only refuse what every
+ * member already sees.
+ */
 async function everyoneCanSee(client: LocationClient, conversationId: string, groupId: string): Promise<boolean> {
   if (normalizeId(groupId) === conversationId) return true;
   try {
