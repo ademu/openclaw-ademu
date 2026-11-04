@@ -78,11 +78,12 @@ unless they ask.
 
 ## Locations people send
 
-A location arrives as one line with its coordinates.
+A location arrives as one line with its coordinates, and the person's caption, if they wrote one, on
+the next line.
 - A pin of where the person is: `[location: 37.975521, 23.734827 (±7 m) — the sender's current position]`.
 - A pin of a place they picked on the map: `… — a place the sender picked]`.
-- A live location: `[started sharing live location until 2026-11-03T15:20:00Z: 37.975521, 23.734827 (±7 m)]`,
-  with the person's comment, if any, on the next line. The time is UTC; say it in their local time.
+- A live location: `[started sharing live location until 2026-11-03T15:20:00Z: 37.975521, 23.734827 (±7 m)]`.
+  The time is UTC; say it in their local time.
 
 - Acknowledge it in one short sentence. You can add a map link built from the coordinates:
   `https://maps.apple.com/?ll=<lat>,<lon>`. If they asked something with it ("anything good to eat

@@ -8,7 +8,8 @@ plugin bundles no daemon. Releases up to 0.1.0 pinned the exact `@ademu/adc-bin`
 ## [Unreleased]
 
 Requires adc ≥ **1.0.0** (the installed device host; the plugin bundles none) and
-`@ademu/adc-client` / `@ademu/adc-control` ≥ 1.1 (1.0 plus #941's location types) — the device session speaks **envelope v2**
+`@ademu/adc-client` / `@ademu/adc-control` ≥ 1.2 (1.0 plus #941's location types and #1032's caption) — a location's
+caption reaches the agent from adc ≥ **1.2.0** — the device session speaks **envelope v2**
 (AdemuMLS #978). A 1.0 daemon refuses older plugins and this plugin refuses an older daemon: upgrade
 both together (the flag day).
 
@@ -31,6 +32,14 @@ both together (the flag day).
   (`body.type === "media"`, `media[]` states).
 - The daemon's `services` and `protocols` replace `capabilities` everywhere the plugin looked.
 
+### Fixed (location caption, AdemuMLS #1032)
+
+- **A location's caption reaches the agent.** A pin's or a live share START's caption — the body's top-level
+  `caption`, which adc 1.2.0 passes — follows the location line on its own line, escaped like any caption, and counts
+  for the mention decision in a room (a guest's pin addressed to the agent is a turn). Before, a static pin's caption
+  was dropped, and a START's was read from `live.comment`, which no daemon sends since #1032. With adc 1.1.0 neither
+  caption arrives: upgrade adc and the plugin together.
+
 ### Fixed (location, AdemuMLS #941)
 
 - **A live location's position never starts a turn.** A daemon with #941 passes every applied
@@ -40,8 +49,7 @@ both together (the flag day).
   reaction (`DECISIONS.md` §4.29: a position never starts a turn on its own). `location_ended` is
   logged as an unknown event.
 - **A location reads as one.** A pin is a turn with its coordinates (`[location: lat, lon (±N m) — the
-  sender's current position]`, or a place the sender picked); a live share's START says until when,
-  with its comment on the next line. Before, both read as a message of an unknown kind.
+  sender's current position]`, or a place the sender picked); a live share's START says until when. Before, both read as a message of an unknown kind.
 - The skill tells the agent how to answer a location: one short acknowledgement and a map link, no
   invented address, and for a live location never a promise to follow it.
 - **`ademu_my_location`: where am I now.** The person asking gets the latest position of the live

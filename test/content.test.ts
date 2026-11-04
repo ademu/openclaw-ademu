@@ -38,16 +38,22 @@ describe("describeContent", () => {
   });
 });
 
-describe("a location (AdemuMLS #941; bodies from ipc_v2.ndjson lines 157–158)", () => {
+describe("a location (AdemuMLS #941, #1032; bodies from ipc_v2.ndjson lines 157, 158 and 166)", () => {
   const pin = { accuracy_m: 12.5, is_current: true, lat: 50.064712, lon: 19.944981, type: "location" };
-  const start = { accuracy_m: 6.5, is_current: true, lat: 37.9416, live: { comment: "On my way", until_ms: 1_793_793_600_000 }, lon: 23.7392, type: "location" };
+  const start = { accuracy_m: 6.5, caption: "On my way", is_current: true, lat: 37.9416, live: { until_ms: 1_793_793_600_000 }, lon: 23.7392, type: "location" };
+  const captioned = { caption: "By the fountain", is_current: false, lat: 40.6401, lon: 22.9444, type: "location" };
 
-  it("a pin reads its coordinates; a live share's START its end time, with the comment as its caption", () => {
+  it("a pin reads its coordinates; a live share's START its end time; either one's caption is its caption", () => {
     expect(describeContent(chat(pin))).toEqual({ kind: "location", location: { lat: 50.064712, lon: 19.944981, isCurrent: true, accuracyM: 12.5, live: undefined } });
     expect(describeContent(chat(start))).toEqual({
       kind: "location",
       location: { lat: 37.9416, lon: 23.7392, isCurrent: true, accuracyM: 6.5, live: { untilMs: 1_793_793_600_000 } },
-      comment: "On my way",
+      caption: "On my way",
+    });
+    expect(describeContent(chat(captioned))).toEqual({
+      kind: "location",
+      location: { lat: 40.6401, lon: 22.9444, isCurrent: false, accuracyM: undefined, live: undefined },
+      caption: "By the fountain",
     });
     expect(describeContent(chat({ type: "location", lat: 1, lon: 2, is_current: false }))).toEqual({
       kind: "location",
@@ -63,18 +69,24 @@ describe("a location (AdemuMLS #941; bodies from ipc_v2.ndjson lines 157–158)"
       kind: "location",
       location: { lat: 0, lon: 0, isCurrent: true, accuracyM: undefined, live: undefined },
     });
+    // A caption that is not a string is none (the daemon decoded it; checked as for media).
+    expect(describeContent(chat({ type: "location", lat: 0, lon: 0, is_current: false, caption: 7 }))).toEqual({
+      kind: "location",
+      location: { lat: 0, lon: 0, isCurrent: false, accuracyM: undefined, live: undefined },
+    });
     expect(describeContent({ protocol: "example.cursor", body: pin })).toEqual({ kind: "unknown" });
   });
 
-  it("renders a pin, a picked place and a live START; the comment follows on its own line", () => {
+  it("renders a pin, a picked place and a live START; the caption follows on its own line", () => {
     const text = (body: unknown) => {
       const c = describeContent(chat(body));
       if (c.kind === "text") throw new Error("text");
-      return bodyForAgent(c.kind === "location" ? (c.comment ?? "") : "", c);
+      return bodyForAgent(c.kind === "location" ? (c.caption ?? "") : "", c);
     };
     expect(text(pin)).toBe("[location: 50.064712, 19.944981 (±13 m) — the sender's current position]");
     expect(text({ type: "location", lat: 1, lon: 2, is_current: false })).toBe("[location: 1, 2 — a place the sender picked]");
     expect(text(start)).toBe("[started sharing live location until 2026-11-04T12:00:00Z: 37.9416, 23.7392 (±7 m)]\nOn my way");
+    expect(text(captioned)).toBe("[location: 40.6401, 22.9444 — a place the sender picked]\nBy the fountain");
   });
 
   it("a live_location position is not described as a location", () => {

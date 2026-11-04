@@ -209,11 +209,11 @@ export function startIngress(params: IngressParams): IngressHandle {
       return;
     }
     // A non-text message (a file, or a kind this plugin does not handle) is never a command; its
-    // caption (a live share's comment) still counts for the mention decision below.
+    // caption (a media's, or a location's) still counts for the mention decision below.
     const content = describeContent(ev);
     // Sender-controlled text never reaches the host with OpenClaw's runtime-context delimiters (content.ts).
     const body = escapeRuntimeContextDelimiters(
-      content.kind === "text" ? content.text : content.kind === "media" ? (content.caption ?? "") : content.kind === "location" ? (content.comment ?? "") : "",
+      content.kind === "text" ? content.text : content.kind === "media" ? (content.caption ?? "") : content.kind === "location" ? (content.caption ?? "") : "",
     );
     const commandRequested = content.kind === "text" && runtime.commands.shouldComputeCommandAuthorized(body, cfg);
     const isTextCommand = content.kind === "text" && runtime.commands.isControlCommandMessage(body, cfg);
