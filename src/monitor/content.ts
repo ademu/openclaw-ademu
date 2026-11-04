@@ -31,7 +31,7 @@ export type InboundContent =
   | { kind: "text"; text: string }
   | { kind: "media"; files: FileFacts[]; caption?: string }
   | { kind: "view_once"; type: string }
-  | { kind: "location"; location: LocationFacts; comment?: string }
+  | { kind: "location"; location: LocationFacts; caption?: string }
   | { kind: "unknown" };
 
 /** A location's coordinates; `live` = a live share's START, shared until `untilMs`. */
@@ -83,13 +83,14 @@ export function describeContent(ev: InboundFrame): InboundContent {
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
 /**
- * An `ademu.chat` `location` body (`ChatLocationBody`, AdemuMLS #941): `{lat, lon, is_current, accuracy_m?, live?:
- * {until_ms, comment?}}`. The daemon decoded it; the fields are still checked, as for media. Coordinates out of range
- * read as an unknown kind; a `live` without a valid `until_ms` reads as a pin.
+ * An `ademu.chat` `location` body (`ChatLocationBody`, AdemuMLS #941, #1032): `{lat, lon, is_current, accuracy_m?,
+ * caption?, live?: {until_ms}}` — `caption` the sender's text, a static pin's or a live START's alike. The daemon decoded
+ * it; the fields are still checked, as for media. Coordinates out of range read as an unknown kind; a `live` without a
+ * valid `until_ms` reads as a pin; a caption that is not a string is none.
  */
 function locationOf(b: ChatLocationBody): InboundContent {
   if (!finite(b.lat) || !finite(b.lon) || Math.abs(b.lat) > 90 || Math.abs(b.lon) > 180) return { kind: "unknown" };
-  const live: { until_ms?: unknown; comment?: unknown } | undefined = typeof b.live === "object" && b.live !== null ? b.live : undefined;
+  const live: { until_ms?: unknown } | undefined = typeof b.live === "object" && b.live !== null ? b.live : undefined;
   const untilMs = live && finite(live.until_ms) && live.until_ms >= 0 && live.until_ms <= MAX_DATE_MS ? live.until_ms : undefined;
   return {
     kind: "location",
@@ -100,7 +101,7 @@ function locationOf(b: ChatLocationBody): InboundContent {
       accuracyM: finite(b.accuracy_m) && b.accuracy_m >= 0 ? b.accuracy_m : undefined,
       live: untilMs !== undefined ? { untilMs } : undefined,
     },
-    ...(untilMs !== undefined && typeof live?.comment === "string" ? { comment: live.comment } : {}),
+    ...(typeof b.caption === "string" ? { caption: b.caption } : {}),
   };
 }
 
