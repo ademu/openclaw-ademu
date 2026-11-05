@@ -12,7 +12,7 @@ it up as a background service. The plugin never installs, starts on its own, sto
 - Ticks on your phone: **gray** = the device host received the message; **green** (Ademú labels it
   "read") = *OpenClaw committed to handling it*, before the model runs. It is not an "answered" signal.
 
-Minimum host: **OpenClaw ≥ 2026.8.1** (tested with 2026.9.1). Node `>=22.22.3 <23`, `>=24.15.0 <25`
+Minimum host: **OpenClaw ≥ 2026.8.1** (tested with 2026.9.2). Node `>=22.22.3 <23`, `>=24.15.0 <25`
 or `>=25.9.0` (OpenClaw's own range). macOS and
 Linux (Windows is not supported yet — the channel reports `blocked` there).
 
