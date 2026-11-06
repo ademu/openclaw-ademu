@@ -75,5 +75,8 @@
     "build": {
       "openclawVersion": "2026.9.2"
     }
+  },
+  "overrides": {
+    "undici@>=8.0.0 <8.12.2": ">=8.12.2 <9"
   }
 }
